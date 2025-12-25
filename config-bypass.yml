@@ -1,0 +1,23 @@
+devices:
+  samplerate: 44100
+  chunksize: 4096
+  capture:
+    type: CoreAudio
+    device: "BlackHole 2ch"
+    channels: 2
+  playback:
+    type: CoreAudio
+    device: "D50 III"
+    channels: 2
+
+filters:
+  volume:
+    type: Gain
+    parameters:
+      gain: 0.0
+
+pipeline:
+  - type: Filter
+    channels: [0, 1]
+    names:
+      - volume

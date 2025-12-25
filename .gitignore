@@ -1,0 +1,24 @@
+# Credentials and local config
+raspi.txt
+.env
+.DS_Store
+
+# Dependencies
+node_modules/
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/

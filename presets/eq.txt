@@ -1,0 +1,32 @@
+Filter Settings file
+
+Room EQ V5.40 Beta 103
+Dated: Oct 23, 2025 12:27:22 PM
+
+Notes:
+
+Equaliser: Generic
+L jazz acustico Oct 22
+Filter  1: ON  PK       Fc   60.90 Hz  Gain   -3.6 dB  Q  1.736
+Filter  2: ON  LS       Fc   76.00 Hz  Gain   -2.4 dB
+Filter  3: ON  PK       Fc  118.50 Hz  Gain   -5.4 dB  Q  1.451
+Filter  4: ON  PK       Fc  192.00 Hz  Gain   -2.2 dB  Q  4.245
+Filter  5: ON  PK       Fc  226.00 Hz  Gain    4.0 dB  Q  2.137
+Filter  6: ON  PK       Fc  263.00 Hz  Gain   -1.5 dB  Q  4.285
+Filter  7: ON  PK       Fc  316.00 Hz  Gain   -2.1 dB  Q  1.269
+Filter  8: ON  PK       Fc  400.00 Hz  Gain   -1.5 dB  Q  4.137
+Filter  9: ON  None   
+Filter 10: ON  None   
+Filter 11: ON  None   
+Filter 12: ON  None   
+Filter 13: ON  None   
+Filter 14: ON  None   
+Filter 15: ON  None   
+Filter 16: ON  None   
+Filter 17: ON  None   
+Filter 18: ON  None   
+Filter 19: ON  None   
+Filter 20: ON  None   
+Filter  1: ON  None      
+Filter  2: ON  None      
+

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <title>CamillaDSP Pro Control</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --bg-deep: #0a0a0b;
+            --panel-bg: #1e1e20;
+            --panel-border: #323236;
+            --accent-cyan: #00e5ff;
+            --accent-green: #76ff03;
+            --accent-red: #ff5252;
+            --text-main: #e0e0e0;
+            --text-dim: #88888c;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-deep);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(circle at 50% 0%, #1a1a1c 0%, transparent 70%),
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 100% 100%, 20px 20px, 20px 20px;
+        }
+
+        .rack-container {
+            width: 100%;
+            max-width: 500px;
+            background: var(--panel-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05);
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Decorative "Screws" */
+        .rack-container::before, .rack-container::after,
+        .rack-header::before, .rack-header::after {
+            content: '';
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: #444;
+            border-radius: 50%;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+        .rack-container::before { top: 10px; left: 10px; }
+        .rack-container::after { top: 10px; right: 10px; }
+
+        .rack-header {
+            padding: 20px;
+            background: linear-gradient(to bottom, #2a2a2d, #1e1e20);
+            border-bottom: 2px solid #000;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--text-dim);
+            font-weight: 700;
+        }
+
+        .status-led-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .status-led {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #333;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+        }
+
+        .status-led.running {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green), inset 0 1px 2px rgba(255,255,255,0.5);
+        }
+
+        .status-led.stopped {
+            background: var(--accent-red);
+            box-shadow: 0 0 10px var(--accent-red), inset 0 1px 2px rgba(255,255,255,0.5);
+        }
+
+        .rack-content {
+            padding: 30px;
+        }
+
+        .control-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        select {
+            width: 100%;
+            background: #121214;
+            color: var(--accent-cyan);
+            border: 1px solid #333;
+            padding: 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            appearance: none;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        select:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 30px;
+        }
+
+        button {
+            padding: 15px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #2d2d30;
+            color: var(--text-main);
+            box-shadow: 0 4px 0 #151517;
+            position: relative;
+            top: 0;
+        }
+
+        button:active {
+            top: 2px;
+            box-shadow: 0 2px 0 #151517;
+        }
+
+        button.start {
+            background: #2d3a2d;
+            color: var(--accent-green);
+            border: 1px solid rgba(118, 255, 3, 0.2);
+        }
+
+        button.start:hover {
+            background: #364a36;
+            box-shadow: 0 4px 0 #151517, 0 0 15px rgba(118, 255, 3, 0.1);
+        }
+
+        button.stop {
+            background: #3a2d2d;
+            color: var(--accent-red);
+            border: 1px solid rgba(255, 82, 82, 0.2);
+        }
+
+        button.stop:hover {
+            background: #4a3636;
+            box-shadow: 0 4px 0 #151517, 0 0 15px rgba(255, 82, 82, 0.1);
+        }
+
+        .console-container {
+            background: #000;
+            margin-top: 30px;
+            border-radius: 4px;
+            border: 1px solid #222;
+            padding: 2px;
+        }
+
+        .console-header {
+            background: #111;
+            padding: 5px 10px;
+            font-size: 9px;
+            color: #444;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid #222;
+        }
+
+        .log {
+            height: 120px;
+            padding: 10px;
+            overflow-y: auto;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--accent-cyan);
+            line-height: 1.4;
+            background: linear-gradient(rgba(18,18,20,0) 50%, rgba(0,0,0,0.2) 50%),
+                        linear-gradient(90deg, rgba(0,255,0,0.02), rgba(0,0,255,0.02));
+            background-size: 100% 4px, 100% 100%;
+        }
+
+        .log::-webkit-scrollbar { width: 4px; }
+        .log::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+        /* Custom Dropdown Arrow */
+        .select-wrapper { position: relative; }
+        .select-wrapper::after {
+            content: '▼';
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 10px;
+            color: var(--text-dim);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="rack-container">
+        <div class="rack-header">
+            <h1>CamillaDSP Pro</h1>
+            <div class="status-led-container">
+                <span id="status-text">Standby</span>
+                <div id="status-led" class="status-led stopped"></div>
+            </div>
+        </div>
+        
+        <div class="rack-content">
+            <div class="control-group">
+                <label>Filter Profile Selection</label>
+                <div class="select-wrapper">
+                    <select id="filterSelect">
+                        <option value="filter">FILTER (DEFAULT)</option>
+                        <option value="jazz-acustico">JAZZ ACUSTICO</option>
+                        <option value="jazz-electrico">JAZZ ELECTRICO</option>
+                        <option value="rock">ROCK / ALTERNATIVE</option>
+                        <option value="clasica">CLASSICAL / ORCHESTRAL</option>
+                        <option value="pop">POP / MODERN</option>
+                        <option value="Cantautor">CANTAUTOR / VOCAL</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label>Master Sample Rate</label>
+                <div class="select-wrapper">
+                    <select id="sampleRate">
+                        <option value="44100">44.1 KHZ</option>
+                        <option value="48000">48.0 KHZ</option>
+                        <option value="96000">96.0 KHZ</option>
+                        <option value="192000">192.0 KHZ</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="actions">
+                <button class="start" onclick="startDSP()">Engage DSP</button>
+                <button class="stop" onclick="stopDSP()">Bypass / Stop</button>
+            </div>
+
+            <div class="console-container">
+                <div class="console-header">System Debug Console</div>
+                <div class="log" id="log"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+            const entry = document.createElement('div');
+            entry.innerHTML = `<span style="color: #444">[${time}]</span> ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        async function startDSP() {
+            const filter = document.getElementById('filterSelect').value;
+            const sampleRate = document.getElementById('sampleRate').value;
+            
+            log(`Starting DSP with ${filter} @ ${sampleRate}Hz...`);
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filter, sampleRate })
+                });
+                const result = await response.json();
+                log(result.message);
+                updateStatus();
+            } catch (error) {
+                log('<span style="color: var(--accent-red)">Error:</span> ' + error.message);
+            }
+        }
+        
+        async function stopDSP() {
+            log('Disengaging DSP...');
+            try {
+                const response = await fetch('/api/stop', { method: 'POST' });
+                const result = await response.json();
+                log(result.message);
+                updateStatus();
+            } catch (error) {
+                log('<span style="color: var(--accent-red)">Error:</span> ' + error.message);
+            }
+        }
+        
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const result = await response.json();
+                const led = document.getElementById('status-led');
+                const text = document.getElementById('status-text');
+                
+                if (result.running) {
+                    led.className = 'status-led running';
+                    text.textContent = 'Active';
+                    text.style.color = 'var(--accent-green)';
+                } else {
+                    led.className = 'status-led stopped';
+                    text.textContent = 'Standby';
+                    text.style.color = 'var(--accent-red)';
+                }
+            } catch (error) {
+                // Silently fail or log sparingly
+            }
+        }
+        
+        // Polling status
+        setInterval(updateStatus, 2000);
+        updateStatus();
+        
+        log('System initialized. Ready.');
+    </script>
+</body>
+</html>
