@@ -7,7 +7,8 @@ interface Props {
     onChange: (filters: FilterParam[]) => void;
 }
 
-const BAND_COLORS = ['#00d4ff', '#7b68ee', '#ff6b9d', '#00ff88', '#ffaa00', '#ff5555'];
+const BAND_COLORS = ['var(--accent-primary)', 'var(--accent-primary)', 'var(--accent-primary)', 'var(--accent-primary)', 'var(--accent-primary)', 'var(--accent-primary)'];
+const BAND_OPACITIES = ['1', '0.9', '0.8', '0.7', '0.6', '0.5'];
 
 const PEQEditor: React.FC<Props> = ({ filters, onChange }) => {
 
@@ -35,13 +36,13 @@ const PEQEditor: React.FC<Props> = ({ filters, onChange }) => {
     return (
         <div className="flex flex-col h-full">
             {/* Header */}
-            <div className="flex items-center justify-between mb-3">
-                <span className="text-[11px] text-[#606080] uppercase font-semibold tracking-wider">
+            <div className="flex items-center justify-between mb-3 px-1">
+                <span className="text-[10px] text-themed-muted uppercase font-black tracking-widest">
                     {filters.length} Band{filters.length !== 1 ? 's' : ''} Active
                 </span>
                 <button
                     onClick={addFilter}
-                    className="flex items-center gap-1.5 text-[11px] bg-[#1a1a28] hover:bg-[#00d4ff] hover:text-black text-[#00d4ff] px-3 py-1.5 rounded-md transition-all font-medium border border-[#2a2a3e] hover:border-transparent"
+                    className="flex items-center gap-1.5 text-[10px] bg-themed-deep hover:bg-accent-primary/10 text-accent-primary px-3 py-1.5 rounded-lg transition-all font-black border border-themed-medium hover:border-accent-primary uppercase tracking-widest active:scale-95"
                 >
                     <Plus size={12} /> Add Band
                 </button>
@@ -57,28 +58,29 @@ const PEQEditor: React.FC<Props> = ({ filters, onChange }) => {
 
                 {filters.map((f, i) => {
                     const color = BAND_COLORS[i % BAND_COLORS.length];
+                    const opacity = BAND_OPACITIES[i % BAND_OPACITIES.length];
                     return (
                         <div
                             key={f.id || i}
-                            className={`flex-shrink-0 w-36 bg-[#0f0f18] border rounded-lg p-3 transition-all ${f.enabled ? 'border-[#2a2a3e]' : 'border-[#1a1a28] opacity-50'
+                            className={`flex-shrink-0 w-40 bg-themed-deep border rounded-xl p-3 transition-all ${f.enabled ? 'border-themed-medium shadow-lg' : 'border-themed-subtle opacity-40'
                                 }`}
-                            style={{ borderTopColor: f.enabled ? color : undefined, borderTopWidth: f.enabled ? '2px' : '1px' }}
+                            style={{ borderTopColor: f.enabled ? color : undefined, borderTopWidth: f.enabled ? '3px' : '1px', borderTopStyle: 'solid', opacity: f.enabled ? opacity : undefined }}
                         >
                             {/* Band header */}
                             <div className="flex items-center justify-between mb-3">
-                                <span className="text-[10px] font-bold" style={{ color }}>BAND {i + 1}</span>
+                                <span className="text-[10px] font-black tracking-widest" style={{ color }}>BAND {i + 1}</span>
                                 <div className="flex items-center gap-1">
                                     <button
                                         onClick={() => updateFilter(i, { enabled: !f.enabled })}
-                                        className={`p-1 rounded transition-colors ${f.enabled ? 'text-[#00ff88]' : 'text-[#404060]'}`}
+                                        className={`p-1.5 rounded-lg transition-colors bg-white/5 hover:bg-white/10 ${f.enabled ? 'text-accent-primary' : 'text-themed-muted'}`}
                                     >
-                                        <Power size={12} strokeWidth={2.5} />
+                                        <Power size={11} strokeWidth={3} />
                                     </button>
                                     <button
                                         onClick={() => removeFilter(i)}
-                                        className="p-1 text-[#404060] hover:text-[#ff6b9d] rounded transition-colors"
+                                        className="p-1.5 text-themed-muted hover:text-accent-danger rounded-lg transition-colors bg-white/5 hover:bg-white/10"
                                     >
-                                        <Trash2 size={12} />
+                                        <Trash2 size={11} />
                                     </button>
                                 </div>
                             </div>
@@ -87,18 +89,18 @@ const PEQEditor: React.FC<Props> = ({ filters, onChange }) => {
                             <select
                                 value={f.type}
                                 onChange={e => updateFilter(i, { type: e.target.value as any })}
-                                className="w-full mb-2 text-[10px] py-1 px-2"
+                                className="w-full mb-3 text-[10px] uppercase font-black tracking-widest"
                             >
                                 <option value="Peaking">Peak</option>
-                                <option value="Lowshelf">Low Shelf</option>
-                                <option value="Highshelf">High Shelf</option>
+                                <option value="Lowshelf">L-Shelf</option>
+                                <option value="Highshelf">H-Shelf</option>
                             </select>
 
                             {/* Freq */}
-                            <div className="mb-2">
-                                <div className="flex justify-between text-[9px] text-[#606080] mb-1">
+                            <div className="mb-3">
+                                <div className="flex justify-between text-[9px] text-themed-muted mb-1 font-black uppercase tracking-widest">
                                     <span>Freq</span>
-                                    <span className="text-[#00d4ff] font-mono">{Math.round(f.freq || 0)}Hz</span>
+                                    <span className="text-accent-primary font-mono">{Math.round(f.freq || 0)}Hz</span>
                                 </div>
                                 <input
                                     type="range"
@@ -111,10 +113,10 @@ const PEQEditor: React.FC<Props> = ({ filters, onChange }) => {
                             </div>
 
                             {/* Gain */}
-                            <div className="mb-2">
-                                <div className="flex justify-between text-[9px] text-[#606080] mb-1">
+                            <div className="mb-3">
+                                <div className="flex justify-between text-[9px] text-themed-muted mb-1 font-black uppercase tracking-widest">
                                     <span>Gain</span>
-                                    <span className="text-[#ffaa00] font-mono">{(f.gain || 0).toFixed(1)}dB</span>
+                                    <span className="text-accent-warning font-mono">{(f.gain || 0).toFixed(1)}dB</span>
                                 </div>
                                 <input
                                     type="range"
@@ -129,9 +131,9 @@ const PEQEditor: React.FC<Props> = ({ filters, onChange }) => {
 
                             {/* Q */}
                             <div>
-                                <div className="flex justify-between text-[9px] text-[#606080] mb-1">
+                                <div className="flex justify-between text-[9px] text-themed-muted mb-1 font-black uppercase tracking-widest">
                                     <span>Q</span>
-                                    <span className="font-mono">{(f.q || 1).toFixed(1)}</span>
+                                    <span className="font-mono text-themed-primary font-black">{(f.q || 1).toFixed(1)}</span>
                                 </div>
                                 <input
                                     type="range"

@@ -98,21 +98,21 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
     }, [isRunning, wsUrl, onLevelsChange]);
 
     return (
-        <div className="flex-1 w-full h-full bg-[#1a1714] border border-[#2d2820] rounded-2xl p-3 md:p-6 flex flex-col shadow-2xl relative overflow-hidden group">
+        <div className="flex-1 w-full h-full bg-themed-panel border border-themed-medium rounded-xl p-6 md:p-10 flex flex-col shadow-2xl relative overflow-hidden group">
             {/* Header / Brand Plate */}
-            <div className="flex justify-between items-center mb-2 md:mb-6 z-10">
+            <div className="flex justify-between items-center mb-6 md:mb-10 z-10">
                 <div className="flex flex-col">
-                    <div className="text-[10px] text-[#8B7355] uppercase font-black tracking-[0.3em]">
-                        Handcrafted Precision
+                    <div className="text-[10px] text-themed-muted uppercase font-black tracking-[0.3em] header-text">
+                        Analog Monitoring
                     </div>
                 </div>
-                <div className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${status === 'connected' ? 'bg-[#003322] text-[#00ff88]' : status === 'connecting' ? 'bg-[#332200] text-[#ffaa00]' : 'bg-[#331111] text-[#ff4444]'}`}>
-                    {status === 'connected' ? 'LIVE DATA' : status === 'connecting' ? 'CONNECTING...' : 'DISCONNECTED'}
+                <div className={`px-2 py-0.5 rounded-lg text-[10px] font-black tracking-widest ${status === 'connected' ? 'bg-accent-success/10 text-accent-success border border-accent-success/20' : status === 'connecting' ? 'bg-accent-warning/10 text-accent-warning border border-accent-warning/20' : 'bg-accent-danger/10 text-accent-danger border border-accent-danger/20'}`}>
+                    {status === 'connected' ? 'LIVE' : status === 'connecting' ? 'CONNECTING' : 'OFFLINE'}
                 </div>
             </div>
 
             {/* Meters Container */}
-            <div className="flex-1 flex flex-wrap items-center justify-center gap-2 md:gap-8 overflow-y-auto custom-scrollbar">
+            <div className="flex-1 flex flex-wrap items-center justify-center gap-6 md:gap-12 overflow-y-auto custom-scrollbar">
                 <div className="flex-1 min-w-[180px] max-w-[320px]">
                     <AnalogVUMeter level={levels.left} channel="L" />
                 </div>
@@ -120,9 +120,6 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                     <AnalogVUMeter level={levels.right} channel="R" />
                 </div>
             </div>
-
-            {/* Ambient Wood Texture Background (Subtle) */}
-            <div className="absolute inset-0 opacity-[0.03] pointer-events-none mix-blend-overlay bg-[url('https://www.transparenttextures.com/patterns/dark-wood.png')]" />
         </div>
     );
 };

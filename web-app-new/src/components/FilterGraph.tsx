@@ -22,15 +22,16 @@ const FilterGraph: React.FC<Props> = ({ filters, preamp }) => {
                 <AreaChart data={data} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
                     <defs>
                         <linearGradient id="peqGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="#00d4ff" stopOpacity={0.4} />
-                            <stop offset="100%" stopColor="#00d4ff" stopOpacity={0.05} />
+                            <stop offset="0%" stopColor="var(--accent-primary)" stopOpacity={0.4} />
+                            <stop offset="100%" stopColor="var(--accent-primary)" stopOpacity={0.02} />
                         </linearGradient>
                     </defs>
                     <CartesianGrid
-                        stroke="rgba(0, 212, 255, 0.08)"
+                        stroke="var(--border-subtle)"
                         vertical={true}
                         horizontal={true}
-                        strokeDasharray="0"
+                        strokeDasharray="3 3"
+                        opacity={0.3}
                     />
                     <XAxis
                         dataKey="freq"
@@ -38,44 +39,45 @@ const FilterGraph: React.FC<Props> = ({ filters, preamp }) => {
                         domain={[20, 20000]}
                         type="number"
                         tickFormatter={formatFreq}
-                        stroke="#606080"
+                        stroke="var(--text-muted)"
                         fontSize={10}
                         tickLine={false}
-                        axisLine={{ stroke: '#2a2a3e' }}
+                        axisLine={{ stroke: 'var(--border-medium)' }}
                         allowDataOverflow
                     />
                     <YAxis
                         domain={[-15, 15]}
-                        stroke="#606080"
+                        stroke="var(--text-muted)"
                         fontSize={10}
                         tickLine={false}
-                        axisLine={{ stroke: '#2a2a3e' }}
+                        axisLine={{ stroke: 'var(--border-medium)' }}
                         unit=" dB"
                         width={40}
                     />
                     <Tooltip
                         contentStyle={{
-                            backgroundColor: '#12121a',
-                            border: '1px solid #2a2a3e',
-                            borderRadius: '6px',
-                            boxShadow: '0 4px 12px rgba(0,0,0,0.8)'
+                            backgroundColor: 'var(--bg-panel)',
+                            border: '1px solid var(--border-medium)',
+                            borderRadius: 'var(--radius-standard)',
+                            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                            backdropFilter: 'blur(8px)'
                         }}
-                        itemStyle={{ color: '#00d4ff', fontSize: '11px', fontWeight: 'bold', fontFamily: 'JetBrains Mono' }}
-                        labelStyle={{ fontSize: '10px', color: '#606080', marginBottom: '2px', fontFamily: 'JetBrains Mono' }}
+                        itemStyle={{ color: 'var(--accent-primary)', fontSize: '11px', fontWeight: 'bold', fontFamily: 'JetBrains Mono' }}
+                        labelStyle={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px', fontFamily: 'JetBrains Mono' }}
                         labelFormatter={(v) => `${Math.round(v)} Hz`}
                         formatter={(value: any) => [`${Number(value).toFixed(2)} dB`, 'Gain']}
                     />
-                    <ReferenceLine y={0} stroke="#2a2a3e" strokeWidth={1} />
+                    <ReferenceLine y={0} stroke="var(--border-medium)" strokeWidth={1} />
                     <Area
                         type="monotone"
                         dataKey="gain"
-                        stroke="#00d4ff"
+                        stroke="var(--accent-primary)"
                         strokeWidth={2}
                         fill="url(#peqGradient)"
                         baseValue={0}
                         dot={false}
                         isAnimationActive={false}
-                        activeDot={{ r: 5, fill: '#00d4ff', stroke: '#fff', strokeWidth: 2 }}
+                        activeDot={{ r: 4, fill: 'var(--accent-primary)', stroke: '#fff', strokeWidth: 2 }}
                     />
                 </AreaChart>
             </ResponsiveContainer>

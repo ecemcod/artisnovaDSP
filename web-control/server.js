@@ -19,7 +19,7 @@ const roonController = require('./roon-controller');
 roonController.init();
 
 
-const PORT = 3000;
+const PORT = 3001;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
 const PRESETS_DIR = path.join(CAMILLA_ROOT, 'presets');
 
@@ -138,15 +138,20 @@ const getArtworkFromiTunes = (track, artist, album) => {
         if (!artist && !track && !album) return resolve(null);
 
         const searches = [];
-        if (track && artist) searches.push(`${track} ${artist}`);
-        if (album && artist) searches.push(`${album} ${artist}`);
+        // 1. Exact Album match (ES store for Spanish music support)
+        if (album && artist) searches.push({ term: `${album} ${artist}`, entity: 'album' });
+        // 2. Exact Track match
+        if (track && artist) searches.push({ term: `${track} ${artist}`, entity: 'song' });
+        // 3. Fallback: Any album by this artist (better than no image)
+        if (artist) searches.push({ term: artist, entity: 'album' });
 
         const trySearch = (index) => {
             if (index >= searches.length) return resolve(null);
 
-            const query = encodeURIComponent(searches[index]);
-            const entity = index === 0 && track ? 'song' : 'album';
-            const url = `https://itunes.apple.com/search?term=${query}&entity=${entity}&limit=1`;
+            const item = searches[index];
+            const query = encodeURIComponent(item.term);
+            // Default to ES store which has better coverage for user's music
+            const url = `https://itunes.apple.com/search?term=${query}&entity=${item.entity}&limit=1&country=ES`;
 
             https.get(url, (res) => {
                 let data = '';
@@ -155,6 +160,7 @@ const getArtworkFromiTunes = (track, artist, album) => {
                     try {
                         const json = JSON.parse(data);
                         if (json.results && json.results.length > 0) {
+                            // Get high res image
                             const artworkUrl = json.results[0].artworkUrl100.replace('100x100bb.jpg', '600x600bb.jpg');
                             resolve(artworkUrl);
                         } else {
@@ -427,9 +433,18 @@ app.get('/api/media/lyrics', async (req, res) => {
     }
 });
 
-// Serve Frontend
+// Serve Frontend with anti-cache headers
 const FRONTEND_DIST = path.join(CAMILLA_ROOT, 'web-app-new', 'dist');
 if (fs.existsSync(FRONTEND_DIST)) {
+    // Disable caching for all requests
+    app.use((req, res, next) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Surrogate-Control', 'no-store');
+        next();
+    });
+
     app.use(express.static(FRONTEND_DIST));
     app.get('*', (req, res) => {
         res.sendFile(path.join(FRONTEND_DIST, 'index.html'));

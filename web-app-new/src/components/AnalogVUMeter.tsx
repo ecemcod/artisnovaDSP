@@ -70,22 +70,22 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
     return (
         <div className="flex flex-col items-center w-full max-w-[320px]">
             {/* Channel Label */}
-            <div className="text-lg md:text-2xl font-bold text-amber-100 mb-2 tracking-wider">
-                {channel === 'L' ? 'LEFT' : 'RIGHT'}
+            <div className="text-[10px] font-black text-themed-muted mb-2 tracking-[0.4em] uppercase">
+                Channel {channel}
             </div>
 
             {/* Meter Face Container */}
             <div
-                className="relative w-full aspect-[280/180] rounded-lg overflow-hidden border-[3px] border-[#8B7355] shadow-[inset_0_2px_10px_rgba(0,0,0,0.8),0_4px_20px_rgba(0,0,0,0.5)]"
+                className="relative w-full aspect-[280/180] rounded-lg overflow-hidden border border-themed-subtle shadow-2xl"
                 style={{
-                    background: 'linear-gradient(135deg, #2a1810 0%, #1a0f08 50%, #0d0705 100%)',
+                    background: 'var(--bg-deep)',
                 }}
             >
-                {/* Brass bezel effect */}
+                {/* Modern subtle overlay */}
                 <div
-                    className="absolute inset-1 rounded-lg pointer-events-none"
+                    className="absolute inset-0 pointer-events-none"
                     style={{
-                        background: 'linear-gradient(180deg, rgba(139,115,85,0.3) 0%, transparent 30%)',
+                        background: 'linear-gradient(180deg, rgba(255,255,255,0.03) 0%, transparent 60%)',
                     }}
                 />
 
@@ -96,13 +96,13 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                 >
                     {/* Dial face background */}
                     <defs>
-                        <radialGradient id={`dialGradient-${channel}`} cx="50%" cy="100%" r="80%">
-                            <stop offset="0%" stopColor="#F5F0E1" />
-                            <stop offset="70%" stopColor="#E8E0C8" />
-                            <stop offset="100%" stopColor="#D4C8A8" />
+                        <radialGradient id={`dialGradient-${channel}`} cx="50%" cy="100%" r="95%">
+                            <stop offset="0%" stopColor="#e0e0ea" />
+                            <stop offset="60%" stopColor="#c0c0d0" />
+                            <stop offset="100%" stopColor="#a0a0b0" />
                         </radialGradient>
                         <filter id="dialShadow">
-                            <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.3" />
+                            <feDropShadow dx="0" dy="2" stdDeviation="2" floodOpacity="0.3" />
                         </filter>
                     </defs>
 
@@ -113,45 +113,57 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                         filter="url(#dialShadow)"
                     />
 
-                    {/* Red zone (0 to +3 dB) */}
+                    {/* Red zone (0 to +3 dB) - using var(--accent-danger) */}
                     <path
                         d={describeArc(centerX, centerY, radius - 5, dbToAngle(0) - 90, dbToAngle(3) - 90)}
                         fill="none"
-                        stroke="#cc3333"
-                        strokeWidth="15"
-                        opacity="0.8"
+                        stroke="var(--accent-danger)"
+                        strokeWidth="12"
+                        opacity="0.6"
                     />
 
                     {/* Scale marks */}
+                    {/* Main Scale Marks */}
+                    {[-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3].map((db) => {
+                        const angle = dbToAngle(db);
+                        const isMajor = db % 5 === 0 || db === 0 || db === 3;
+                        const len = isMajor ? 12 : 6;
+                        const rad = radius - 8;
+                        const x1 = centerX + rad * Math.sin((angle * Math.PI) / 180);
+                        const y1 = centerY - rad * Math.cos((angle * Math.PI) / 180);
+                        const x2 = centerX + (rad - len) * Math.sin((angle * Math.PI) / 180);
+                        const y2 = centerY - (rad - len) * Math.cos((angle * Math.PI) / 180);
+                        return (
+                            <line
+                                key={db}
+                                x1={x1}
+                                y1={y1}
+                                x2={x2}
+                                y2={y2}
+                                stroke={db >= 0 ? "#cc3333" : "#1a1a2e"}
+                                strokeWidth={isMajor ? "2" : "1"}
+                            />
+                        );
+                    })}
                     {scaleMarks.map((mark, i) => {
                         const angle = dbToAngle(mark.db);
                         const rad = (angle - 90) * Math.PI / 180;
-                        const innerR = radius - 25;
-                        const outerR = radius - 10;
                         const textR = radius - 40;
 
-                        const x1 = centerX + Math.cos(rad) * innerR;
-                        const y1 = centerY + Math.sin(rad) * innerR;
-                        const x2 = centerX + Math.cos(rad) * outerR;
-                        const y2 = centerY + Math.sin(rad) * outerR;
                         const textX = centerX + Math.cos(rad) * textR;
                         const textY = centerY + Math.sin(rad) * textR;
 
                         return (
                             <g key={i}>
-                                <line
-                                    x1={x1} y1={y1} x2={x2} y2={y2}
-                                    stroke={mark.db >= 0 ? '#aa2222' : '#333'}
-                                    strokeWidth={mark.db === 0 ? 2 : 1}
-                                />
                                 <text
                                     x={textX}
                                     y={textY}
                                     textAnchor="middle"
                                     dominantBaseline="middle"
-                                    fontSize="10"
-                                    fill={mark.db >= 0 ? '#aa2222' : '#444'}
-                                    fontWeight={mark.db === 0 ? 'bold' : 'normal'}
+                                    fontSize="9"
+                                    fill={mark.db >= 0 ? '#cc3333' : '#1a1a2e'}
+                                    fontWeight={mark.db === 0 ? '900' : '500'}
+                                    style={{ fontFamily: 'Inter, sans-serif' }}
                                 >
                                     {mark.label}
                                 </text>
@@ -162,19 +174,33 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                     {/* VU label */}
                     <text
                         x={centerX}
-                        y={centerY - 50}
+                        y={centerY - radius / 2}
                         textAnchor="middle"
-                        fontSize="18"
-                        fontWeight="bold"
-                        fill="#333"
-                        fontFamily="serif"
+                        fill="#1a1a2e"
+                        fontSize="14"
+                        fontWeight="900"
+                        className="header-text"
+                        style={{ letterSpacing: '0.2em' }}
                     >
                         VU
                     </text>
 
+                    {/* Channel Label */}
+                    <text
+                        x={centerX}
+                        y={centerY - 30}
+                        textAnchor="middle"
+                        fill="#4a4a6a"
+                        fontSize="10"
+                        fontWeight="900"
+                        style={{ letterSpacing: '0.1em' }}
+                    >
+                        CHANNEL {channel}
+                    </text>
+
                     {/* Needle pivot point */}
-                    <circle cx={centerX} cy={centerY} r="8" fill="#222" />
-                    <circle cx={centerX} cy={centerY} r="5" fill="#444" />
+                    <circle cx={centerX} cy={centerY} r="10" fill="var(--bg-deep)" stroke="var(--border-medium)" strokeWidth="1" />
+                    <circle cx={centerX} cy={centerY} r="4" fill="var(--accent-primary)" />
 
                     {/* Needle */}
                     <g transform={`rotate(${needleAngle}, ${centerX}, ${centerY})`}>
@@ -183,24 +209,26 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                             y1={centerY}
                             x2={centerX}
                             y2={centerY - radius + 15}
-                            stroke="#111"
-                            strokeWidth="3"
+                            stroke="var(--accent-primary)"
+                            strokeWidth="2"
                             strokeLinecap="round"
+                            opacity="0.9"
                         />
                         {/* Needle tip */}
-                        <polygon
-                            points={`${centerX},${centerY - radius + 15} ${centerX - 3},${centerY - radius + 30} ${centerX + 3},${centerY - radius + 30}`}
-                            fill="#111"
+                        <circle
+                            cx={centerX}
+                            cy={centerY - radius + 15}
+                            r="2"
+                            fill="var(--accent-primary)"
                         />
                     </g>
                 </svg>
 
-                {/* dB readout */}
                 <div
-                    className="absolute bottom-2 left-1/2 transform -translate-x-1/2 font-mono text-sm px-2 py-0.5 rounded"
+                    className="absolute bottom-3 left-1/2 transform -translate-x-1/2 font-mono text-[10px] px-2 py-0.5 rounded-lg border border-white/5 font-black uppercase tracking-widest"
                     style={{
-                        background: 'rgba(0,0,0,0.7)',
-                        color: level > -3 ? '#ff4444' : '#00ff88'
+                        background: 'rgba(0,0,0,0.5)',
+                        color: level > -3 ? 'var(--accent-danger)' : 'var(--accent-success)'
                     }}
                 >
                     {level > -60 ? level.toFixed(1) : '-∞'} dB
