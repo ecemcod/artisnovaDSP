@@ -10,6 +10,7 @@ interface Props {
 
 const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:1234', onLevelsChange }) => {
     const [levels, setLevels] = useState({ left: -60, right: -60 });
+    const [status, setStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -23,33 +24,28 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:1234', on
                 clearTimeout(reconnectTimeoutRef.current);
                 reconnectTimeoutRef.current = null;
             }
+            setStatus('disconnected');
         };
-
-        if (!isRunning) {
-            setLevels({ left: -60, right: -60 });
-            cleanup();
-            return;
-        }
 
         const connect = () => {
             if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
                 return;
             }
 
+            cleanup();
+            setStatus('connecting');
+            console.log('VUMeter: Connecting to', wsUrl);
+
             try {
                 const ws = new WebSocket(wsUrl);
                 wsRef.current = ws;
 
                 ws.onopen = () => {
-                    console.log('VUMeter: Connected to CamillaDSP websocket');
-                    if (reconnectTimeoutRef.current) {
-                        clearTimeout(reconnectTimeoutRef.current);
-                        reconnectTimeoutRef.current = null;
-                    }
+                    console.log('VUMeter: Connected');
+                    setStatus('connected');
                 };
 
                 ws.onmessage = (event) => {
-                    if (ws.readyState !== WebSocket.OPEN) return;
                     try {
                         const data = JSON.parse(event.data);
                         const response = data.GetCaptureSignalPeak ? data.GetCaptureSignalPeak : data;
@@ -62,18 +58,27 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:1234', on
                             setLevels(newLevels);
                             onLevelsChange?.(newLevels.left, newLevels.right);
                         }
-                    } catch { }
+                    } catch (e) { }
                 };
 
                 ws.onclose = () => {
+                    console.log('VUMeter: Closed');
                     wsRef.current = null;
+                    setStatus('disconnected');
                     if (isRunning) {
-                        reconnectTimeoutRef.current = setTimeout(connect, 1000);
+                        reconnectTimeoutRef.current = setTimeout(connect, 2000);
                     }
                 };
+
+                ws.onerror = (err) => {
+                    console.error('VUMeter: WS Error', err);
+                    ws.close();
+                };
             } catch (e) {
+                console.error('VUMeter: Error', e);
+                setStatus('disconnected');
                 if (isRunning) {
-                    reconnectTimeoutRef.current = setTimeout(connect, 1000);
+                    reconnectTimeoutRef.current = setTimeout(connect, 2000);
                 }
             }
         };
@@ -82,7 +87,7 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:1234', on
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send('"GetCaptureSignalPeak"');
             }
-        }, 50);
+        }, 100);
 
         connect();
 
@@ -101,8 +106,8 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:1234', on
                         Handcrafted Precision
                     </div>
                 </div>
-                <div className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${wsRef.current?.readyState === WebSocket.OPEN ? 'bg-[#003322] text-[#00ff88]' : 'bg-[#331111] text-[#ff4444]'}`}>
-                    {wsRef.current?.readyState === WebSocket.OPEN ? 'LIVE DATA' : 'DISCONNECTED'}
+                <div className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${status === 'connected' ? 'bg-[#003322] text-[#00ff88]' : status === 'connecting' ? 'bg-[#332200] text-[#ffaa00]' : 'bg-[#331111] text-[#ff4444]'}`}>
+                    {status === 'connected' ? 'LIVE DATA' : status === 'connecting' ? 'CONNECTING...' : 'DISCONNECTED'}
                 </div>
             </div>
 

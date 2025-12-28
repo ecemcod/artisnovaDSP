@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
 import type { FilterParam } from '../types';
 import { generateResponsePoints } from '../utils/audio-math';
 
@@ -19,7 +19,13 @@ const FilterGraph: React.FC<Props> = ({ filters, preamp }) => {
     return (
         <div style={{ width: '100%', height: '100%' }}>
             <ResponsiveContainer>
-                <LineChart data={data} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                <AreaChart data={data} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                    <defs>
+                        <linearGradient id="peqGradient" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#00d4ff" stopOpacity={0.4} />
+                            <stop offset="100%" stopColor="#00d4ff" stopOpacity={0.05} />
+                        </linearGradient>
+                    </defs>
                     <CartesianGrid
                         stroke="rgba(0, 212, 255, 0.08)"
                         vertical={true}
@@ -60,16 +66,18 @@ const FilterGraph: React.FC<Props> = ({ filters, preamp }) => {
                         formatter={(value: any) => [`${Number(value).toFixed(2)} dB`, 'Gain']}
                     />
                     <ReferenceLine y={0} stroke="#2a2a3e" strokeWidth={1} />
-                    <Line
+                    <Area
                         type="monotone"
                         dataKey="gain"
                         stroke="#00d4ff"
                         strokeWidth={2}
+                        fill="url(#peqGradient)"
+                        baseValue={0}
                         dot={false}
                         isAnimationActive={false}
                         activeDot={{ r: 5, fill: '#00d4ff', stroke: '#fff', strokeWidth: 2 }}
                     />
-                </LineChart>
+                </AreaChart>
             </ResponsiveContainer>
         </div>
     );

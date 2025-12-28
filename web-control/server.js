@@ -253,6 +253,35 @@ app.post('/api/media/prev', async (req, res) => {
         res.status(500).json({ error: 'Failed to go to previous track' });
     }
 });
+app.get('/api/media/queue', async (req, res) => {
+    try {
+        const output = await runMediaCommand('queue');
+        const queueData = JSON.parse(output);
+
+        if (queueData && queueData.queue && queueData.queue.length > 0) {
+            // Batched artwork lookup for the first 15 tracks
+            const enhancedQueue = await Promise.all(queueData.queue.slice(0, 15).map(async (item) => {
+                try {
+                    const query = encodeURIComponent(`${item.track} ${item.artist}`);
+                    const itunesRes = await axios.get(`https://itunes.apple.com/search?term=${query}&entity=song&limit=1`, { timeout: 1000 });
+                    if (itunesRes.data.results && itunesRes.data.results[0]) {
+                        return {
+                            ...item,
+                            artworkUrl: itunesRes.data.results[0].artworkUrl100.replace('100x100', '300x300')
+                        };
+                    }
+                } catch (e) { }
+                return item;
+            }));
+            res.json({ queue: enhancedQueue });
+        } else {
+            res.json(queueData);
+        }
+    } catch (e) {
+        console.error('Media queue error:', e);
+        res.json({ queue: [] });
+    }
+});
 
 // Get now playing info
 app.get('/api/media/info', async (req, res) => {

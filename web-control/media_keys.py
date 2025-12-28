@@ -122,6 +122,80 @@ def main():
             print(json.dumps(info))
         except Exception as e:
             print(json.dumps({"state": "error", "track": "", "artist": "", "album": "", "artwork": "", "error": str(e)}))
+    elif action == 'queue':
+        # Get upcoming tracks from the current playlist using AppleScript
+        import subprocess
+        import json
+        
+        script = '''
+        tell application "Music"
+            try
+                if not (exists current track) then return "STOPPED"
+                
+                set sourceObj to missing value
+                try
+                    set sourceObj to current playlist
+                on error
+                    try
+                        set sourceObj to current secondary container
+                    on error
+                        try
+                            set sourceObj to container of current track
+                        end try
+                    end try
+                end try
+                
+                if sourceObj is missing value then return "EMPTY"
+                
+                try
+                    set curIdx to index of current track
+                    set totalCount to count tracks of sourceObj
+                    
+                    if curIdx >= totalCount then return "EMPTY"
+                    
+                    set stopIdx to curIdx + 15
+                    if stopIdx > totalCount then set stopIdx to totalCount
+                    
+                    set results to {}
+                    repeat with i from (curIdx + 1) to stopIdx
+                        try
+                            set t to track i of sourceObj
+                            set end of results to (name of t & "|" & artist of t & "|" & album of t)
+                        end try
+                    end repeat
+                    
+                    if (count results) is 0 then return "EMPTY"
+                    
+                    set AppleScript's text item delimiters to "!!"
+                    return results as string
+                on error
+                    return "EMPTY"
+                end try
+            on error
+                return "ERROR"
+            end try
+        end tell
+        '''
+        
+        try:
+            result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=5)
+            output = result.stdout.strip()
+            
+            if output in ["STOPPED", "EMPTY"] or output.startswith("ERROR"):
+                print(json.dumps({"queue": []}))
+            else:
+                queue = []
+                for item in output.split('!!'):
+                    if '|' in item:
+                        parts = item.split('|')
+                        queue.append({
+                            "track": parts[0], 
+                            "artist": parts[1] if len(parts) > 1 else "",
+                            "album": parts[2] if len(parts) > 2 else ""
+                        })
+                print(json.dumps({"queue": queue}))
+        except Exception as e:
+            print(json.dumps({"queue": [], "error": str(e)}))
     else:
         print(f"Unknown action: {action}")
         sys.exit(1)

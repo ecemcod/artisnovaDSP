@@ -88,8 +88,8 @@ class DSPManager {
 
                 console.log('Starting CamillaDSP with config:', configPath);
 
-                // Spawn with websocket enabled on port 1234 for level data
-                this.process = spawn(this.dspPath, ['-p', '1234', configPath], {
+                // Spawn with websocket enabled on port 1234 for level data, listen on all interfaces
+                this.process = spawn(this.dspPath, ['-a', '0.0.0.0', '-p', '1234', configPath], {
                     cwd: this.baseDir
                 });
 
