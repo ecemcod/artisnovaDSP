@@ -45,7 +45,7 @@ const FilterGraph: React.FC<Props> = ({ filters, preamp }) => {
                         allowDataOverflow
                     />
                     <YAxis
-                        domain={[-18, 18]}
+                        domain={[-15, 15]}
                         stroke="#606080"
                         fontSize={10}
                         tickLine={false}

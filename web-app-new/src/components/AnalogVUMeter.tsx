@@ -49,15 +49,16 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
     // Scale markings for VU meter
     const scaleMarks = [
         { db: -20, label: '-20' },
+        { db: -15, label: '' },
         { db: -10, label: '-10' },
-        { db: -7, label: '-7' },
-        { db: -5, label: '-5' },
-        { db: -3, label: '-3' },
-        { db: -1, label: '-1' },
+        { db: -7, label: '' },
+        { db: -5, label: '' },
+        { db: -3, label: '' },
+        { db: -1, label: '' },
         { db: 0, label: '0' },
-        { db: 1, label: '+1' },
-        { db: 2, label: '+2' },
-        { db: 3, label: '+3' },
+        { db: 1, label: '' },
+        { db: 2, label: '' },
+        { db: 3, label: '' },
     ];
 
     const width = 280;
@@ -67,35 +68,32 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
     const radius = 120;
 
     return (
-        <div className="flex flex-col items-center">
+        <div className="flex flex-col items-center w-full max-w-[320px]">
             {/* Channel Label */}
-            <div className="text-2xl font-bold text-amber-100 mb-2 tracking-wider">
+            <div className="text-lg md:text-2xl font-bold text-amber-100 mb-2 tracking-wider">
                 {channel === 'L' ? 'LEFT' : 'RIGHT'}
             </div>
 
-            {/* Meter Face */}
+            {/* Meter Face Container */}
             <div
-                className="relative rounded-lg overflow-hidden"
+                className="relative w-full aspect-[280/180] rounded-lg overflow-hidden border-[3px] border-[#8B7355] shadow-[inset_0_2px_10px_rgba(0,0,0,0.8),0_4px_20px_rgba(0,0,0,0.5)]"
                 style={{
-                    width: `${width}px`,
-                    height: `${height}px`,
                     background: 'linear-gradient(135deg, #2a1810 0%, #1a0f08 50%, #0d0705 100%)',
-                    boxShadow: 'inset 0 2px 10px rgba(0,0,0,0.8), 0 4px 20px rgba(0,0,0,0.5)',
-                    border: '3px solid #8B7355',
-                    borderRadius: '12px'
                 }}
             >
                 {/* Brass bezel effect */}
                 <div
-                    className="absolute inset-1 rounded-lg"
+                    className="absolute inset-1 rounded-lg pointer-events-none"
                     style={{
                         background: 'linear-gradient(180deg, rgba(139,115,85,0.3) 0%, transparent 30%)',
-                        pointerEvents: 'none'
                     }}
                 />
 
                 {/* SVG Gauge */}
-                <svg width={width} height={height} className="absolute inset-0">
+                <svg
+                    viewBox={`0 0 ${width} ${height}`}
+                    className="absolute inset-0 w-full h-full"
+                >
                     {/* Dial face background */}
                     <defs>
                         <radialGradient id={`dialGradient-${channel}`} cx="50%" cy="100%" r="80%">

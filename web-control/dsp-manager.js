@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, exec, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
@@ -16,13 +16,13 @@ class DSPManager {
     }
 
     generateConfig(filterData, options = {}) {
-        const sampleRate = options.sampleRate || 44100;
+        const sampleRate = options.sampleRate || 96000;
         // bitDepth is now informational only - CoreAudio auto-selects format
 
         const config = {
             devices: {
                 samplerate: sampleRate,
-                chunksize: 1024,
+                chunksize: 4096,
                 capture: {
                     type: 'CoreAudio',
                     device: 'BlackHole 2ch',
@@ -75,12 +75,11 @@ class DSPManager {
         return yaml.dump(config);
     }
 
-    start(filterData, options = {}) {
-        return new Promise((resolve, reject) => {
-            if (this.isRunning()) {
-                this.stop();
-            }
+    async start(filterData, options = {}) {
+        // ALWAYS stop and wait before starting to ensure audio devices are released
+        await this.stop();
 
+        return new Promise((resolve, reject) => {
             try {
                 const configYaml = this.generateConfig(filterData, options);
                 const configPath = path.join(this.baseDir, 'temp_config.yml');
@@ -88,8 +87,11 @@ class DSPManager {
 
                 console.log('Starting CamillaDSP with config:', configPath);
 
-                // Spawn with websocket enabled on port 1234 for level data, listen on all interfaces
-                this.process = spawn(this.dspPath, ['-a', '0.0.0.0', '-p', '1234', configPath], {
+                const dspArgs = ['-a', '0.0.0.0', '-p', '5005', configPath];
+                console.log('Spawning:', this.dspPath, dspArgs.join(' '));
+
+                // Spawn with websocket enabled on port 5005 for level data
+                this.process = spawn(this.dspPath, dspArgs, {
                     cwd: this.baseDir
                 });
 
@@ -110,7 +112,7 @@ class DSPManager {
                 setTimeout(() => {
                     if (this.isRunning()) resolve(true);
                     else reject(new Error('Process exited immediately'));
-                }, 500);
+                }, 1000);
 
             } catch (err) {
                 reject(err);
@@ -118,7 +120,7 @@ class DSPManager {
         });
     }
 
-    stop() {
+    async stop() {
         if (this.process) {
             console.log('Stopping CamillaDSP instance...');
             this.process.kill('SIGTERM');
@@ -132,6 +134,39 @@ class DSPManager {
         } catch (e) {
             // No process found, it's fine
         }
+        // Wait for port 5005 to be released
+        await this.waitForPortRelease(5005, 3000);
+    }
+
+    waitForPortRelease(port, timeout) {
+        return new Promise((resolve) => {
+            const { execSync } = require('child_process');
+            const start = Date.now();
+
+            const check = () => {
+                try {
+                    // Check if any camilladsp process is still running
+                    const processes = execSync('pgrep -x camilladsp', { encoding: 'utf8' }).trim();
+                    if (processes) {
+                        if (Date.now() - start < timeout) {
+                            setTimeout(check, 300);
+                        } else {
+                            console.log(`CamillaDSP processes still running after ${timeout}ms, force killing`);
+                            try { execSync('pkill -9 camilladsp'); } catch (e) { }
+                            setTimeout(resolve, 1000); // Extra delay after force kill for CoreAudio
+                        }
+                    } else {
+                        console.log('All CamillaDSP processes terminated');
+                        setTimeout(resolve, 800); // Delay for CoreAudio to fully release devices
+                    }
+                } catch (e) {
+                    // pgrep returns exit code 1 if no process found - port is free
+                    console.log('No CamillaDSP processes running, port is free');
+                    setTimeout(resolve, 800); // Delay for CoreAudio to fully release devices
+                }
+            };
+            setTimeout(check, 500); // Initial delay to let SIGTERM work
+        });
     }
 }
 

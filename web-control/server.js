@@ -2,6 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+
+// Node 22+ Roon API Workaround
+global.WebSocket = require('ws');
+
 const https = require('https');
 const DSPManager = require('./dsp-manager');
 const FilterParser = require('./parser');
@@ -9,6 +13,11 @@ const FilterParser = require('./parser');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Roon Integration
+const roonController = require('./roon-controller');
+roonController.init();
+
 
 const PORT = 3000;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
@@ -83,7 +92,7 @@ app.post('/api/start', async (req, res) => {
         }
 
         const options = {
-            sampleRate: parseInt(sampleRate) || 44100,
+            sampleRate: parseInt(sampleRate) || 96000,
             bitDepth: parseInt(bitDepth) || 24
         };
 
@@ -95,8 +104,8 @@ app.post('/api/start', async (req, res) => {
 });
 
 // 5. Stop DSP
-app.post('/api/stop', (req, res) => {
-    dsp.stop();
+app.post('/api/stop', async (req, res) => {
+    await dsp.stop();
     res.json({ success: true, state: 'stopped' });
 });
 
@@ -215,8 +224,13 @@ const getLyricsFromLrcLib = (track, artist) => {
 };
 
 app.post('/api/media/playpause', async (req, res) => {
+    const source = req.query.source || req.body.source;
     try {
-        await runMediaCommand('play');
+        if (source === 'roon' && roonController.activeZoneId) {
+            await roonController.control('playpause');
+        } else {
+            await runMediaCommand('play');
+        }
         res.json({ success: true, action: 'playpause' });
     } catch (e) {
         console.error('Play/pause error:', e);
@@ -225,8 +239,13 @@ app.post('/api/media/playpause', async (req, res) => {
 });
 
 app.post('/api/media/next', async (req, res) => {
+    const source = req.query.source || req.body.source;
     try {
-        await runMediaCommand('next');
+        if (source === 'roon' && roonController.activeZoneId) {
+            await roonController.control('next');
+        } else {
+            await runMediaCommand('next');
+        }
         res.json({ success: true, action: 'next' });
     } catch (e) {
         console.error('Next track error:', e);
@@ -235,8 +254,13 @@ app.post('/api/media/next', async (req, res) => {
 });
 
 app.post('/api/media/stop', async (req, res) => {
+    const source = req.query.source || req.body.source;
     try {
-        await runMediaCommand('stop');
+        if (source === 'roon' && roonController.activeZoneId) {
+            await roonController.control('playpause');
+        } else {
+            await runMediaCommand('stop');
+        }
         res.json({ success: true, action: 'stop' });
     } catch (e) {
         console.error('Stop error:', e);
@@ -245,14 +269,36 @@ app.post('/api/media/stop', async (req, res) => {
 });
 
 app.post('/api/media/prev', async (req, res) => {
+    const source = req.query.source || req.body.source;
     try {
-        await runMediaCommand('prev');
+        if (source === 'roon' && roonController.activeZoneId) {
+            await roonController.control('prev');
+        } else {
+            await runMediaCommand('prev');
+        }
         res.json({ success: true, action: 'prev' });
     } catch (e) {
         console.error('Prev track error:', e);
         res.status(500).json({ error: 'Failed to go to previous track' });
     }
 });
+
+app.post('/api/media/seek', async (req, res) => {
+    const { position, source } = req.body;
+    try {
+        if (source === 'roon' && roonController.activeZoneId) {
+            await roonController.control('seek', position);
+        } else {
+            await runMediaCommand(`seek ${position}`);
+        }
+        res.json({ success: true, position });
+    } catch (e) {
+        console.error('Seek error:', e);
+        res.status(500).json({ error: 'Failed to seek' });
+    }
+});
+
+
 app.get('/api/media/queue', async (req, res) => {
     try {
         const output = await runMediaCommand('queue');
@@ -285,7 +331,13 @@ app.get('/api/media/queue', async (req, res) => {
 
 // Get now playing info
 app.get('/api/media/info', async (req, res) => {
+    const source = req.query.source;
     try {
+        if (source === 'roon' && roonController.activeZoneId) {
+            const info = roonController.getNowPlaying();
+            return res.json(info || { state: 'unknown' });
+        }
+
         const output = await runMediaCommand('info');
         const info = JSON.parse(output);
 
@@ -303,6 +355,22 @@ app.get('/api/media/info', async (req, res) => {
     }
 });
 
+// Roon helper routes
+app.get('/api/media/roon/zones', (req, res) => {
+    res.json(roonController.getZones());
+});
+
+app.post('/api/media/roon/select', (req, res) => {
+    const { zoneId } = req.body;
+    roonController.setActiveZone(zoneId);
+    res.json({ success: true });
+});
+
+app.get('/api/media/roon/image/:imageKey', (req, res) => {
+    roonController.getImage(req.params.imageKey, res);
+});
+
+
 // Serve artwork from fixed location
 app.get('/api/media/artwork', (req, res) => {
     const artworkPath = '/tmp/artisnova_artwork.jpg';
@@ -313,6 +381,38 @@ app.get('/api/media/artwork', (req, res) => {
         res.status(404).send('No artwork');
     }
 });
+
+// Volume Control
+app.get('/api/volume', (req, res) => {
+    exec('osascript -e "output volume of (get volume settings)"', (error, stdout, stderr) => {
+        if (error) {
+            console.error('Get volume error:', stderr);
+            return res.status(500).json({ error: 'Failed to get volume' });
+        }
+        res.json({ volume: parseInt(stdout.trim()) });
+    });
+});
+
+app.post('/api/volume', (req, res) => {
+    const { volume, source } = req.body;
+    if (volume === undefined || volume < 0 || volume > 100) {
+        return res.status(400).json({ error: 'Invalid volume level' });
+    }
+
+    if (source === 'roon' && roonController.activeZoneId) {
+        roonController.control('volume', volume);
+        return res.json({ success: true, volume });
+    }
+
+    exec(`osascript -e "set volume output volume ${volume}"`, (error, stdout, stderr) => {
+        if (error) {
+            console.error('Set volume error:', stderr);
+            return res.status(500).json({ error: 'Failed to set volume' });
+        }
+        res.json({ success: true, volume });
+    });
+});
+
 
 // Get lyrics
 app.get('/api/media/lyrics', async (req, res) => {

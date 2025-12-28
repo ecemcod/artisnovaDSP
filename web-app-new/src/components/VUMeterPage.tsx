@@ -11,7 +11,7 @@ const VUMeterPage: React.FC = () => {
     // WebSocket connection
     useEffect(() => {
         const connect = () => {
-            const ws = new WebSocket('ws://localhost:1234');
+            const ws = new WebSocket('ws://localhost:5005');
             wsRef.current = ws;
 
             ws.onmessage = (event) => {

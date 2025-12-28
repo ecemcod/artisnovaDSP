@@ -1,34 +1,37 @@
 #!/bin/bash
-
 # Artis Nova Launcher
-# This script starts the backend server and opens the UI.
-
 APP_PATH="$(cd "$(dirname "$0")/../../.." && pwd)"
 SERVER_PATH="$APP_PATH/web-control"
 LOG_FILE="$APP_PATH/ArtisNova.log"
 
-echo "Starting Artis Nova..." > "$LOG_FILE"
+echo "Launcher started at $(date)" > "$LOG_FILE"
 
-# Check if port 3000 is in use
-if lsof -Pi :3000 -sTCP:LISTEN -t >/dev/null ; then
-    echo "Port 3000 is busy. Attempting to restart..." >> "$LOG_FILE"
-    pkill -f "node $SERVER_PATH/server.js"
-    sleep 1
+# Kill existing node server if any
+pkill -f "node $SERVER_PATH/server.js" 2>/dev/null
+pkill -9 camilladsp 2>/dev/null
+
+# Create a .command file (this opens in Terminal automatically)
+RUN_COMMAND="$APP_PATH/Iniciar Artis Nova.command"
+cat <<EOF > "$RUN_COMMAND"
+#!/bin/bash
+clear
+echo "=============================="
+echo "    ARTIS NOVA SERVER"
+echo "=============================="
+# Ir a la carpeta del servidor usando la ruta de este script
+cd "\$(dirname "\$0")"
+cd web-control
+/usr/local/bin/node server.js 2>&1 | tee -a "../ArtisNova.log"
+if [ \$? -ne 0 ]; then
+    echo ""
+    echo "ERROR: El servidor se ha detenido inesperadamente."
+    read -p "Presiona Enter para cerrar esta ventana..."
 fi
+EOF
+chmod +x "$RUN_COMMAND"
 
-# Start Backend
-cd "$SERVER_PATH"
-/usr/local/bin/node server.js >> "$LOG_FILE" 2>&1 &
-SERVER_PID=$!
+# Open the server command and UI explicitly with Terminal
+open -a Terminal "$RUN_COMMAND"
+(sleep 5 && open "http://127.0.0.1:3000") &
 
-echo "Server started with PID $SERVER_PID" >> "$LOG_FILE"
-
-# Wait a moment for server to bind
-sleep 2
-
-# Open UI
-open "http://localhost:3000"
-
-# Keep the process alive so the app doesn't "quit" immediately
-# or wait for the child server
-wait $SERVER_PID
+exit 0

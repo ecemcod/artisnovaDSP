@@ -22,5 +22,7 @@
     <string>10.15</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Artis Nova needs access to BlackHole audio to apply filters through CamillaDSP.</string>
+    <key>LSUIElement</key>
+    <string>1</string>
 </dict>
 </plist>

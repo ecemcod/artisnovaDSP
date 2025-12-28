@@ -1,5 +1,5 @@
 devices:
-  samplerate: 44100
+  samplerate: 96000
   chunksize: 4096
   capture:
     type: CoreAudio

@@ -73,6 +73,8 @@ def main():
                     set trackName to name of current track
                     set artistName to artist of current track
                     set albumName to album of current track
+                    set trackDuration to duration of current track
+                    set playerPos to player position
                     
                     -- Get state
                     if player state is playing then
@@ -94,13 +96,13 @@ def main():
                         set artworkPath to ""
                     end try
                     
-                    return playState & "|" & trackName & "|" & artistName & "|" & albumName & "|" & artworkPath
+                    return playState & "|" & trackName & "|" & artistName & "|" & albumName & "|" & artworkPath & "|" & trackDuration & "|" & playerPos
                 else
-                    return "stopped||||"
+                    return "stopped||||||"
                 end if
             end tell
         on error errMsg
-            return "unknown||||"
+            return "unknown||||||"
         end try
         '''
         
@@ -115,13 +117,24 @@ def main():
                 artist = parts[2] if len(parts) > 2 else ''
                 album = parts[3] if len(parts) > 3 else ''
                 artwork = parts[4] if len(parts) > 4 else ''
-                info = {"state": state, "track": track, "artist": artist, "album": album, "artwork": artwork}
+                duration = parts[5].replace(',', '.') if len(parts) > 5 else '0'
+                position = parts[6].replace(',', '.') if len(parts) > 6 else '0'
+                
+                info = {
+                    "state": state, 
+                    "track": track, 
+                    "artist": artist, 
+                    "album": album, 
+                    "artwork": artwork,
+                    "duration": float(duration) if duration else 0,
+                    "position": float(position) if position else 0
+                }
             else:
-                info = {"state": "unknown", "track": "", "artist": "", "album": "", "artwork": "", "note": output}
+                info = {"state": "unknown", "track": "", "artist": "", "album": "", "artwork": "", "duration": 0, "position": 0, "note": output}
             
             print(json.dumps(info))
         except Exception as e:
-            print(json.dumps({"state": "error", "track": "", "artist": "", "album": "", "artwork": "", "error": str(e)}))
+            print(json.dumps({"state": "error", "track": "", "artist": "", "album": "", "artwork": "", "duration": 0, "position": 0, "error": str(e)}))
     elif action == 'queue':
         # Get upcoming tracks from the current playlist using AppleScript
         import subprocess
@@ -196,6 +209,14 @@ def main():
                 print(json.dumps({"queue": queue}))
         except Exception as e:
             print(json.dumps({"queue": [], "error": str(e)}))
+    elif action == 'seek':
+        if len(sys.argv) < 3:
+            print("Usage: python3 media_keys.py seek [seconds]")
+            sys.exit(1)
+        import subprocess
+        pos = sys.argv[2]
+        subprocess.run(['osascript', '-e', f'tell application "Music" to set player position to {pos}'])
+        print(f"Seeked to {pos}s")
     else:
         print(f"Unknown action: {action}")
         sys.exit(1)

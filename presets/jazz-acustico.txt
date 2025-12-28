@@ -1,8 +1,4 @@
-# Topping D50 III Parametric EQ - Jazz Acústico
-# Base + ajustes de aire y calidez
-
 Preamp: -3.0 dB
-
 Filter 1: ON LS 60Hz +2.5dB Q 0.70
 Filter 2: ON PK 95Hz -5.5dB Q 1.00
 Filter 3: ON HS 10000Hz +2.0dB Q 0.70

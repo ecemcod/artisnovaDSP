@@ -12,6 +12,10 @@
     "cors": "^2.8.5",
     "express": "^4.22.1",
     "js-yaml": "^4.1.1",
+    "node-roon-api": "github:roonlabs/node-roon-api",
+    "node-roon-api-browse": "github:roonlabs/node-roon-api-browse",
+    "node-roon-api-image": "github:roonlabs/node-roon-api-image",
+    "node-roon-api-transport": "github:roonlabs/node-roon-api-transport",
     "ws": "^8.18.3"
   }
 }

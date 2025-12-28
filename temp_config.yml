@@ -1,6 +1,6 @@
 devices:
-  samplerate: 44100
-  chunksize: 1024
+  samplerate: 96000
+  chunksize: 4096
   capture:
     type: CoreAudio
     device: BlackHole 2ch
@@ -19,7 +19,7 @@ filters:
     parameters:
       type: Peaking
       freq: 95
-      gain: -11.5
+      gain: -12
       q: 1
   filter2:
     type: Biquad
