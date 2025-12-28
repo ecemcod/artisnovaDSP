@@ -19,7 +19,7 @@ filters:
     parameters:
       type: Peaking
       freq: 95
-      gain: -12
+      gain: -5.5
       q: 1
   filter2:
     type: Biquad
@@ -39,23 +39,23 @@ filters:
     type: Biquad
     parameters:
       type: Peaking
-      freq: 120
-      gain: 1.8
-      q: 1
+      freq: 110
+      gain: 1.5
+      q: 0.9
   filter5:
     type: Biquad
     parameters:
       type: Peaking
       freq: 2500
-      gain: 1.5
+      gain: 2
       q: 1
   filter6:
     type: Biquad
     parameters:
       type: Peaking
-      freq: 8000
-      gain: 2
-      q: 0.9
+      freq: 7000
+      gain: 1.5
+      q: 0.8
 pipeline:
   - type: Filter
     channels:
