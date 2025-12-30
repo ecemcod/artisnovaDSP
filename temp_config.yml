@@ -9,10 +9,15 @@ devices:
     type: CoreAudio
     device: D50 III
     channels: 2
-filters: {}
+filters:
+  volume:
+    type: Gain
+    parameters:
+      gain: 0
 pipeline:
   - type: Filter
     channels:
       - 0
       - 1
-    names: []
+    names:
+      - volume

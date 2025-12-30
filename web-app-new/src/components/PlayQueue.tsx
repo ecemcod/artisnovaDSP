@@ -1,7 +1,9 @@
 import React from 'react';
 import { ListMusic, Music2 } from 'lucide-react';
+import axios from 'axios';
 
 interface QueueItem {
+    id?: string;
     track: string;
     artist: string;
     album?: string;
@@ -10,9 +12,28 @@ interface QueueItem {
 
 interface Props {
     queue: QueueItem[];
+    mediaSource: string;
 }
 
-const PlayQueue: React.FC<Props> = ({ queue }) => {
+const API_HOST = window.location.hostname;
+const API_URL = `http://${API_HOST}:3001`;
+
+const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
+    const handlePlayItem = async (item: QueueItem, index: number) => {
+        // Roon needs ID, Apple needs Index
+        if (mediaSource === 'roon' && !item.id) return;
+
+        try {
+            await axios.post(`${API_URL}/media/playqueue`, {
+                id: item.id,
+                source: mediaSource,
+                index: index
+            });
+        } catch (e) {
+            console.error('Failed to play queue item:', e);
+        }
+    };
+
     return (
         <div className="flex-1 w-full h-full bg-themed-panel border border-themed-medium rounded-xl flex flex-col shadow-2xl overflow-hidden group">
             {/* Header */}
@@ -36,37 +57,50 @@ const PlayQueue: React.FC<Props> = ({ queue }) => {
                         <p className="text-[10px] font-black uppercase tracking-widest">Queue empty</p>
                     </div>
                 ) : (
-                    <div className="space-y-1">
+                    <div className="space-y-[2px]">
                         {queue.map((item, i) => (
                             <div
                                 key={i}
-                                className="p-2 rounded-lg hover:bg-white/5 transition-all border border-transparent hover:border-themed-subtle group/item flex items-center gap-3"
+                                onClick={() => handlePlayItem(item, i)}
+                                className={`py-1 px-2 rounded-lg transition-all border border-transparent group/item flex items-center gap-2 hover:bg-white/5 cursor-pointer hover:border-themed-subtle`}
                             >
                                 <div className="text-[9px] font-mono text-themed-muted/50 w-4 text-center">{i + 1}</div>
 
                                 {/* Small Artwork */}
-                                <div className="w-10 h-10 rounded-lg bg-themed-deep border border-themed-medium overflow-hidden flex-shrink-0 shadow-lg group-hover/item:border-accent-primary/30 transition-colors">
+                                <div
+                                    className="rounded bg-themed-deep border border-themed-medium overflow-hidden flex-shrink-0 shadow-sm group-hover/item:border-accent-primary/30 transition-colors"
+                                    style={{ width: 28, height: 28, minWidth: 28 }}
+                                >
                                     {item.artworkUrl ? (
-                                        <img src={item.artworkUrl} alt="" className="w-full h-full object-cover" />
+                                        <img
+                                            src={item.artworkUrl.startsWith('http') ? item.artworkUrl : `${API_URL}${item.artworkUrl}`}
+                                            alt=""
+                                            className="w-full h-full object-cover"
+                                        />
                                     ) : (
                                         <div className="w-full h-full flex items-center justify-center text-themed-muted/20">
-                                            <Music2 size={16} strokeWidth={1.5} style={{ color: '#ffffff' }} />
+                                            <Music2 size={12} strokeWidth={1.5} style={{ color: '#ffffff' }} />
                                         </div>
                                     )}
                                 </div>
 
-                                <div className="flex-1 min-w-0">
-                                    <h4 className="text-xs font-black text-themed-primary/90 truncate group-hover/item:text-accent-primary transition-colors">
+                                <div className="flex-1 min-w-0 flex flex-col justify-center leading-none">
+                                    <h4 className="text-[11px] font-black text-themed-primary/90 truncate group-hover/item:text-accent-primary transition-colors mb-[1px]">
                                         {item.track}
                                     </h4>
-                                    <p className="text-[10px] text-accent-primary font-black truncate opacity-80 uppercase tracking-tight">
-                                        {item.artist}
-                                    </p>
-                                    {item.album && (
-                                        <p className="text-[8px] text-themed-muted font-bold truncate uppercase tracking-widest opacity-60">
-                                            {item.album}
+                                    <div className="flex items-center gap-1.5 opacity-80">
+                                        <p className="text-[9px] text-accent-primary font-black truncate uppercase tracking-tight">
+                                            {item.artist}
                                         </p>
-                                    )}
+                                        {item.album && (
+                                            <>
+                                                <span className="text-[8px] text-themed-muted">•</span>
+                                                <p className="text-[8px] text-themed-muted font-bold truncate uppercase tracking-widest opacity-60">
+                                                    {item.album}
+                                                </p>
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         ))}

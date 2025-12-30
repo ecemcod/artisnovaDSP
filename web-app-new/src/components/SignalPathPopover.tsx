@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { X, CheckCircle2, Info, Settings2, Target, Speaker, Zap, Asterisk } from 'lucide-react';
+import { CheckCircle2, Info, Settings2, Target, Speaker, Zap, Asterisk } from 'lucide-react';
 
 interface SignalNode {
     type: string;

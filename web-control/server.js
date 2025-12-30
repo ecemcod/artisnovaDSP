@@ -407,9 +407,10 @@ const { exec } = require('child_process');
 
 const MEDIA_SCRIPT = path.join(__dirname, 'media_keys.py');
 
-const runMediaCommand = (action) => {
+const runMediaCommand = (action, args = []) => {
     return new Promise((resolve, reject) => {
-        exec(`python3 "${MEDIA_SCRIPT}" ${action}`, (error, stdout, stderr) => {
+        const argsStr = args.length > 0 ? ' ' + args.join(' ') : '';
+        exec(`python3 "${MEDIA_SCRIPT}" ${action}${argsStr}`, (error, stdout, stderr) => {
             if (error) {
                 console.error('Media key error:', stderr || error.message);
                 reject(error);
@@ -470,14 +471,14 @@ const getLyricsFromLrcLib = async (track, artist) => {
 
     // 1. Less aggressive cleaning
     let cleanTrack = track
-        .replace(/\s*\([^)]*(Version|Remaster|Explicit|Deluxe|Edition|Live|Recorded|Remix|Single|EP)[^)]*\)/gi, '')
-        .replace(/\s*\[[^\]]*(Version|Remaster|Explicit|Deluxe|Edition|Live|Recorded|Remix|Single|EP)[^\]]*\]/gi, '')
-        .replace(/\s*- (Live|Remaster|Remix|Single|EP)$/gi, '')
+        .replace(/\s*\([^)]*(Version|Remaster|Explicit|Deluxe|Edition|Live|Recorded|Remix|Single|EP|Anniversary|Demo|Take|Alternate|Acoustic|Edit|Mix)[^)]*\)/gi, '')
+        .replace(/\s*\[[^\]]*(Version|Remaster|Explicit|Deluxe|Edition|Live|Recorded|Remix|Single|EP|Anniversary|Demo|Take|Alternate|Acoustic|Edit|Mix)[^\]]*\]/gi, '')
+        .replace(/\s*- (Live|Remaster|Remix|Single|EP|Anniversary|Demo|Take|Alternate|Acoustic|Edit|Mix)$/gi, '')
         .split(' - ')[0] // Take first part if there's a dash like "Song Name - Live"
         .trim();
 
     let cleanArtist = artist
-        .split(/[,&]/)[0] // Take first artist if multiple
+        .split(/[,&/]/)[0] // Take first artist if multiple (comma, ampersand, slash)
         .replace(/\s*\(feat\..*?\)/gi, '')
         .replace(/\s*\(ft\..*?\)/gi, '')
         .replace(/\s*feat\..*?$/gi, '')
@@ -507,6 +508,9 @@ const getLyricsFromLrcLib = async (track, artist) => {
         }
     };
 
+    // Helper to check valid result
+    const isValid = (item) => item && (item.plainLyrics || item.syncedLyrics || item.instrumental);
+
     // Strategy A: Direct Get (Artist + Track)
     console.log(`Lyrics: [Strategy A] Trying Get for "${cleanArtist}" - "${cleanTrack}"`);
     let data = await fetchLyrics('https://lrclib.net/api/get', {
@@ -514,7 +518,7 @@ const getLyricsFromLrcLib = async (track, artist) => {
         track_name: cleanTrack
     });
 
-    if (data && (data.plainLyrics || data.syncedLyrics)) {
+    if (isValid(data)) {
         console.log(`Lyrics: Strategy A Success`);
         return { plain: data.plainLyrics, synced: data.syncedLyrics, instrumental: data.instrumental };
     }
@@ -534,7 +538,7 @@ const getLyricsFromLrcLib = async (track, artist) => {
             cleanTrack.toLowerCase().includes(item.trackName.toLowerCase())
         ) || searchData[0];
 
-        if (bestMatch && (bestMatch.plainLyrics || bestMatch.syncedLyrics)) {
+        if (isValid(bestMatch)) {
             console.log(`Lyrics: Strategy B Success (Best Match: ${bestMatch.artistName} - ${bestMatch.trackName})`);
             return { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
         }
@@ -548,7 +552,7 @@ const getLyricsFromLrcLib = async (track, artist) => {
     });
     if (Array.isArray(rawData) && rawData.length > 0) {
         const match = rawData[0];
-        if (match && (match.plainLyrics || match.syncedLyrics)) {
+        if (isValid(match)) {
             console.log(`Lyrics: Strategy C Success`);
             return { plain: match.plainLyrics, synced: match.syncedLyrics, instrumental: match.instrumental };
         }
@@ -568,8 +572,30 @@ const getLyricsFromLrcLib = async (track, artist) => {
             const match = fuzzyData.find(item =>
                 item.trackName.toLowerCase().includes(trackWords[0].toLowerCase())
             );
-            if (match && (match.plainLyrics || match.syncedLyrics)) {
+            if (isValid(match)) {
                 console.log(`Lyrics: Strategy D Success`);
+                return { plain: match.plainLyrics, synced: match.syncedLyrics, instrumental: match.instrumental };
+            }
+        }
+    }
+
+    console.log(`Lyrics: Strategy D Failed`);
+
+    // Strategy E: Aggressive Clean (Remove ALL content in parentheses/brackets)
+    // Use this only as last resort to handle "Song Name (20th Anniversary Deluxe)" where keywords might be missed
+    const aggressivelyCleanTrack = cleanTrack.replace(/\s*\(.*?\)/g, '').replace(/\s*\[.*?\]/g, '').trim();
+    if (aggressivelyCleanTrack !== cleanTrack && aggressivelyCleanTrack.length > 2) {
+        console.log(`Lyrics: Strategy E (Aggressive Strip) for "${cleanArtist} ${aggressivelyCleanTrack}"`);
+        let aggressiveData = await fetchLyrics('https://lrclib.net/api/search', {
+            q: `${cleanArtist} ${aggressivelyCleanTrack}`
+        });
+
+        if (Array.isArray(aggressiveData) && aggressiveData.length > 0) {
+            const match = aggressiveData.find(item =>
+                item.trackName.toLowerCase().includes(aggressivelyCleanTrack.toLowerCase())
+            );
+            if (isValid(match)) {
+                console.log(`Lyrics: Strategy E Success`);
                 return { plain: match.plainLyrics, synced: match.syncedLyrics, instrumental: match.instrumental };
             }
         }
@@ -654,15 +680,48 @@ app.post('/api/media/seek', async (req, res) => {
     }
 });
 
+app.post('/api/media/playqueue', async (req, res) => {
+    const { id, source, index } = req.body;
+    console.log(`Server: PlayQueue request Source=${source} ID=${id} Index=${index}`);
+
+    try {
+        if (source === 'roon' && roonController.activeZoneId) {
+            roonController.playQueueItem(id);
+            res.json({ success: true });
+        } else if (source === 'apple') {
+            if (index === undefined || index === null) {
+                return res.status(400).json({ error: 'Index required for Apple Music' });
+            }
+            // Use media_keys.py to play by relative index
+            const result = await runMediaCommand('play_queue_item', [index]);
+            console.log('Apple Play Queue Result:', result);
+            res.json({ success: true, result });
+        } else {
+            res.json({ success: false, error: 'Not supported for this source' });
+        }
+    } catch (e) {
+        console.error('Play queue item error:', e);
+        res.status(500).json({ error: 'Failed to play queue item' });
+    }
+});
+
 
 app.get('/api/media/queue', async (req, res) => {
+    const source = req.query.source || 'apple';
+    console.log(`Server: Fetching queue for source: ${source}`);
+
     try {
+        if (source === 'roon') {
+            const queue = roonController.getQueue();
+            return res.json({ queue });
+        }
+
         const output = await runMediaCommand('queue');
         const queueData = JSON.parse(output);
 
         if (queueData && queueData.queue && queueData.queue.length > 0) {
-            // Batched artwork lookup for the first 15 tracks
-            const enhancedQueue = await Promise.all(queueData.queue.slice(0, 15).map(async (item) => {
+            // Batched artwork lookup for the first 50 tracks (only for non-Roon to avoid overhead)
+            const enhancedQueue = await Promise.all(queueData.queue.slice(0, 50).map(async (item) => {
                 try {
                     const query = encodeURIComponent(`${item.track} ${item.artist}`);
                     const itunesRes = await axios.get(`https://itunes.apple.com/search?term=${query}&entity=song&limit=1`, { timeout: 1000 });
@@ -855,6 +914,29 @@ app.get('/api/hostname', (req, res) => {
     res.json({ hostname: os.hostname() });
 });
 
+// Get lyrics
+app.get('/api/media/lyrics', async (req, res) => {
+    const { track, artist } = req.query;
+    if (!track || !artist) return res.status(400).json({ error: 'Missing track or artist' });
+
+    // Improved cleaner: removes (feat. ...), [feat. ...], (ft. ...), etc.
+    const cleanTrack = track
+        .replace(/\s*[\(\[]\s*(feat|ft|featuring|with)\.?\s+[^)\]]+[\)\]]/gi, '') // Remove (feat. X)
+        .replace(/\s*[\(\[]\s*remix\s*[\)\]]/gi, '') // Remove (Remix)
+        .replace(/\s*[\(\[]\s*live\s*[\)\]]/gi, '') // Remove (Live)
+        .replace(/\s*-\s*.*remix.*/gi, '') // Remove " - X Remix"
+        .trim();
+
+    const cleanArtist = artist.split(',')[0].trim();
+
+    try {
+        const lyrics = await getLyricsFromLrcLib(cleanTrack, cleanArtist);
+        res.json(lyrics || { error: 'Lyrics not found' });
+    } catch (e) {
+        res.status(500).json({ error: 'Failed to fetch lyrics' });
+    }
+});
+
 // Volume Control
 app.get('/api/volume', (req, res) => {
     exec('osascript -e "output volume of (get volume settings)"', (error, stdout, stderr) => {
@@ -886,19 +968,6 @@ app.post('/api/volume', (req, res) => {
     });
 });
 
-
-// Get lyrics
-app.get('/api/media/lyrics', async (req, res) => {
-    const { track, artist } = req.query;
-    if (!track || !artist) return res.status(400).json({ error: 'Missing track or artist' });
-
-    try {
-        const lyrics = await getLyricsFromLrcLib(track, artist);
-        res.json(lyrics || { error: 'Lyrics not found' });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to fetch lyrics' });
-    }
-});
 
 // Serve Frontend with anti-cache headers
 const FRONTEND_DIST = path.join(CAMILLA_ROOT, 'web-app-new', 'dist');

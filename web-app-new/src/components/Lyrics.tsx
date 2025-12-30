@@ -35,22 +35,32 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
                 ref={scrollRef}
                 className="flex-1 overflow-y-auto px-6 md:px-32 py-12 custom-scrollbar relative"
             >
-                <div className="absolute top-0 left-0 w-full h-16 bg-gradient-to-b from-themed-panel to-transparent pointer-events-none z-10" />
+                {lyrics === "[INSTRUMENTAL]" ? (
+                    <div className="h-full flex flex-col items-center justify-center -mt-12 text-center opacity-60">
+                        <div className="text-6xl mb-6">♪</div>
+                        <h2 className="text-2xl font-black uppercase tracking-widest mb-2 text-themed-primary">Instrumental</h2>
+                        <p className="text-sm font-medium text-themed-muted">Music without words</p>
+                    </div>
+                ) : (
+                    <>
+                        <div className="absolute top-0 left-0 w-full h-16 bg-gradient-to-b from-themed-panel to-transparent pointer-events-none z-10" />
 
-                <div className="space-y-10">
-                    {lyrics.split('\n').map((line, i) => (
-                        <p
-                            key={i}
-                            className={`text-xl md:text-3xl font-black leading-tight transition-all duration-300 text-center uppercase tracking-tight ${line.trim() ? 'text-themed-primary/60 hover:text-themed-primary hover:scale-105' : 'h-8'
-                                }`}
-                        >
-                            {line}
-                        </p>
-                    ))}
-                </div>
+                        <div className="space-y-10">
+                            {lyrics.split('\n').map((line, i) => (
+                                <p
+                                    key={i}
+                                    className={`text-xl md:text-3xl font-black leading-tight transition-all duration-300 text-center tracking-tight ${line.trim() ? 'text-themed-primary/60 hover:text-themed-primary hover:scale-105' : 'h-8'
+                                        }`}
+                                >
+                                    {line}
+                                </p>
+                            ))}
+                        </div>
 
-                <div className="h-24" /> {/* Spacer at bottom */}
-                <div className="absolute bottom-0 left-0 w-full h-20 bg-gradient-to-t from-themed-panel to-transparent pointer-events-none z-10" />
+                        <div className="h-24" /> {/* Spacer at bottom */}
+                        <div className="absolute bottom-0 left-0 w-full h-20 bg-gradient-to-t from-themed-panel to-transparent pointer-events-none z-10" />
+                    </>
+                )}
             </div>
 
             <div className="p-4 bg-themed-deep/50 border-t border-themed-subtle text-[9px] text-themed-muted font-black text-center uppercase tracking-widest">

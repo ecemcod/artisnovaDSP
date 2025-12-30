@@ -1,6 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import AnalogVUMeter from './AnalogVUMeter';
-import { X } from 'lucide-react';
+import { } from 'lucide-react';
 
 interface Props {
     isOpen: boolean;

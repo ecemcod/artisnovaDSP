@@ -145,47 +145,32 @@ def main():
             try
                 if not (exists current track) then return "STOPPED"
                 
-                set sourceObj to missing value
-                try
-                    set sourceObj to current playlist
-                on error
-                    try
-                        set sourceObj to current secondary container
-                    on error
-                        try
-                            set sourceObj to container of current track
-                        end try
-                    end try
-                end try
+                -- Use current playlist as the most reliable source
+                set sourceObj to current playlist
                 
-                if sourceObj is missing value then return "EMPTY"
+                set curIdx to index of current track
+                set totalCount to count tracks of sourceObj
                 
-                try
-                    set curIdx to index of current track
-                    set totalCount to count tracks of sourceObj
-                    
-                    if curIdx >= totalCount then return "EMPTY"
-                    
-                    set stopIdx to curIdx + 15
-                    if stopIdx > totalCount then set stopIdx to totalCount
-                    
-                    set results to {}
+                -- Gather up to 50 next tracks
+                set stopIdx to curIdx + 50
+                if stopIdx > totalCount then set stopIdx to totalCount
+                
+                set results to {}
+                if curIdx < totalCount then
                     repeat with i from (curIdx + 1) to stopIdx
                         try
                             set t to track i of sourceObj
                             set end of results to (name of t & "|" & artist of t & "|" & album of t)
                         end try
                     end repeat
-                    
-                    if (count results) is 0 then return "EMPTY"
-                    
-                    set AppleScript's text item delimiters to "!!"
-                    return results as string
-                on error
-                    return "EMPTY"
-                end try
-            on error
-                return "ERROR"
+                end if
+                
+                if (count results) is 0 then return "EMPTY"
+                
+                set AppleScript's text item delimiters to "!!"
+                return results as string
+            on error errMsg
+                return "ERROR|" & errMsg
             end try
         end tell
         '''
@@ -217,6 +202,40 @@ def main():
         pos = sys.argv[2]
         subprocess.run(['osascript', '-e', f'tell application "Music" to set player position to {pos}'])
         print(f"Seeked to {pos}s")
+    elif action == 'play_queue_item':
+        if len(sys.argv) < 3:
+            print("Error: Missing queue index")
+            sys.exit(1)
+
+        try:
+            queue_index = int(sys.argv[2]) # 0-based index from the UI queue
+        except ValueError:
+            print("Error: Invalid queue index")
+            sys.exit(1)
+
+        import subprocess
+        script = f'''
+        tell application "Music"
+            try
+                set sourceObj to current playlist
+                set curIdx to index of current track
+                -- Queue index 0 is the NEXT track, so +1. 
+                -- We want to jump to (curIdx + 1 + queue_index)
+                -- Example: Queue[0] is curIdx+1.
+                set targetIdx to curIdx + 1 + {queue_index}
+                
+                play track targetIdx of sourceObj
+                return "OK"
+            on error
+                return "ERROR"
+            end try
+        end tell
+        '''
+        
+        proc = subprocess.Popen(['osascript', '-e', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = proc.communicate()
+        print(out.decode('utf-8').strip())
+
     else:
         print(f"Unknown action: {action}")
         sys.exit(1)

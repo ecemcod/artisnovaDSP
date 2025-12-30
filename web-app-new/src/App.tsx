@@ -14,7 +14,7 @@ import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Settings, Server, Monitor, Menu, X, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Asterisk
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Asterisk
 } from 'lucide-react';
 import './index.css';
 
@@ -340,7 +340,11 @@ function App() {
     }
     try {
       const res = await axios.get(`${API_URL}/media/lyrics`, { params: { track, artist } });
-      setLyrics(res.data.plain || null);
+      if (res.data.instrumental) {
+        setLyrics("[INSTRUMENTAL]");
+      } else {
+        setLyrics(res.data.plain || null);
+      }
     } catch {
       setLyrics(null);
     }
@@ -401,7 +405,7 @@ function App() {
 
   const fetchQueue = async () => {
     try {
-      const res = await axios.get(`${API_URL}/media/queue`);
+      const res = await axios.get(`${API_URL}/media/queue?source=${mediaSource}`);
       setQueue(res.data.queue || []);
     } catch { }
   };
@@ -413,7 +417,7 @@ function App() {
     const statusInterval = setInterval(checkStatus, 2000);
     const queueInterval = setInterval(fetchQueue, 5000);
     return () => { clearInterval(statusInterval); clearInterval(queueInterval); };
-  }, []);
+  }, [mediaSource, nowPlaying.track]);
 
   const loadPresets = async () => { try { const res = await axios.get(`${API_URL}/presets`); setPresets(res.data || []); } catch { } };
 
@@ -786,7 +790,7 @@ function App() {
         case 'playback': return renderNowPlaying();
         case 'processing': return renderProcessingTools();
         case 'lyrics': return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
-        case 'queue': return <PlayQueue queue={queue} />;
+        case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
         default: return renderNowPlaying();
       }
     }
@@ -797,7 +801,7 @@ function App() {
             {renderNowPlaying()}
           </div>
           <div ref={secondaryContainerRef} className="flex-1 min-w-[300px] max-w-sm hidden lg:flex flex-col">
-            <PlayQueue queue={queue} />
+            <PlayQueue queue={queue} mediaSource={mediaSource} />
           </div>
         </div>
       );
@@ -813,7 +817,7 @@ function App() {
           <div ref={secondaryContainerRef} className="h-full w-full flex flex-col">
             {activeMode === 'processing' && renderProcessingTools()}
             {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
-            {activeMode === 'queue' && <PlayQueue queue={queue} />}
+            {activeMode === 'queue' && <PlayQueue queue={queue} mediaSource={mediaSource} />}
           </div>
         </Panel>
       </Group>
@@ -879,7 +883,7 @@ function App() {
                 <div className="px-3 pt-2 pb-1 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Navigation</div>
                 <div className="space-y-0.5">
                   <button onClick={() => { setActiveMode('playback'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'playback' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
-                    <div className="flex items-center gap-3"><Play size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Playback</span></div>
+                    <div className="flex items-center gap-3"><Play size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Playback Only</span></div>
                     {activeMode === 'playback' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
                   </button>
                   <button onClick={() => { setActiveMode('processing'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'processing' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
