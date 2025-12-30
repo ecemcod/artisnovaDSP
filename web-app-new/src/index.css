@@ -6,10 +6,14 @@
 /* Dark Theme (Default) */
 :root,
 .theme-dark {
-  --bg-deep: #050505;
-  --bg-panel: #111111;
-  --bg-card: #1a1a1a;
-  --bg-input: #0a0a0f;
+  --bg-app: #050505;
+  /* Base selection controlled by JS */
+  --bg-deep: var(--bg-app);
+  --bg-panel: rgba(255, 255, 255, 0.04);
+  /* Tint over background */
+  --bg-card: rgba(255, 255, 255, 0.08);
+  /* Slightly more visible tint */
+  --bg-input: rgba(0, 0, 0, 0.3);
 
   --accent-primary: #00d4ff;
   --accent-secondary: #00d4ff;

@@ -6,9 +6,10 @@ interface Props {
     wsUrl?: string;
     onClick?: () => void;
     onLevelsChange?: (left: number, right: number) => void;
+    className?: string;
 }
 
-const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', onLevelsChange }) => {
+const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', onLevelsChange, className = "" }) => {
     const [levels, setLevels] = useState({ left: -60, right: -60 });
     const [status, setStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
     const wsRef = useRef<WebSocket | null>(null);
@@ -98,9 +99,9 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
     }, [isRunning, wsUrl, onLevelsChange]);
 
     return (
-        <div className="flex-1 w-full h-full bg-themed-panel border border-themed-medium rounded-xl p-6 md:p-10 flex flex-col shadow-2xl relative overflow-hidden group">
+        <div className={`flex-1 w-full h-full flex flex-col relative overflow-hidden group ${className}`}>
             {/* Header / Brand Plate */}
-            <div className="flex justify-between items-center mb-6 md:mb-10 z-10">
+            <div className="flex justify-between items-center mb-1 md:mb-10 z-10 shrink-0">
                 <div className="flex flex-col">
                     <div className="text-[10px] text-themed-muted uppercase font-black tracking-[0.3em] header-text">
                         Analog Monitoring
@@ -112,11 +113,12 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
             </div>
 
             {/* Meters Container */}
-            <div className="flex-1 flex flex-wrap items-center justify-center gap-6 md:gap-12 overflow-y-auto custom-scrollbar">
-                <div className="flex-1 min-w-[180px] max-w-[320px]">
+            {/* Meters Container - Flex Row for Side-by-Side with Vertical Space */}
+            <div className="flex-1 flex flex-row items-center justify-center gap-2 md:gap-8 min-h-0 overflow-hidden">
+                <div className="flex-1">
                     <AnalogVUMeter level={levels.left} channel="L" />
                 </div>
-                <div className="flex-1 min-w-[180px] max-w-[320px]">
+                <div className="flex-1">
                     <AnalogVUMeter level={levels.right} channel="R" />
                 </div>
             </div>

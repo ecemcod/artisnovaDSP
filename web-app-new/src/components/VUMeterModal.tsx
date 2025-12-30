@@ -52,14 +52,6 @@ const VUMeterModal: React.FC<Props> = ({ isOpen, onClose, leftLevel, rightLevel 
                     animation: 'scaleIn 0.2s ease-out'
                 }}
             >
-                {/* Close button */}
-                <button
-                    onClick={onClose}
-                    className="absolute top-4 right-4 p-2 rounded-full hover:opacity-80 transition-all shadow-lg"
-                    style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
-                >
-                    <X size={20} style={{ color: '#ffffff' }} />
-                </button>
 
                 {/* Title */}
                 <div className="text-center mb-6">

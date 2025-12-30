@@ -24,6 +24,13 @@ class RoonController {
         this.zones = new Map();
         this.statusCallback = null;
         this.isPaired = false;
+        // Sample rate tracking
+        this.currentSampleRate = null;
+        this.currentTrackKey = null;  // Track ID to detect actual song changes
+        this.currentAlbum = null;     // Album tracking for stream recovery
+        this.onSampleRateChange = null;  // Callback: (newRate) => {}
+        this.onAlbumChange = null;       // Callback: (albumName, sameRate) => {} - for stream recovery
+        this.checkTimeout = null; // Debounce for missing signal path
     }
 
     init(callback) {
@@ -46,17 +53,28 @@ class RoonController {
                 this.isPaired = true;
 
                 this.transport.subscribe_zones((status, data) => {
-                    console.log('Roon Zones Status Update:', status);
+                    console.log(`RoonController: SubscribeZones Status=${status}`);
                     if (status === "Subscribed" || status === "Changed") {
                         if (data.zones) {
                             data.zones.forEach(z => {
-                                console.log('Roon Zone:', z.display_name, '| State:', z.state);
+                                console.log(`RoonController: adding zone ${z.display_name} (${z.zone_id})`);
                                 this.zones.set(z.zone_id, z);
+
+                                // Auto-select "Camilla" zone if no active zone is set
+                                if (!this.activeZoneId && z.display_name === "Camilla") {
+                                    console.log(`RoonController: Auto-selecting zone: ${z.display_name} (${z.zone_id})`);
+                                    this.activeZoneId = z.zone_id;
+                                }
+
+                                // Check initial sample rate
+                                if (z.zone_id === this.activeZoneId) {
+                                    this._checkSampleRateChange(z);
+                                }
                             });
                         }
                         if (data.zones_added) {
                             data.zones_added.forEach(z => {
-                                console.log('Roon Zone Added:', z.display_name);
+                                console.log(`RoonController: Zone Added ${z.display_name}`);
                                 this.zones.set(z.zone_id, z);
                             });
                         }
@@ -64,20 +82,28 @@ class RoonController {
                             data.zones_changed.forEach(z => {
                                 const old = this.zones.get(z.zone_id) || {};
                                 this.zones.set(z.zone_id, { ...old, ...z });
+
+                                // Check for sample rate change in active zone
                                 if (z.zone_id === this.activeZoneId) {
-                                    console.log('Roon Active Zone Changed:', z.now_playing?.three_line?.line1 || 'No Track');
+                                    this._checkSampleRateChange(this.zones.get(z.zone_id));
                                 }
                             });
                         }
                         if (data.zones_removed) {
                             data.zones_removed.forEach(zid => {
-                                console.log('Roon Zone Removed:', zid);
+                                console.log(`RoonController: Zone Removed ${zid}`);
                                 this.zones.delete(zid);
                             });
                         }
+                        console.log(`RoonController: Current Map size after update: ${this.zones.size}`);
                         this._notifyStatus();
                     }
                 });
+
+                // Periodic debug log
+                setInterval(() => {
+                    console.log(`RoonController: Heartbeat - Zones count: ${this.zones.size}`);
+                }, 30000);
             },
 
             core_unpaired: (core) => {
@@ -103,6 +129,14 @@ class RoonController {
             if (this.roon) {
                 console.log('RoonController: discovery started now');
                 this.roon.start_discovery();
+
+                // Failsafe: Re-check discovery if no zones after 10s
+                setTimeout(() => {
+                    if (this.zones.size === 0) {
+                        console.log('RoonController: No zones found after 10s, retrying discovery...');
+                        this.roon.start_discovery();
+                    }
+                }, 10000);
             }
         }, 2000);
     }
@@ -110,12 +144,14 @@ class RoonController {
 
 
     getZones() {
-        return Array.from(this.zones.values()).map(z => ({
+        const zoneList = Array.from(this.zones.values()).map(z => ({
             id: z.zone_id,
             name: z.display_name,
             state: z.state,
             active: z.zone_id === this.activeZoneId
         }));
+        console.log(`RoonController: getZones called. count=${zoneList.length}, active=${this.activeZoneId}`);
+        return zoneList;
     }
 
     setActiveZone(zoneId) {
@@ -136,7 +172,14 @@ class RoonController {
             return { state: z.state };
         }
 
-        console.log('Roon Metadata:', track.three_line.line1, 'by', track.three_line.line2);
+        console.log(`Roon Metadata [${z.display_name}]: ${track.three_line?.line1} - SignalPath: ${track.signal_path ? 'YES' : 'NO'}`);
+
+        // DEBUG: Dump track to find source sample rate
+        console.log('Roon Track Debug:', JSON.stringify(track, null, 2));
+
+        if (track.signal_path) {
+            console.log('Roon SignalPath Details:', JSON.stringify(track.signal_path));
+        }
 
         return {
             state: z.state,
@@ -147,7 +190,8 @@ class RoonController {
             duration: track.length || 0,
             position: track.seek_position || 0,
             volume: z.outputs?.[0]?.volume?.value || 0,
-            signalPath: track.signal_path
+            signalPath: track.signal_path,
+            bitDepth: this._extractBitDepth(track.signal_path)
         };
     }
 
@@ -159,9 +203,22 @@ class RoonController {
 
         switch (action) {
             case 'playpause': this.transport.control(zone, 'playpause'); break;
+            case 'play': this.transport.control(zone, 'play'); break;
+            case 'pause': this.transport.control(zone, 'pause'); break;
             case 'next': this.transport.control(zone, 'next'); break;
             case 'prev': this.transport.control(zone, 'previous'); break;
-            case 'seek': this.transport.seek(zone, value); break;
+            case 'seek': this.transport.seek(zone, 'absolute', value); break;
+            case 'seekToStart': this.transport.seek(zone, 'absolute', 0); break;
+            case 'mute':
+                if (zone.outputs?.[0]) {
+                    this.transport.mute(zone.outputs[0], 'mute');
+                }
+                break;
+            case 'unmute':
+                if (zone.outputs?.[0]) {
+                    this.transport.mute(zone.outputs[0], 'unmute');
+                }
+                break;
             case 'volume':
                 if (zone.outputs?.[0]) {
                     this.transport.change_volume(zone.outputs[0], 'absolute', value);
@@ -199,7 +256,141 @@ class RoonController {
             this.statusCallback(this.getNowPlaying());
         }
     }
+
+    // Extract source sample rate from Roon's signal_path
+    _extractSampleRate(signalPath) {
+        if (!signalPath || !Array.isArray(signalPath)) return null;
+
+        // Look for the source node which has the native file sample rate
+        for (const node of signalPath) {
+            if (node.type === 'source' && node.quality?.sample_rate) {
+                return node.quality.sample_rate;
+            }
+        }
+
+        // Fallback: check any node with sample_rate
+        for (const node of signalPath) {
+            if (node.quality?.sample_rate) {
+                return node.quality.sample_rate;
+            }
+        }
+
+        return null;
+    }
+
+    // Extract source bit depth from Roon's signal_path
+    _extractBitDepth(signalPath) {
+        if (!signalPath || !Array.isArray(signalPath)) return null;
+
+        // Look for the source node
+        for (const node of signalPath) {
+            if (node.type === 'source' && node.quality?.bits_per_sample) {
+                return node.quality.bits_per_sample;
+            }
+        }
+
+        // Fallback: check any node
+        for (const node of signalPath) {
+            if (node.quality?.bits_per_sample) {
+                return node.quality.bits_per_sample;
+            }
+        }
+
+        return null;
+    }
+
+    // Check if sample rate changed and trigger callback
+    _checkSampleRateChange(zone) {
+        const signalPath = zone.now_playing?.signal_path;
+        const trackInfo = zone.now_playing?.three_line;
+
+        // Generate a unique key for the current track (title + duration)
+        const newTrackKey = trackInfo ? `${trackInfo.line1}|${zone.now_playing?.length || 0}` : null;
+
+        // Get current album name
+        const newAlbum = trackInfo?.line3 || null;
+
+        let newRate = this._extractSampleRate(signalPath);
+
+        console.log(`RoonController: _checkSampleRateChange - State: ${zone.state}, Track: "${trackInfo?.line1 || 'unknown'}", Album: "${newAlbum || 'unknown'}", Rate: ${newRate || 'unknown'}Hz, LastRate: ${this.currentSampleRate || 'none'}Hz`);
+
+        // 1. Valid Rate Detected (Fast Path)
+        if (newRate) {
+            // Cancel any pending check since we have a new valid state
+            if (this.checkTimeout) {
+                clearTimeout(this.checkTimeout);
+                this.checkTimeout = null;
+            }
+
+            // Check if this is the same track - if so, skip entirely
+            if (newTrackKey && newTrackKey === this.currentTrackKey && newRate === this.currentSampleRate) {
+                // Same track, same rate - no action needed
+                return;
+            }
+
+            // Check for album change (different disc) - this requires stream recovery
+            const albumChanged = newAlbum && this.currentAlbum && newAlbum !== this.currentAlbum;
+
+            // Update track key and album
+            this.currentTrackKey = newTrackKey;
+            const previousAlbum = this.currentAlbum;
+            this.currentAlbum = newAlbum;
+
+            // Check if sample rate actually changed
+            if (newRate !== this.currentSampleRate) {
+                console.log(`RoonController: Sample rate CHANGED: ${this.currentSampleRate || 'none'} -> ${newRate}Hz`);
+                this.currentSampleRate = newRate;
+                if (this.onSampleRateChange) this.onSampleRateChange(newRate);
+            } else if (albumChanged) {
+                // Album changed but rate is the same - notify for stream recovery
+                console.log(`RoonController: Album CHANGED: "${previousAlbum}" -> "${newAlbum}" (same rate: ${newRate}Hz)`);
+                if (this.onAlbumChange) this.onAlbumChange(newAlbum, true);
+            } else {
+                console.log(`RoonController: New track, same album & rate (${newRate}Hz). No restart needed.`);
+            }
+            return;
+        }
+
+        // 2. Missing Rate (Fallback/Probe Path)
+        // Only probe if playing AND this is a new track.
+        // Start a debounce timer ONLY if one isn't already running.
+        if (zone.state === 'playing') {
+            // If we have a known rate and same track, don't probe
+            if (this.currentSampleRate && newTrackKey === this.currentTrackKey) {
+                console.log('RoonController: SignalPath missing but same track - using cached rate');
+                return;
+            }
+
+            // Check for album change even without rate info
+            const albumChanged = newAlbum && this.currentAlbum && newAlbum !== this.currentAlbum;
+
+            if (!this.checkTimeout) {
+                console.log('RoonController: SignalPath missing for new track. Starting probe timer (2500ms)...');
+                this.checkTimeout = setTimeout(() => {
+                    console.log('RoonController: SignalPath still missing after delay. Requesting hardware check.');
+                    this.checkTimeout = null; // Clear trigger
+                    this.currentTrackKey = newTrackKey; // Update track key
+
+                    // If album changed, notify for recovery
+                    if (albumChanged) {
+                        const previousAlbum = this.currentAlbum;
+                        this.currentAlbum = newAlbum;
+                        console.log(`RoonController: Album changed during probe: "${previousAlbum}" -> "${newAlbum}"`);
+                        if (this.onAlbumChange) this.onAlbumChange(newAlbum, false);
+                    } else {
+                        this.currentAlbum = newAlbum;
+                        if (this.onSampleRateChange) this.onSampleRateChange('CHECK');
+                    }
+                }, 2500);
+            }
+        } else {
+            // If paused/stopped, clear any pending check
+            if (this.checkTimeout) {
+                clearTimeout(this.checkTimeout);
+                this.checkTimeout = null;
+            }
+        }
+    }
 }
 
 module.exports = new RoonController();
-

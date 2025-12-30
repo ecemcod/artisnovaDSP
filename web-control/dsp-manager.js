@@ -9,6 +9,17 @@ class DSPManager {
         this.baseDir = baseDir; // camilla dir
         this.presetsDir = path.join(baseDir, 'presets');
         this.dspPath = path.join(baseDir, 'camilladsp');
+        this.bypassConfigPath = path.join(baseDir, 'config-bypass.yml');
+        this.currentState = {
+            running: false,
+            bypass: false,
+            sampleRate: 0,
+            bitDepth: 0,
+            presetName: null,
+            filtersCount: 0,
+            preamp: 0
+        };
+        this.shouldBeRunning = true; // Intended state tracking (default to true for appliance mode)
     }
 
     isRunning() {
@@ -79,6 +90,11 @@ class DSPManager {
         // ALWAYS stop and wait before starting to ensure audio devices are released
         await this.stop();
 
+        // Store filter data for potential sample rate restarts
+        this.lastFilterData = filterData;
+        this.lastOptions = { ...options };
+        this.shouldBeRunning = true; // Mark as intended to be running
+
         return new Promise((resolve, reject) => {
             try {
                 const configYaml = this.generateConfig(filterData, options);
@@ -94,6 +110,16 @@ class DSPManager {
                 this.process = spawn(this.dspPath, dspArgs, {
                     cwd: this.baseDir
                 });
+
+                this.currentState = {
+                    running: true,
+                    bypass: false,
+                    sampleRate: options.sampleRate,
+                    bitDepth: options.bitDepth,
+                    presetName: options.presetName || 'Manual',
+                    filtersCount: filterData.filters?.length || 0,
+                    preamp: filterData.preamp || 0
+                };
 
                 this.process.stdout.on('data', (data) => console.log(`DSP out: ${data}`));
                 this.process.stderr.on('data', (data) => console.error(`DSP err: ${data}`));
@@ -121,11 +147,13 @@ class DSPManager {
     }
 
     async stop() {
+        this.shouldBeRunning = false; // Mark as explicitly stopped by user/system
         if (this.process) {
             console.log('Stopping CamillaDSP instance...');
             this.process.kill('SIGTERM');
             this.process = null;
         }
+        this.currentState.running = false;
         // Force kill any other instances that might be lingering
         const { execSync } = require('child_process');
         try {
@@ -168,6 +196,99 @@ class DSPManager {
             setTimeout(check, 500); // Initial delay to let SIGTERM work
         });
     }
+
+    // Restart DSP with a new sample rate, preserving current filter configuration
+    async restartWithSampleRate(sampleRate) {
+        if (!this.isRunning()) {
+            console.log('DSP: Not running, cannot change sample rate');
+            return false;
+        }
+
+        if (this.currentState.sampleRate === sampleRate) {
+            console.log(`DSP: Already running at ${sampleRate}Hz, skipping restart`);
+            return true;
+        }
+
+        if (!this.lastFilterData) {
+            console.log('DSP: No stored filter data, cannot restart');
+            return false;
+        }
+
+        console.log(`DSP: Restarting for sample rate change: ${this.currentState.sampleRate} -> ${sampleRate}Hz`);
+
+        // Restart with same filters but new sample rate
+        const newOptions = {
+            ...this.lastOptions,
+            sampleRate: sampleRate
+        };
+
+        try {
+            await this.start(this.lastFilterData, newOptions);
+            console.log(`DSP: Successfully restarted at ${sampleRate}Hz`);
+            return true;
+        } catch (err) {
+            console.error('DSP: Failed to restart with new sample rate:', err);
+            return false;
+        }
+    }
+
+    // Start in bypass mode (no filters, just pass-through)
+    async startBypass(sampleRate) {
+        // Stop any running instance first
+        await this.stop();
+        this.shouldBeRunning = true;
+
+        return new Promise((resolve, reject) => {
+            try {
+                // Read and modify bypass config with current sample rate
+                let bypassConfig = fs.readFileSync(this.bypassConfigPath, 'utf8');
+                const config = yaml.load(bypassConfig);
+                config.devices.samplerate = sampleRate || 96000;
+
+                const configPath = path.join(this.baseDir, 'temp_config.yml');
+                fs.writeFileSync(configPath, yaml.dump(config));
+
+                console.log(`Starting CamillaDSP in BYPASS mode at ${config.devices.samplerate}Hz`);
+
+                const dspArgs = ['-a', '0.0.0.0', '-p', '5005', configPath];
+                this.process = spawn(this.dspPath, dspArgs, {
+                    cwd: this.baseDir
+                });
+
+                this.currentState = {
+                    running: true,
+                    bypass: true,
+                    sampleRate: config.devices.samplerate,
+                    bitDepth: 24,
+                    presetName: 'BYPASS',
+                    filtersCount: 0,
+                    preamp: 0
+                };
+
+                this.process.stdout.on('data', (data) => console.log(`DSP out: ${data}`));
+                this.process.stderr.on('data', (data) => console.error(`DSP err: ${data}`));
+
+                this.process.on('close', (code) => {
+                    console.log(`DSP exited with code ${code}`);
+                    this.process = null;
+                });
+
+                this.process.on('error', (err) => {
+                    console.error('Failed to start DSP:', err);
+                    reject(err);
+                });
+
+                setTimeout(() => {
+                    if (this.isRunning()) resolve(true);
+                    else reject(new Error('Process exited immediately'));
+                }, 1000);
+
+            } catch (err) {
+                reject(err);
+            }
+        });
+    }
 }
 
 module.exports = DSPManager;
+

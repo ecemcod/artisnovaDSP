@@ -68,7 +68,7 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
     const radius = 120;
 
     return (
-        <div className="flex flex-col items-center w-full max-w-[320px]">
+        <div className="flex flex-col items-center w-full">
             {/* Channel Label */}
             <div className="text-[10px] font-black text-themed-muted mb-2 tracking-[0.4em] uppercase">
                 Channel {channel}

@@ -1,5 +1,5 @@
 devices:
-  samplerate: 96000
+  samplerate: 44100
   chunksize: 4096
   capture:
     type: CoreAudio
@@ -9,63 +9,10 @@ devices:
     type: CoreAudio
     device: D50 III
     channels: 2
-filters:
-  preamp:
-    type: Gain
-    parameters:
-      gain: -3
-  filter1:
-    type: Biquad
-    parameters:
-      type: Peaking
-      freq: 95
-      gain: -5.5
-      q: 1
-  filter2:
-    type: Biquad
-    parameters:
-      type: Highshelf
-      freq: 10000
-      gain: 2
-      q: 0.707
-  filter3:
-    type: Biquad
-    parameters:
-      type: Lowshelf
-      freq: 60
-      gain: 2.5
-      q: 0.707
-  filter4:
-    type: Biquad
-    parameters:
-      type: Peaking
-      freq: 110
-      gain: 1.5
-      q: 0.9
-  filter5:
-    type: Biquad
-    parameters:
-      type: Peaking
-      freq: 2500
-      gain: 2
-      q: 1
-  filter6:
-    type: Biquad
-    parameters:
-      type: Peaking
-      freq: 7000
-      gain: 1.5
-      q: 0.8
+filters: {}
 pipeline:
   - type: Filter
     channels:
       - 0
       - 1
-    names:
-      - preamp
-      - filter1
-      - filter2
-      - filter3
-      - filter4
-      - filter5
-      - filter6
+    names: []

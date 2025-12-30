@@ -10,10 +10,11 @@ import {
 } from "react-resizable-panels";
 import PlayQueue from './components/PlayQueue';
 import Lyrics from './components/Lyrics';
+import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Settings, Server, Monitor, Menu, X, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Sun, Moon, Cast
+  Music, Activity, MessageCircle, Settings, Server, Monitor, Menu, X, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Asterisk
 } from 'lucide-react';
 import './index.css';
 
@@ -33,7 +34,25 @@ const formatTime = (seconds: number) => {
 
 const STORAGE_KEY = `artisNovaDSP_config`;
 const PANEL_STORAGE_KEY = `artisNovaDSP_layout_v2`;
-const THEME_STORAGE_KEY = `artisNovaDSP_theme`;
+const BG_COLOR_STORAGE_KEY = `artisNovaDSP_bgColor`;
+
+// Dark background color options
+const BACKGROUND_COLORS = [
+  { id: 'noir', name: 'Midnight Noir', color: '#08080a' },
+  { id: 'crimson', name: 'Crimson Shadow', color: '#2a0a0a' },
+  { id: 'cobalt', name: 'Cobalt Night', color: '#0a0e2a' },
+  { id: 'emerald', name: 'Deep Forest', color: '#0a2a12' },
+  { id: 'amber', name: 'Burnt Orange', color: '#2a1e0a' },
+  { id: 'purple', name: 'Imperial Purple', color: '#1c0a2a' },
+  { id: 'teal', name: 'Deep Teal', color: '#0a2a2a' },
+  { id: 'rose', name: 'Rose Ebony', color: '#2a0a1c' },
+  { id: 'ocean', name: 'Ocean Depth', color: '#0a1c2a' },
+  { id: 'olive', name: 'Golden Olive', color: '#262a0a' },
+  { id: 'graphite', name: 'Graphite Noir', color: '#16161a' },
+  { id: 'carbon', name: 'Dark Carbon', color: '#0e0e12' },
+] as const;
+
+type BgColorId = typeof BACKGROUND_COLORS[number]['id'];
 
 interface SavedConfig {
   filters: FilterParam[];
@@ -43,6 +62,8 @@ interface SavedConfig {
   selectedPreset: string | null;
   activeMode?: 'playback' | 'processing' | 'lyrics' | 'queue';
   backend?: 'local' | 'raspi';
+  bypass?: boolean;
+  bgColor?: BgColorId;
 }
 
 const BACKENDS = {
@@ -58,6 +79,7 @@ function App() {
   const [filters, setFilters] = useState<FilterParam[]>([]);
   const [preamp, setPreamp] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
+  const [isBypass, setIsBypass] = useState(false);
   const [sampleRate, setSampleRate] = useState(96000);
   const [bitDepth, setBitDepth] = useState(24);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -87,11 +109,23 @@ function App() {
   const [panelSizes, setPanelSizes] = useState<number[]>([55, 45]);
   const [isLayoutLoaded, setIsLayoutLoaded] = useState(false);
   const [volume, setVolume] = useState(50);
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [bgColor, setBgColor] = useState<BgColorId>(() => {
+    const saved = localStorage.getItem(BG_COLOR_STORAGE_KEY);
+    return (saved as BgColorId) || 'noir';
+  });
   const [currentTime, setCurrentTime] = useState(0);
   const [roonZones, setRoonZones] = useState<{ id: string, name: string, active: boolean, state: string }[]>([]);
-  const [mediaSource, setMediaSource] = useState<'apple' | 'roon'>('apple');
+  const [mediaSource, setMediaSource] = useState<'apple' | 'roon'>(() => {
+    const saved = localStorage.getItem('artisNovaDSP_mediaSource');
+    return (saved === 'roon' || saved === 'apple') ? saved : 'apple';
+  });
+  const [hostname, setHostname] = useState<string>('Local');
   const [sourcePopoverOpen, setSourcePopoverOpen] = useState(false);
+  const [signalPathOpen, setSignalPathOpen] = useState(false);
+  const [signalAnchorRect, setSignalAnchorRect] = useState<DOMRect | undefined>(undefined);
+  const signalBtnRef = useRef<HTMLButtonElement>(null);
+  const nowPlayingContainerRef = useRef<HTMLDivElement>(null);
+  const secondaryContainerRef = useRef<HTMLDivElement>(null);
   const isSeeking = useRef(false);
 
   // Sync currentTime with nowPlaying.position
@@ -111,19 +145,15 @@ function App() {
   }, [nowPlaying.state]);
 
 
-  // Load and apply theme
+  // Apply background color
   useEffect(() => {
-    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'dark' | 'light' | null;
-    if (savedTheme) {
-      setTheme(savedTheme);
+    const selectedColor = BACKGROUND_COLORS.find(c => c.id === bgColor);
+    if (selectedColor) {
+      document.documentElement.style.setProperty('--bg-app', selectedColor.color);
+      document.body.style.backgroundColor = selectedColor.color;
+      localStorage.setItem(BG_COLOR_STORAGE_KEY, bgColor);
     }
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.classList.remove('theme-dark', 'theme-light');
-    document.documentElement.classList.add(`theme-${theme}`);
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
-  }, [theme]);
+  }, [bgColor]);
 
   useEffect(() => {
     console.log("Artis Nova DSP v1.2.1 - Loading Layout...");
@@ -137,6 +167,11 @@ function App() {
     }
     // Small delay to ensure Group component is ready for the correct sizes
     setTimeout(() => setIsLayoutLoaded(true), 50);
+
+    // Fetch hostname
+    axios.get(`${API_URL}/hostname`)
+      .then(res => setHostname(res.data.hostname || 'Local'))
+      .catch(() => setHostname('Local'));
   }, []);
 
   useEffect(() => {
@@ -197,7 +232,38 @@ function App() {
 
   // Menu state
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuView, setMenuView] = useState<'main' | 'settings'>('main');
+  const [menuView, setMenuView] = useState<'main' | 'settings' | 'colors'>('main');
+  const sideMenuRef = useRef<HTMLDivElement>(null);
+  const sourceSelectorRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const sourceButtonRef = useRef<HTMLButtonElement>(null);
+  const [menuActivity, setMenuActivity] = useState(0);
+  const [sourceActivity, setSourceActivity] = useState(0);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      // Handle Side Menu
+      if (menuOpen &&
+        sideMenuRef.current &&
+        !sideMenuRef.current.contains(event.target as Node) &&
+        menuButtonRef.current &&
+        !menuButtonRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+
+      // Handle Source Selector
+      if (sourcePopoverOpen &&
+        sourceSelectorRef.current &&
+        !sourceSelectorRef.current.contains(event.target as Node) &&
+        sourceButtonRef.current &&
+        !sourceButtonRef.current.contains(event.target as Node)) {
+        setSourcePopoverOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [menuOpen, sourcePopoverOpen]);
 
   useEffect(() => {
     if (!menuOpen && !sourcePopoverOpen) {
@@ -221,14 +287,14 @@ function App() {
       const timer = setTimeout(() => setMenuOpen(false), 10000);
       return () => clearTimeout(timer);
     }
-  }, [menuOpen]);
+  }, [menuOpen, menuActivity, menuView]);
 
   useEffect(() => {
     if (sourcePopoverOpen) {
       const timer = setTimeout(() => setSourcePopoverOpen(false), 10000);
       return () => clearTimeout(timer);
     }
-  }, [sourcePopoverOpen]);
+  }, [sourcePopoverOpen, sourceActivity]);
 
   const fetchRoonZones = async () => {
     try {
@@ -281,6 +347,9 @@ function App() {
   };
 
   // Load saved config on mount
+  // Track saved bypass preference for auto-start
+  const savedBypassRef = useRef<boolean>(false);
+
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -293,6 +362,7 @@ function App() {
         if (config.selectedPreset) setSelectedPreset(config.selectedPreset);
         if (config.activeMode) setActiveMode(config.activeMode);
         if (config.backend) setBackend(config.backend);
+        if (config.bypass) savedBypassRef.current = true; // Remember for auto-start
       } catch (e) {
         console.error('Failed to load saved config:', e);
       }
@@ -307,12 +377,12 @@ function App() {
     setIsLoaded(true);
   }, []);
 
-  // Save config whenever it changes
+  // Save config whenever it changes (including bypass)
   useEffect(() => {
     if (!isLoaded) return;
-    const config: SavedConfig = { filters, preamp, sampleRate, bitDepth, selectedPreset, activeMode, backend };
+    const config: SavedConfig = { filters, preamp, sampleRate, bitDepth, selectedPreset, activeMode, backend, bypass: isBypass };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-  }, [filters, preamp, sampleRate, bitDepth, selectedPreset, isLoaded, activeMode, backend]);
+  }, [filters, preamp, sampleRate, bitDepth, selectedPreset, isLoaded, activeMode, backend, isBypass]);
 
   // Check Raspberry Pi connectivity
   useEffect(() => {
@@ -346,7 +416,39 @@ function App() {
   }, []);
 
   const loadPresets = async () => { try { const res = await axios.get(`${API_URL}/presets`); setPresets(res.data || []); } catch { } };
-  const checkStatus = async () => { try { const res = await axios.get(`${API_URL}/status`); setIsRunning(res.data.running); } catch { } };
+
+  // Track if we've already attempted auto-start to avoid repeated attempts
+  const hasAutoStartedRef = useRef(false);
+
+  const checkStatus = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/status`);
+      setIsRunning(res.data.running);
+
+      // Update sample rate and bit depth from server if DSP is running (dynamic update)
+      if (res.data.running && res.data.sampleRate > 0) {
+        setSampleRate(res.data.sampleRate);
+        setBitDepth(res.data.bitDepth);
+        setIsBypass(res.data.bypass || false);
+      }
+
+      // Auto-start CamillaDSP if not running (only on first load)
+      if (!res.data.running && !hasAutoStartedRef.current) {
+        hasAutoStartedRef.current = true;
+        try {
+          if (savedBypassRef.current) {
+            console.log('Auto-starting CamillaDSP in BYPASS mode (saved preference)...');
+            await axios.post(`${API_URL}/bypass`);
+          } else {
+            console.log('Auto-starting CamillaDSP...');
+            await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth });
+          }
+        } catch (e) {
+          console.log('Auto-start failed, will retry when user interacts');
+        }
+      }
+    } catch { }
+  };
 
   const selectPreset = async (name: string) => {
     if (!name) return;
@@ -372,8 +474,22 @@ function App() {
   };
 
   const handleStop = async () => {
-    try { await axios.post(`${API_URL}/stop`); await checkStatus(); }
+    try { await axios.post(`${API_URL}/stop`); setIsBypass(false); await checkStatus(); }
     catch (err: any) { alert("Stop Failed: " + (err.response?.data?.error || err.message)); }
+  };
+
+  const handleBypass = async () => {
+    try {
+      if (isBypass) {
+        // Exit bypass - return to normal DSP mode
+        await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth });
+      } else {
+        // Enter bypass mode
+        await axios.post(`${API_URL}/bypass`);
+      }
+      await checkStatus();
+    }
+    catch (err: any) { alert("Bypass Toggle Failed: " + (err.response?.data?.error || err.message)); }
   };
 
   const handleSave = async () => {
@@ -396,14 +512,17 @@ function App() {
   // Render Now Playing - Immersive Redesign
   const renderNowPlaying = () => {
     return (
-      <div className="h-full w-full relative overflow-clip group flex flex-col">
-        {/* 1. Background - Dynamic "Solid" Color from Artwork */}
-        <div className="absolute inset-0 z-0 overflow-hidden bg-[#050505]">
+      <div ref={nowPlayingContainerRef} className="h-full w-full relative overflow-clip group flex flex-col">
+        {/* 1. Background - Dynamic "Solid" Color - Tinted by selected Bg Color */}
+        <div className="absolute inset-0 z-0 overflow-hidden" style={{ backgroundColor: 'var(--bg-app)' }}>
+          {/* Subtle radial gradient for depth */}
+          <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_center,_var(--accent-primary)_0%,_transparent_70%)]" />
+
           {nowPlaying.artworkUrl && (
             <img
               src={nowPlaying.artworkUrl.startsWith('http') ? nowPlaying.artworkUrl : `${API_URL.replace('/api', '')}${nowPlaying.artworkUrl}`}
               alt=""
-              className="absolute inset-0 w-full h-full object-cover filter blur-[100px] scale-[5.0] saturate-200 opacity-80"
+              className="absolute inset-0 w-full h-full object-cover filter blur-[100px] scale-[5.0] saturate-150 opacity-30"
             />
           )}
         </div>
@@ -416,8 +535,8 @@ function App() {
 
             {/* Artwork - Larger Size */}
             <div className="aspect-square w-full max-w-[380px] mx-auto mb-8 md:mb-12 relative group/art">
-              <div className="absolute inset-0 bg-black/20 rounded-2xl transform translate-y-2 blur-xl opacity-50" />
-              <div className="relative w-full h-full bg-[#1a1a1a] rounded-2xl overflow-hidden shadow-2xl">
+              <div className="absolute inset-0 bg-black/40 rounded-2xl transform translate-y-2 blur-xl opacity-50" />
+              <div className="relative w-full h-full bg-white/5 rounded-2xl overflow-hidden shadow-2xl">
                 {nowPlaying.artworkUrl ? (
                   <img src={nowPlaying.artworkUrl.startsWith('http') ? nowPlaying.artworkUrl : `${API_URL.replace('/api', '')}${nowPlaying.artworkUrl}`} alt="Album Art" className="w-full h-full object-cover" />
                 ) : (
@@ -428,16 +547,33 @@ function App() {
 
             {/* Track Info & Actions - Centered */}
             <div className="w-full flex flex-col items-center text-center mb-8 px-2">
-              <div className="w-full">
-                <h2 className="text-xl md:text-3xl font-bold text-white leading-tight line-clamp-2 mb-1">{nowPlaying.track || 'Not Playing'}</h2>
-                <p className="text-base md:text-lg text-white/60 font-medium truncate">{nowPlaying.artist || 'System Ready'}</p>
-                {/* Roon Quality Badge - Subtle */}
-                {mediaSource === 'roon' && nowPlaying.signalPath && (
-                  <div className="flex items-center justify-center gap-1.5 mt-2">
-                    <span className={`w-1.5 h-1.5 rounded-full ${nowPlaying.signalPath.quality === 'lossless' ? 'bg-[#9b59b6]' : nowPlaying.signalPath.quality === 'high_quality' ? 'bg-[#2ecc71]' : 'bg-[#f1c40f]'}`} />
-                    <span className="text-[10px] uppercase tracking-wider text-white/40 font-semibold">{nowPlaying.signalPath.quality.replace(/_/g, ' ')}</span>
-                  </div>
-                )}
+              <div className="w-full relative">
+                <div className="flex items-center justify-center gap-4 mb-2">
+                  <h2 className="text-xl md:text-3xl font-bold text-white leading-tight line-clamp-2">{nowPlaying.track || 'Not Playing'}</h2>
+                  <button
+                    ref={signalBtnRef}
+                    onClick={(e) => {
+                      setSignalAnchorRect(e.currentTarget.getBoundingClientRect());
+                      setSignalPathOpen(!signalPathOpen);
+                    }}
+                    style={{
+                      backgroundColor: '#000000',
+                      color: '#ffffff',
+                      borderColor: '#000000',
+                      borderWidth: '2px',
+                      borderStyle: 'solid'
+                    }}
+                    className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all shadow-xl active:scale-90`}
+                    title="Signal Path"
+                  >
+                    <Asterisk size={16} strokeWidth={3} style={{ color: '#ffffff' }} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-center">
+                  <p className="text-base md:text-lg text-white/60 font-medium truncate max-w-[95%]">
+                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'}</span> — {nowPlaying.artist || 'System Ready'}
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -480,7 +616,7 @@ function App() {
               </div>
 
               {/* Transport Controls */}
-              <div className="flex items-center justify-center gap-4 mb-12">
+              <div className="flex items-center justify-center gap-6 mb-12">
                 <button
                   onTouchStart={() => axios.post(`${API_URL}/media/prev?source=${mediaSource}`).catch(() => { })}
                   onClick={() => axios.post(`${API_URL}/media/prev?source=${mediaSource}`).catch(() => { })}
@@ -507,13 +643,12 @@ function App() {
                 </button>
               </div>
 
-              {/* Separator */}
-              {/* Spacer Workaround */}
+              {/* Resolution Badge / Separator */}
               <div
-                className="text-6xl font-black leading-none select-none py-4 text-center"
-                style={{ color: '#000000' }}
+                className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-8 text-center uppercase"
+                style={{ color: '#9b59b6' }}
               >
-                ARTIS NOVA SPACER
+                {(sampleRate / 1000).toFixed(1)} kHz — {bitDepth} bits
               </div>
 
               {/* Volume */}
@@ -550,98 +685,90 @@ function App() {
   // Render Processing Tools
   const renderProcessingTools = () => {
     return (
-      <div className="flex-1 flex flex-col min-h-0 bg-themed-deep overflow-hidden">
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pt-14 md:pt-16 space-y-6 md:space-y-8">
+      <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep overflow-hidden">
+        <div className="flex-1 flex flex-col h-full p-3 md:p-8 pt-14 md:pt-20 space-y-2 md:space-y-4 overflow-hidden">
 
-          {/* 1. ANALOG MONITORING */}
-          <section className="bg-themed-panel border border-themed-medium rounded-xl p-5 shadow-lg">
-            <div className="flex items-center gap-3 mb-3">
+          {/* 1. ANALOG MONITORING - Flexible Height (Constrained to ~30% of view) */}
+          <div className="flex-none h-[25%] md:h-[30%] min-h-[120px] md:min-h-[200px] flex flex-col">
+            <VUMeter isRunning={isRunning} wsUrl={BACKENDS[backend].wsUrl} className="flex-1" />
+          </div>
+
+
+
+          {/* 2. INTEGRATED PEQ EDITOR, ANALYZER & BANDS - Fills remaining space */}
+          <section className="bg-themed-panel border border-themed-medium rounded-xl p-4 md:p-8 shadow-lg mb-4 flex flex-col flex-1 min-h-0 overflow-hidden">
+            <div className="flex items-center gap-3 mb-6 shrink-0">
               <div className="w-2 h-2 rounded-full bg-accent-primary shadow-[0_0_10px_var(--glow-cyan)]" />
-              <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">Analog Monitoring</span>
+              <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">PEQ Editor, Analyzer & Bands</span>
             </div>
-            <div className="h-[260px] flex items-center justify-center overflow-hidden">
-              <VUMeter isRunning={isRunning} wsUrl={BACKENDS[backend].wsUrl} />
-            </div>
-          </section>
 
-          {/* 2. ANALYZER */}
-          <section className="bg-themed-panel border border-themed-medium rounded-xl p-5 shadow-lg">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-2 h-2 rounded-full bg-accent-primary shadow-[0_0_10px_var(--glow-cyan)]" />
-              <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">Analyzer</span>
-            </div>
-            <div className="h-[300px]">
-              <FilterGraph filters={filters} preamp={preamp} />
-            </div>
-          </section>
+            <div className="flex-1 flex flex-col gap-6 md:gap-10 min-h-0 overflow-hidden">
+              {/* Part 1: Analyzer */}
+              <div className="h-[220px] md:h-[400px] shrink-0">
+                <FilterGraph filters={filters} preamp={preamp} />
+              </div>
 
-          {/* 3. CONTROLS (Presets, Resolution, Start/Stop) -> COMPACT HORIZONTAL ROW */}
-          <section className="bg-themed-panel border border-themed-medium rounded-xl p-4 shadow-lg">
-            <div className="flex flex-wrap items-center gap-y-4 gap-x-10">
-
-              {/* Presets */}
-              <div className="flex items-center gap-4">
+              {/* Part 2: Controls Row (Left Aligned) */}
+              <div className="flex flex-nowrap items-center justify-start gap-5 md:gap-12 overflow-x-auto custom-scrollbar pb-1 shrink-0">
+                {/* Presets */}
                 <div className="flex flex-col">
-                  <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1">Presets</span>
+                  <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1.5">Presets</span>
                   <div className="flex items-center gap-2">
                     <select value={selectedPreset || ''} onChange={e => {
                       const val = e.target.value;
                       if (val) selectPreset(val);
                       else handleNewPreset();
-                    }} className="bg-themed-deep border border-themed-medium rounded-lg px-3 py-1.5 text-xs text-accent-primary font-black outline-none transition-colors hover:border-accent-primary min-w-[140px]">
+                    }} className="bg-themed-deep border border-themed-medium rounded-lg px-2.5 py-2 text-[11px] text-accent-primary font-black outline-none transition-colors hover:border-accent-primary min-w-[110px] md:min-w-[160px]">
                       <option value="">+ New</option>
                       {presets.map(p => <option key={p} value={p}>{p.replace('.txt', '')}</option>)}
                     </select>
-                    <button onClick={handleSave} className="p-1.5 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-primary hover:border-accent-primary rounded-lg transition-all" title="Save Preset"><Save size={14} /></button>
+                    <button onClick={handleSave} className="p-2 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-primary hover:border-accent-primary rounded-lg transition-all shrink-0" title="Save Preset"><Save size={15} /></button>
+                  </div>
+                </div>
+
+                {/* Gain */}
+                <div className="flex flex-col">
+                  <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.15em] mb-1.5">Gain</span>
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 bg-themed-deep border border-themed-medium rounded-lg px-2 py-1">
+                      <input type="number" step={0.1} value={preamp || 0} onChange={e => setPreamp(Number(e.target.value) || 0)} className="w-[52px] md:w-[72px] bg-transparent text-center text-[11px] text-accent-warning font-mono font-black outline-none" />
+                      <span className="text-[8px] text-themed-muted font-black">dB</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Engine */}
+                <div className="flex flex-col">
+                  <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1.5">DSP Engine</span>
+                  <div className="flex items-center gap-2">
+                    {!isRunning ? (
+                      <button onClick={handleStart} className="w-18 md:w-24 py-2 bg-accent-primary text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">START</button>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        {!isBypass && (
+                          <button onClick={handleStart} className="bg-white/10 hover:bg-white/20 text-accent-success p-2 rounded-lg transition-colors border border-themed-subtle shrink-0" title="Reload Settings"><RefreshCcw size={14} /></button>
+                        )}
+                        <button onClick={handleStop} className="w-18 md:w-24 py-2 bg-accent-danger text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">STOP</button>
+                        {/* Separator */}
+                        <div className="w-px h-6 bg-themed-medium mx-1" />
+                        {/* Bypass Toggle */}
+                        <button
+                          onClick={handleBypass}
+                          className={`w-18 md:w-24 py-2 ${isBypass ? 'bg-amber-500 ring-2 ring-amber-400/50' : 'bg-amber-600/60 hover:bg-amber-600'} text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all`}
+                          title={isBypass ? "Exit Bypass Mode" : "Enter Bypass Mode"}
+                        >
+                          {isBypass ? '● BYP' : 'BYPASS'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Resolution (Sample Rate & Bit Depth) */}
-              <div className="flex flex-col">
-                <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1">Resolution</span>
-                <div className="bg-themed-deep border border-themed-medium rounded-lg px-4 py-1.5 flex items-center justify-between gap-4">
-                  <span className="text-[13px] font-black tracking-widest text-accent-primary">{(sampleRate / 1000).toFixed(1)}k</span>
-                  <div className="w-px h-4 bg-themed-medium" />
-                  <span className="text-[13px] font-black tracking-widest text-accent-primary">{bitDepth}b</span>
-                </div>
+              {/* Part 3: PEQ Editor Bands - Internal Scrollable */}
+              <div className="flex-1 min-h-0 pt-4 border-t border-themed-subtle overflow-y-auto custom-scrollbar">
+                <PEQEditor filters={filters} onChange={setFilters} />
               </div>
-
-              {/* Gain - Inline Compact */}
-              <div className="flex items-center gap-2">
-                <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.15em]">Gain</span>
-                <div className="flex items-center gap-1 bg-themed-deep border border-themed-medium rounded-lg px-2 py-1">
-                  <input type="number" step={0.1} value={preamp || 0} onChange={e => setPreamp(Number(e.target.value) || 0)} className="w-8 bg-transparent text-center text-[10px] text-accent-warning font-mono font-black outline-none" />
-                  <span className="text-[8px] text-themed-muted font-black">dB</span>
-                </div>
-              </div>
-
-              {/* Engine Status & Control */}
-              <div className="flex flex-col min-w-[200px]">
-                <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1">DSP Engine</span>
-                <div className="flex items-center gap-3">
-                  {!isRunning ? (
-                    <button onClick={handleStart} className="flex-1 py-1.5 bg-accent-primary text-white rounded-lg font-black text-[9px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">START</button>
-                  ) : (
-                    <div className="flex items-center gap-2 flex-1">
-                      <button onClick={handleStart} className="bg-white/10 hover:bg-white/20 text-accent-success p-1.5 rounded-lg transition-colors border border-themed-subtle" title="Reload Settings"><RefreshCcw size={12} /></button>
-                      <button onClick={handleStop} className="flex-1 py-1.5 bg-accent-danger text-white rounded-lg font-black text-[9px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">STOP</button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-            </div>
-          </section>
-
-          {/* 4 & 5. PEQ EDITOR (PEQ Editor + Bands) */}
-          <section className="bg-themed-panel border border-themed-medium rounded-xl p-5 shadow-lg mb-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-2 h-2 rounded-full bg-accent-primary shadow-[0_0_10px_var(--glow-cyan)]" />
-              <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">PEQ Editor & Bands</span>
-            </div>
-            <div className="min-h-[400px]">
-              <PEQEditor filters={filters} onChange={setFilters} />
             </div>
           </section>
         </div>
@@ -669,7 +796,7 @@ function App() {
           <div className="flex-[2] min-h-0 flex flex-col">
             {renderNowPlaying()}
           </div>
-          <div className="flex-1 min-w-[300px] max-w-sm hidden lg:flex flex-col">
+          <div ref={secondaryContainerRef} className="flex-1 min-w-[300px] max-w-sm hidden lg:flex flex-col">
             <PlayQueue queue={queue} />
           </div>
         </div>
@@ -683,28 +810,39 @@ function App() {
           <div className="w-1 h-12 bg-themed-medium rounded-full" />
         </Separator>
         <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
-          {activeMode === 'processing' && renderProcessingTools()}
-          {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
-          {activeMode === 'queue' && <PlayQueue queue={queue} />}
+          <div ref={secondaryContainerRef} className="h-full w-full flex flex-col">
+            {activeMode === 'processing' && renderProcessingTools()}
+            {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
+            {activeMode === 'queue' && <PlayQueue queue={queue} />}
+          </div>
         </Panel>
       </Group>
     );
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-themed-deep text-themed-primary overflow-clip transition-colors">
+    <div
+      className="flex flex-col h-[100dvh] w-screen bg-themed-deep text-themed-primary overflow-clip transition-all duration-700 ease-in-out"
+      style={{ backgroundColor: 'var(--bg-app)' }}
+    >
       {/* FLOATING MENU BUTTON - Safe area padding for mobile */}
       <button
+        ref={menuButtonRef}
         onClick={() => setMenuOpen(!menuOpen)}
         className="fixed top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] z-50 p-3 rounded-xl shadow-xl hover:opacity-80 transition-all active:scale-95"
         style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
       >
-        {menuOpen ? <X size={20} style={{ color: '#ffffff' }} /> : <Menu size={20} style={{ color: '#ffffff' }} />}
+        <Menu size={20} style={{ color: '#ffffff' }} />
       </button>
 
       {/* DROPDOWN MENU */}
       {menuOpen && (
-        <div className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] z-50 bg-themed-card/95 backdrop-blur-xl border border-themed-medium rounded-xl shadow-2xl w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300">
+        <div
+          ref={sideMenuRef}
+          onMouseDown={() => setMenuActivity(Date.now())}
+          className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] z-50 border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300"
+          style={{ backgroundColor: '#000000' }}
+        >
 
           {menuView === 'main' ? (
             <>
@@ -718,6 +856,23 @@ function App() {
                   <div className="text-[10px] text-themed-muted uppercase tracking-widest font-black">DSP Processor</div>
                 </div>
               </div>
+
+              {/* Backend Section */}
+              <div className="p-2">
+                <div className="px-3 pt-1 pb-2 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Device</div>
+                <div className="flex gap-2 px-1">
+                  <button onClick={() => setBackend('local')} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${backend === 'local' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'local' ? '#000000' : 'transparent', color: '#ffffff' }}>
+                    <Monitor size={14} /><span className="text-[11px] font-black truncate max-w-[100px]">{hostname}</span>
+                    {backend === 'local' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
+                  </button>
+                  <button onClick={() => raspiOnline && setBackend('raspi')} disabled={!raspiOnline} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${!raspiOnline ? 'opacity-30 cursor-not-allowed bg-themed-deep border border-themed-medium text-themed-muted' : backend === 'raspi' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'raspi' ? '#000000' : 'transparent', color: '#ffffff' }}>
+                    <Server size={14} /><span className="text-[11px] font-black">RPi</span>
+                    {backend === 'raspi' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="mx-4 border-t border-themed-subtle my-1" />
 
               {/* View Mode Section */}
               <div className="p-2">
@@ -744,45 +899,16 @@ function App() {
 
               <div className="mx-4 border-t border-[#2a2a3e] my-1" />
 
-              {/* Backend Section */}
+              {/* Background Color Submenu Trigger */}
               <div className="p-2">
-                <div className="px-3 pt-1 pb-2 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Device</div>
-                <div className="flex gap-2 px-1">
-                  <button onClick={() => setBackend('local')} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${backend === 'local' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'local' ? '#000000' : 'transparent', color: '#ffffff' }}>
-                    <Monitor size={14} /><span className="text-[11px] font-black">Local</span>
-                    {backend === 'local' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
-                  </button>
-                  <button onClick={() => raspiOnline && setBackend('raspi')} disabled={!raspiOnline} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${!raspiOnline ? 'opacity-30 cursor-not-allowed bg-themed-deep border border-themed-medium text-themed-muted' : backend === 'raspi' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'raspi' ? '#000000' : 'transparent', color: '#ffffff' }}>
-                    <Server size={14} /><span className="text-[11px] font-black">RPi</span>
-                    {backend === 'raspi' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="mx-4 border-t border-themed-subtle my-1" />
-
-              {/* Audio Config Trigger */}
-              <div className="p-2">
-                <button onClick={() => setMenuView('settings')} className="w-full flex items-center justify-between px-3 py-3 rounded-lg hover:bg-white/5 text-themed-secondary transition-all">
+                <button onClick={() => setMenuView('colors')} className="w-full flex items-center justify-between px-3 py-3 rounded-lg hover:bg-white/5 text-themed-secondary transition-all">
                   <div className="flex items-center gap-3">
-                    <Settings size={16} style={{ color: '#ffffff' }} />
-                    <span className="text-sm font-bold">Audio Settings</span>
+                    <div className="w-5 h-5 rounded-sm border border-white/40 shadow-lg" style={{ backgroundColor: BACKGROUND_COLORS.find(c => c.id === bgColor)?.color || '#000000' }} />
+                    <span className="text-sm font-bold">Background Color</span>
                   </div>
-                  <ChevronRight size={16} style={{ color: '#ffffff' }} />
-                </button>
-              </div>
-
-              <div className="mx-4 border-t border-[#2a2a3e] my-1" />
-
-              {/* Theme Toggle */}
-              <div className="p-2">
-                <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="w-full flex items-center justify-between px-3 py-3 rounded-lg hover:bg-white/5 text-themed-secondary transition-all">
-                  <div className="flex items-center gap-3">
-                    {theme === 'dark' ? <Moon size={16} style={{ color: '#ffffff' }} /> : <Sun size={16} style={{ color: '#ffffff' }} />}
-                    <span className="text-sm font-bold">{theme === 'dark' ? 'Dark Mode' : 'Light Mode'}</span>
-                  </div>
-                  <div className={`w-9 h-5 rounded-full relative transition-colors ${theme === 'light' ? 'bg-accent-primary' : 'bg-themed-deep border border-themed-medium'}`}>
-                    <div className={`absolute top-0.5 w-3.5 h-3.5 bg-white rounded-full transition-all ${theme === 'light' ? 'left-4.5' : 'left-0.5'}`} />
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-themed-muted font-black uppercase tracking-widest truncate max-w-[80px]">{BACKGROUND_COLORS.find(c => c.id === bgColor)?.name}</span>
+                    <ChevronRight size={16} style={{ color: '#ffffff' }} />
                   </div>
                 </button>
               </div>
@@ -796,7 +922,7 @@ function App() {
                 <span className="text-[9px] text-accent-primary font-black tracking-widest">{(sampleRate / 1000).toFixed(1)}K / {bitDepth}B</span>
               </div>
             </>
-          ) : (
+          ) : menuView === 'settings' ? (
             <>
               {/* Settings Header */}
               <div className="px-4 py-3 border-b border-themed-subtle flex items-center gap-2">
@@ -825,29 +951,63 @@ function App() {
 
                 <div className="space-y-1.5">
                   <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Bit Depth</label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     {[16, 24, 32].map(bd => (
                       <button
                         key={bd}
-                        onClick={() => setBitDepth(bd)}
+                        onClick={() => setBitDepth(bd as 16 | 24 | 32)}
                         className={`px-3 py-2 rounded-lg text-[11px] font-bold border transition-all ${bitDepth === bd ? 'bg-accent-primary/10 border-accent-primary/30 text-accent-primary' : 'bg-themed-deep border-themed-medium text-themed-muted hover:border-themed-secondary'}`}
                       >
-                        {bd}-bit
+                        {bd} bit
                       </button>
                     ))}
                   </div>
                 </div>
               </div>
+            </>
+          ) : (
+            <>
+              {/* Colors Header */}
+              <div className="px-4 py-3 border-b border-themed-subtle flex items-center gap-2">
+                <button onClick={() => setMenuView('main')} className="p-2 hover:bg-white/5 rounded-lg transition-all text-themed-muted hover:text-themed-primary">
+                  <ChevronLeft size={18} />
+                </button>
+                <div className="text-sm font-black text-themed-primary header-text">Background Color</div>
+              </div>
 
-
-              {/* Auto-save hint */}
-              <div className="px-6 py-4 text-center">
-                <p className="text-[10px] text-[#404060] font-medium leading-relaxed italic">
-                  Changes are applied when the DSP engine is restarted.
-                </p>
+              {/* Colors Content */}
+              <div className="p-2 overflow-y-auto max-h-[400px] custom-scrollbar">
+                <div className="grid grid-cols-1 gap-0.5">
+                  {BACKGROUND_COLORS.map(colorObj => (
+                    <button
+                      key={colorObj.id}
+                      onClick={() => {
+                        setBgColor(colorObj.id);
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-3 rounded-lg transition-all ${bgColor === colorObj.id ? 'bg-white/10 ring-1 ring-white/20' : 'hover:bg-white/5'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={`w-6 h-6 rounded-sm border transition-all ${bgColor === colorObj.id ? 'border-white/80 scale-110 shadow-[0_0_10px_rgba(255,255,255,0.3)]' : 'border-white/20'}`}
+                          style={{ backgroundColor: colorObj.color }}
+                        />
+                        <span className={`text-sm font-bold ${bgColor === colorObj.id ? 'text-accent-primary' : 'text-themed-secondary'}`}>
+                          {colorObj.name}
+                        </span>
+                      </div>
+                      {bgColor === colorObj.id && <Check size={16} strokeWidth={3} className="text-accent-primary" />}
+                    </button>
+                  ))}
+                </div>
               </div>
             </>
           )}
+          {/* Auto-save hint */}
+          <div className="px-6 py-4 text-center">
+            <p className="text-[10px] text-[#404060] font-medium leading-relaxed italic">
+              Changes are applied when the DSP engine is restarted.
+            </p>
+          </div>
         </div>
       )}
 
@@ -855,13 +1015,14 @@ function App() {
 
 
       {/* MAIN CONTENT with safe area padding */}
-      <div className="flex-1 min-h-0 min-w-0 overflow-hidden p-4 md:p-8 flex flex-col">
+      <div className="flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col">
         {renderLayout()}
       </div>
 
       {/* Floating Media Source & Zone Selector (Bottom Left) */}
       <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-[max(1.5rem,env(safe-area-inset-left))] z-50 flex flex-col-reverse items-start gap-4">
         <button
+          ref={sourceButtonRef}
           onClick={() => setSourcePopoverOpen(!sourcePopoverOpen)}
           className="group p-4 rounded-full shadow-xl active:scale-95 transition-all"
           style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
@@ -871,9 +1032,13 @@ function App() {
         </button>
 
         {sourcePopoverOpen && (
-          <div className="flex items-end gap-3 animate-in fade-in zoom-in-95 slide-in-from-bottom-6 duration-300">
+          <div
+            ref={sourceSelectorRef}
+            onMouseDown={() => setSourceActivity(Date.now())}
+            className="flex items-end gap-3 animate-in fade-in zoom-in-95 slide-in-from-bottom-6 duration-300"
+          >
             {/* Main Source Selector */}
-            <div className="bg-themed-card/95 backdrop-blur-2xl border border-themed-medium rounded-xl shadow-2xl p-2.5 w-52">
+            <div className="bg-black border border-themed-medium rounded-xl shadow-2xl p-2.5 w-52">
               <div className="px-3 pt-2 pb-2 text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] border-b border-themed-subtle mb-1">Fuente de Audio</div>
               <div className="space-y-1">
                 <button
@@ -901,7 +1066,7 @@ function App() {
 
             {/* Roon Zones Sub-menu (Show only if Roon is selected) */}
             {mediaSource === 'roon' && (
-              <div className="bg-themed-card/95 backdrop-blur-2xl border border-themed-medium rounded-xl shadow-2xl p-2.5 w-56">
+              <div className="bg-black border border-themed-medium rounded-xl shadow-2xl p-2.5 w-56">
                 <div className="px-3 pt-2 pb-2 text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] border-b border-themed-subtle mb-1 flex items-center justify-between">
                   <span>Zonas Roon</span>
                   {roonZones.length > 0 && <div className="w-1.5 h-1.5 rounded-full bg-accent-success shadow-[0_0_8px_var(--accent-success)]" />}
@@ -933,24 +1098,15 @@ function App() {
         )}
       </div>
 
-      {/* Popover overlay for clicking outside */}
-      {sourcePopoverOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-black/10 backdrop-blur-[2px]"
-          onClick={() => setSourcePopoverOpen(false)}
-        />
-      )}
-      <div className="fixed bottom-2 right-4 pointer-events-none opacity-20 text-[6px] font-mono tracking-widest text-[#606080]">
-        ARTIS NOVA v1.2.6-LYRICS
-      </div>
-
-      {/* Click outside to close menu - Placed at bottom for best event capturing */}
-      {menuOpen && (
-        <div
-          className="fixed inset-0 z-[45] bg-black/10 backdrop-blur-[2px] cursor-default"
-          onClick={() => setMenuOpen(false)}
-        />
-      )}
+      <SignalPathPopover
+        isOpen={signalPathOpen}
+        onClose={() => setSignalPathOpen(false)}
+        nodes={nowPlaying.signalPath?.nodes || []}
+        quality={nowPlaying.signalPath?.quality}
+        anchorRect={signalAnchorRect}
+        nowPlayingRect={nowPlayingContainerRef.current?.getBoundingClientRect()}
+        secondaryRect={secondaryContainerRef.current?.getBoundingClientRect()}
+      />
     </div>
   );
 }
