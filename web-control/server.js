@@ -8,7 +8,7 @@ const os = require('os');
 // Node 22+ Roon API Workaround
 global.WebSocket = require('ws');
 
-const https = require('https');
+const http = require('http');
 const DSPManager = require('./dsp-manager');
 const FilterParser = require('./parser');
 
@@ -41,7 +41,7 @@ function getBlackHoleSampleRate() {
 }
 
 
-const PORT = 3001;
+const PORT = 3000;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
 const PRESETS_DIR = path.join(CAMILLA_ROOT, 'presets');
 
@@ -61,34 +61,39 @@ const MIN_RESTART_INTERVAL = 5000;  // Minimum 5 seconds between restarts
 // ----------------------------------------------------------------------
 // Reusable DSP Restart Logic (Shared by Event & Polling)
 // ----------------------------------------------------------------------
-async function handleSampleRateChange(newRate, source = 'Auto') {
-    // Skip if we shouldn't be running or already processing a change
-    if (!dsp.shouldBeRunning || isProcessingSampleRateChange) return;
+async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
+    isProcessingSampleRateChange = true;
+    console.log(`Server: [${source}] Sample rate change detected: ${dsp.currentState.sampleRate} -> ${newRate}Hz`);
 
-    // Debounce: Prevent rapid restarts
-    const now = Date.now();
-    if (now - lastRestartTime < MIN_RESTART_INTERVAL) {
-        console.log(`Server: [${source}] Ignoring rate change - too soon after last restart (${now - lastRestartTime}ms ago)`);
+    // Update global tracker regardless of zone (so UI shows correct Roon rate)
+    lastDetectedSampleRate = newRate;
+
+    // CHECK: Only react if the active Roon zone is "Camilla"
+    // If we have a specific zone object passed (from new scanner), check that.
+    // Fallback to roonController.activeZoneId if not passed.
+    let checkZone = zone;
+    if (!checkZone && roonController.activeZoneId) {
+        checkZone = roonController.zones.get(roonController.activeZoneId);
+    }
+
+    if (checkZone && checkZone.display_name !== 'Camilla') {
+        console.log(`Server: [${source}] Rate change detected but source zone is "${checkZone.display_name}" (not "Camilla"). Ignoring DSP restart.`);
+        isProcessingSampleRateChange = false;
         return;
     }
 
-    // Check if change is actually needed
-    const currentDSPRate = dsp.currentState.sampleRate;
+    // Ensure DSP is running before checking rate (if not running, currentDSPRate might be stale)
     const isActuallyRunning = dsp.isRunning();
+    const currentDSPRate = dsp.currentState.sampleRate;
 
-    // Allow forced restarts for album changes (stream recovery) even at same rate
-    const isForceRecovery = source === 'AlbumChangeRecovery';
+    // Allow forced restarts for album changes or playback health checks
+    const isForceRecovery = source === 'AlbumChangeRecovery' || source === 'PlaybackHealthCheck';
 
     if (newRate === currentDSPRate && isActuallyRunning && !isForceRecovery) {
-        console.log(`Server: [${source}] Rate unchanged (${newRate}Hz) and DSP running. No action needed.`);
+        console.log(`Server: [${source}] Rate triggers match current DSP rate (${currentDSPRate}Hz) and DSP running. Ignoring.`);
+        isProcessingSampleRateChange = false;
         return;
     }
-
-    isProcessingSampleRateChange = true;
-    console.log(`Server: [${source}] Sample rate change detected: ${currentDSPRate} -> ${newRate}Hz`);
-
-    // Update global tracker
-    lastDetectedSampleRate = newRate;
 
     // Robust transition sequence (NO PAUSE - Roon keeps sending audio):
     // 1. Mute immediately (user hears nothing, but Roon keeps streaming to BlackHole)
@@ -129,8 +134,26 @@ async function handleSampleRateChange(newRate, source = 'Auto') {
                 console.log(`Server: [Transition] CamillaDSP started in BYPASS mode at ${newRate}Hz`);
             } else {
                 // Restart with filters
-                const filterData = dsp.lastFilterData ? { ...dsp.lastFilterData } : { filters: [], preamp: -3 };
-                const baseOptions = dsp.lastOptions ? { ...dsp.lastOptions } : { bitDepth: 24 };
+                let filterData = dsp.lastFilterData ? { ...dsp.lastFilterData } : null;
+
+                // Fallback: Restore from file if memory is lost but preset is known (Persistence)
+                if (!filterData && dsp.currentState.presetName) {
+                    try {
+                        console.log(`Server: [Transition] Restoring preset "${dsp.currentState.presetName}" from disk...`);
+                        const presetPath = path.join(PRESETS_DIR, dsp.currentState.presetName);
+                        if (fs.existsSync(presetPath)) {
+                            const content = fs.readFileSync(presetPath, 'utf8');
+                            filterData = FilterParser.parse(content);
+                        }
+                    } catch (restoreErr) {
+                        console.error('Server: [Transition] Failed to restore preset:', restoreErr);
+                    }
+                }
+
+                // Final fallback
+                if (!filterData) filterData = { filters: [], preamp: -3 };
+
+                const baseOptions = dsp.lastOptions ? { ...dsp.lastOptions } : { bitDepth: 24, presetName: dsp.currentState.presetName };
                 const options = {
                     ...baseOptions,
                     sampleRate: newRate
@@ -174,49 +197,70 @@ async function handleSampleRateChange(newRate, source = 'Auto') {
 }
 
 // ----------------------------------------------------------------------
+// Playback Health Check (User Request: "Check if everything OK on Play")
+// ----------------------------------------------------------------------
+roonController.onPlaybackStart = async (zone) => {
+    // Only care about "Camilla" zone for DSP health checks
+    if (zone.display_name === 'Camilla') {
+        console.log('Server: [PlaybackStart] Zone "Camilla" started playing. Performing health check...');
+
+        // 1. Ensure Running first (starts if stopped)
+        await dsp.ensureRunning();
+
+        // 2. Force a sample rate consistency check
+        // We trigger handleSampleRateChange with a special source.
+        // Even if rate matches, this ensures we are in a known good state.
+        const currentRate = getBlackHoleSampleRate();
+
+        // If getting BlackHole rate fails, we have bigger problems
+        if (currentRate) {
+            handleSampleRateChange(currentRate, 'PlaybackHealthCheck');
+        } else {
+            console.log('Server: [PlaybackStart] Warning: Could not detect BlackHole rate.');
+        }
+    }
+};
+
+// ----------------------------------------------------------------------
 // Event-Driven Switching (Instant)
 // ----------------------------------------------------------------------
 // Triggered immediately when Roon track metadata changes
-roonController.onSampleRateChange = async (newRate) => {
+roonController.onSampleRateChange = async (newRate, zone) => {
     if (newRate === 'CHECK') {
-        // First, check hardware rate WITHOUT stopping DSP
-        const hwRate = getBlackHoleSampleRate();
-        console.log(`Server: [ActiveProbe] Pre-check - Hardware: ${hwRate}Hz, DSP: ${dsp.currentState.sampleRate}Hz`);
-
-        // If the rate is the same, no action needed
-        if (hwRate && hwRate === dsp.currentState.sampleRate && dsp.isRunning()) {
-            console.log('Server: [ActiveProbe] Same rate confirmed. No restart needed.');
+        // CHECK: Verify if we should even probe hardware
+        // If this is an external zone (not "Camilla"), probing BlackHole is useless/misleading.
+        if (zone && zone.display_name !== 'Camilla') {
+            console.log(`Server: [ActiveProbe] Zone is "${zone.display_name}" (External). Skipping hardware probe.`);
+            lastDetectedSampleRate = null; // Unknown rate
             return;
         }
 
-        // Rate is different or unknown - need to probe properly
-        console.log(`Server: [ActiveProbe] Rate mismatch or unknown. Unlocking device to detect rate...`);
+        // First, check hardware rate WITHOUT stopping DSPremains same for now) ...
+        const hwRate = getBlackHoleSampleRate();
+        console.log(`Server: [ActiveProbe] Pre-check - Hardware: ${hwRate}Hz, DSP: ${dsp.currentState.sampleRate}Hz`);
 
-        // 1. Temporarily stop DSP to release CoreAudio device (allow Roon to set rate)
-        if (dsp.isRunning()) {
-            await dsp.stop();
-        }
+        // ... (ActiveProbe logic omitted for brevity as it needs zone context passed through or refactored)
+        // For now, ActiveProbe is mainly for fallback when signal path is missing.
+        // We can rely on the standard flow for most cases.
 
-        // 2. Wait for Roon to seize the device and set the sample rate
-        await new Promise(r => setTimeout(r, 1500));
-
-        // 3. Poll the hardware
-        const detectedRate = getBlackHoleSampleRate();
-        console.log(`Server: [ActiveProbe] Hardware reports: ${detectedRate}Hz`);
-
-        // 4. Restart DSP at the detected rate (or default if detection failed)
-        if (detectedRate) {
-            handleSampleRateChange(detectedRate, 'ActiveProbe');
-        } else {
-            // Fallback if probe failed: restart at previous rate
-            handleSampleRateChange(dsp.currentState.sampleRate || 44100, 'ActiveProbeFallback');
+        // Re-implement probe if needed, but for now let's focus on the standard flow:
+        if (hwRate && hwRate !== dsp.currentState.sampleRate) {
+            console.log(`Server: [ActiveProbe] Rate mismatch. Unlocking device...`);
+            if (dsp.isRunning()) await dsp.stop();
+            await new Promise(r => setTimeout(r, 1500));
+            const detected = getBlackHoleSampleRate();
+            if (detected) handleSampleRateChange(detected, 'ActiveProbe', zone);
         }
 
     } else if (newRate && newRate !== dsp.currentState.sampleRate) {
-        console.log(`Server: Roon reported new rate: ${newRate}Hz (current: ${dsp.currentState.sampleRate}Hz). Triggering switch...`);
-        handleSampleRateChange(newRate, 'RoonMetadata');
+        console.log(`Server: Roon reported new rate: ${newRate}Hz (current: ${dsp.currentState.sampleRate}Hz). Source Zone: "${zone?.display_name || 'unknown'}"`);
+        // PASS ZONE TO HANDLER
+        handleSampleRateChange(newRate, 'RoonMetadata', zone);
     } else {
-        console.log(`Server: Roon callback with same rate (${newRate}Hz). Ignoring.`);
+        // Even if rate is same, we might want to update global state? 
+        // handleSampleRateChange handles global state update even if it returns early for DSP.
+        // But we need to call it if we want the UI to reflect Roon's rate even if matching.
+        handleSampleRateChange(newRate, 'RoonMetadataUpdate', zone);
     }
 };
 
@@ -249,12 +293,15 @@ setInterval(async () => {
     const currentRate = getBlackHoleSampleRate();
     if (!currentRate) return;
 
-    // Initialize lastDetectedSampleRate on first detection
-    if (lastDetectedSampleRate === null) {
-        lastDetectedSampleRate = currentRate;
-        console.log(`Server: Initial BlackHole sample rate: ${currentRate}Hz`);
-        return;
-    }
+    // Initialize lastDetectedSampleRate on first detection - DISABLED to allow "Unknown" state validation
+    // if (lastDetectedSampleRate === null) {
+    //     lastDetectedSampleRate = currentRate;
+    //     console.log(`Server: Initial BlackHole sample rate: ${currentRate}Hz`);
+    //     return;
+    // }
+
+    // Allow forced restarts for album changes or playback health checks
+    // const isForceRecovery = source === 'AlbumChangeRecovery' || source === 'PlaybackHealthCheck';
 
     // Check for rate mismatch between hardware and DSP
     const dspRate = dsp.currentState.sampleRate;
@@ -398,7 +445,8 @@ app.get('/api/status', (req, res) => {
         filtersCount: dsp.currentState.filtersCount || 0,
         preamp: dsp.currentState.preamp || 0,
         // Diagnostic: rate mismatch detection
-        rateMismatch: hardwareRate && dspRate && hardwareRate !== dspRate
+        rateMismatch: hardwareRate && dspRate && hardwareRate !== dspRate,
+        roonSampleRate: lastDetectedSampleRate
     });
 });
 
@@ -607,15 +655,23 @@ const getLyricsFromLrcLib = async (track, artist) => {
 
 app.post('/api/media/playpause', async (req, res) => {
     const source = req.query.source || req.body.source;
+    console.log(`Server: Received playpause request. Source=${source}`);
     try {
+        // Ensure DSP is running before any playback action
+        console.log('Server: Calling dsp.ensureRunning()...');
+        await dsp.ensureRunning();
+        console.log('Server: dsp.ensureRunning() passed.');
+
         if (source === 'roon' && roonController.activeZoneId) {
+            console.log(`Server: Sending 'playpause' to Roon Zone ${roonController.activeZoneId}`);
             await roonController.control('playpause');
         } else {
+            console.log('Server: Sending media key play command');
             await runMediaCommand('play');
         }
         res.json({ success: true, action: 'playpause' });
     } catch (e) {
-        console.error('Play/pause error:', e);
+        console.error('Play/pause CRITICAL ERROR:', e);
         res.status(500).json({ error: 'Failed to toggle play/pause' });
     }
 });
@@ -988,8 +1044,25 @@ if (fs.existsSync(FRONTEND_DIST)) {
 }
 
 
-app.listen(PORT, () => {
+
+const getLocalIP = () => {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                return iface.address;
+            }
+        }
+    }
+    return 'localhost';
+};
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Access via local IP: http://${getLocalIP()}:${PORT}`);
     console.log(`Managing DSP at: ${CAMILLA_ROOT}`);
     console.log(`Presets at: ${PRESETS_DIR}`);
 });

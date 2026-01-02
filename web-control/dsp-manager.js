@@ -10,6 +10,8 @@ class DSPManager {
         this.presetsDir = path.join(baseDir, 'presets');
         this.dspPath = path.join(baseDir, 'camilladsp');
         this.bypassConfigPath = path.join(baseDir, 'config-bypass.yml');
+        this.stateFilePath = path.join(baseDir, 'state.json');
+
         this.currentState = {
             running: false,
             bypass: false,
@@ -19,7 +21,37 @@ class DSPManager {
             filtersCount: 0,
             preamp: 0
         };
-        this.shouldBeRunning = true; // Intended state tracking (default to true for appliance mode)
+
+        // Load persisted state to determine intent
+        this.persistedState = this.loadState();
+        this.shouldBeRunning = this.persistedState.running;
+
+        // Sync vital state from persistence
+        if (this.persistedState.presetName) this.currentState.presetName = this.persistedState.presetName;
+        if (this.persistedState.bypass) this.currentState.bypass = this.persistedState.bypass;
+        if (this.persistedState.sampleRate) this.currentState.sampleRate = this.persistedState.sampleRate;
+
+        console.log('DSPManager initialized. Persisted Intent:', this.shouldBeRunning ? (this.persistedState.bypass ? 'Bypass' : 'Running') : 'Stopped');
+    }
+
+    loadState() {
+        try {
+            if (fs.existsSync(this.stateFilePath)) {
+                return JSON.parse(fs.readFileSync(this.stateFilePath, 'utf8'));
+            }
+        } catch (e) {
+            console.error('Failed to load state.json:', e);
+        }
+        return { running: true, bypass: false }; // Default intent is running (appliance mode)
+    }
+
+    saveState(updates = {}) {
+        try {
+            this.persistedState = { ...this.persistedState, ...updates };
+            fs.writeFileSync(this.stateFilePath, JSON.stringify(this.persistedState, null, 2));
+        } catch (e) {
+            console.error('Failed to save state.json:', e);
+        }
     }
 
     isRunning() {
@@ -134,6 +166,11 @@ class DSPManager {
                     reject(err);
                 });
 
+                // Start Watchdog to ensure persistence
+                this.startWatchdog();
+
+                this.saveState({ running: true, bypass: false, presetName: options.presetName });
+
                 // Give it a moment to verify it hasn't crashed immediately
                 setTimeout(() => {
                     if (this.isRunning()) resolve(true);
@@ -146,8 +183,59 @@ class DSPManager {
         });
     }
 
+    startWatchdog() {
+        if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+        console.log('Starting DSP Watchdog...');
+        this.watchdogInterval = setInterval(() => {
+            if (this.shouldBeRunning && !this.isRunning()) {
+                console.log('Watchdog: DSP process died unexpectedly. Attempting restart...');
+                if (this.lastFilterData) {
+                    // Retry start. Note: start() clears the interval, so this won't stack.
+                    // We use a simplified start call or just call start() which handles everything.
+                    // But we should catch errors to avoid unhandled rejections in interval.
+                    this.start(this.lastFilterData, this.lastOptions)
+                        .then(() => console.log('Watchdog: Restart successful'))
+                        .catch(e => console.error('Watchdog: Restart failed', e));
+                } else {
+                    console.log('Watchdog: Must restart but no last config found.');
+                }
+            }
+        }, 5000); // Check every 5 seconds
+    }
+
+    async ensureRunning() {
+        // Use persisted state as the source of truth for intent
+        const intendedState = this.persistedState;
+
+        if (intendedState.running && !this.isRunning()) {
+            console.log('ensureRunning: DSP died but should be running. Intent:', intendedState.bypass ? 'Bypass' : 'Normal');
+
+            // If internal flag matches, we can trust lastFilterData. 
+            // If this is a fresh boot, we might not have lastFilterData in memory.
+            // TODO: Ideally we should load last config from disk too, but for now we rely on the watchdog's restart logic
+            // or we expect a fresh start call from the server if it detects it's stopped.
+
+            if (intendedState.bypass) {
+                // We need a sample rate to start bypass. Use current state or default.
+                const rate = this.currentState.sampleRate || 96000;
+                return this.startBypass(rate);
+            } else if (this.lastFilterData) {
+                return this.start(this.lastFilterData, this.lastOptions);
+            }
+        }
+        return Promise.resolve(true); // Already running or explicitly stopped
+    }
+
     async stop() {
         this.shouldBeRunning = false; // Mark as explicitly stopped by user/system
+        this.saveState({ running: false });
+
+        if (this.watchdogInterval) {
+            clearInterval(this.watchdogInterval);
+            this.watchdogInterval = null;
+        }
+
         if (this.process) {
             console.log('Stopping CamillaDSP instance...');
             this.process.kill('SIGTERM');
@@ -235,8 +323,11 @@ class DSPManager {
     // Start in bypass mode (no filters, just pass-through)
     async startBypass(sampleRate) {
         // Stop any running instance first
+        // Note: stop() sets running=false in state, so we must set it back to true after
         await this.stop();
+
         this.shouldBeRunning = true;
+        this.saveState({ running: true, bypass: true }); // Persist BYPASS intent
 
         return new Promise((resolve, reject) => {
             try {

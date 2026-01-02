@@ -18,7 +18,7 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
         }
     }, [trackInfo?.track]);
 
-    if (!lyrics) return null;
+    // if (!lyrics) return null; // Logic moved inside render
 
     return (
 
@@ -35,11 +35,16 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
                 ref={scrollRef}
                 className="flex-1 overflow-y-auto px-6 md:px-32 py-12 custom-scrollbar relative"
             >
-                {lyrics === "[INSTRUMENTAL]" ? (
+
+                {!lyrics || lyrics === "[INSTRUMENTAL]" ? (
                     <div className="h-full flex flex-col items-center justify-center -mt-12 text-center opacity-60">
-                        <div className="text-6xl mb-6">♪</div>
-                        <h2 className="text-2xl font-black uppercase tracking-widest mb-2 text-themed-primary">Instrumental</h2>
-                        <p className="text-sm font-medium text-themed-muted">Music without words</p>
+                        <div className="text-6xl mb-6 text-themed-muted font-thin select-none" style={{ filter: 'drop-shadow(0 0 10px rgba(255,255,255,0.1))' }}>♪</div>
+                        <h2 className="text-xl font-black uppercase tracking-[0.2em] mb-3 text-themed-primary">
+                            {lyrics === "[INSTRUMENTAL]" ? 'Instrumental' : 'No Lyrics Found'}
+                        </h2>
+                        <p className="text-[11px] font-bold text-themed-muted uppercase tracking-widest max-w-[200px] leading-relaxed">
+                            {lyrics === "[INSTRUMENTAL]" ? 'Music without words' : 'Either this track is instrumental or lyrics are not available.'}
+                        </p>
                     </div>
                 ) : (
                     <>

@@ -16,7 +16,8 @@ interface Props {
 }
 
 const API_HOST = window.location.hostname;
-const API_URL = `http://${API_HOST}:3001`;
+const PROTOCOL = window.location.protocol;
+const API_URL = `${PROTOCOL}//${API_HOST}:3000`;
 
 const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
     const handlePlayItem = async (item: QueueItem, index: number) => {
@@ -24,7 +25,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
         if (mediaSource === 'roon' && !item.id) return;
 
         try {
-            await axios.post(`${API_URL}/media/playqueue`, {
+            await axios.post(`${API_URL}/api/media/playqueue`, {
                 id: item.id,
                 source: mediaSource,
                 index: index
@@ -50,7 +51,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
             </div>
 
             {/* Queue List */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-2 relative z-10 pointer-events-auto">
                 {queue.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-themed-muted/30 gap-2">
                         <Music2 size={32} strokeWidth={1} style={{ color: '#ffffff' }} />
@@ -59,10 +60,10 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
                 ) : (
                     <div className="space-y-[2px]">
                         {queue.map((item, i) => (
-                            <div
+                            <button
                                 key={i}
                                 onClick={() => handlePlayItem(item, i)}
-                                className={`py-1 px-2 rounded-lg transition-all border border-transparent group/item flex items-center gap-2 hover:bg-white/5 cursor-pointer hover:border-themed-subtle`}
+                                className={`w-full text-left py-1 px-2 rounded-lg transition-all border border-transparent group/item flex items-center gap-2 hover:bg-white/5 cursor-pointer hover:border-themed-subtle pointer-events-auto outline-none focus:bg-white/5 focus:border-themed-subtle bg-transparent appearance-none text-white`}
                             >
                                 <div className="text-[9px] font-mono text-themed-muted/50 w-4 text-center">{i + 1}</div>
 
@@ -85,7 +86,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
                                 </div>
 
                                 <div className="flex-1 min-w-0 flex flex-col justify-center leading-none">
-                                    <h4 className="text-[11px] font-black text-themed-primary/90 truncate group-hover/item:text-accent-primary transition-colors mb-[1px]">
+                                    <h4 className="text-[11px] font-black text-themed-primary opacity-90 truncate group-hover/item:text-accent-primary transition-colors mb-[1px]">
                                         {item.track}
                                     </h4>
                                     <div className="flex items-center gap-1.5 opacity-80">
@@ -102,7 +103,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
                                         )}
                                     </div>
                                 </div>
-                            </div>
+                            </button>
                         ))}
                     </div>
                 )}

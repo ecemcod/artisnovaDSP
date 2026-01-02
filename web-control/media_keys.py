@@ -47,13 +47,19 @@ def main():
     action = sys.argv[1].lower()
     
     if action in ['play', 'playpause']:
-        simulate_media_key(KEY_PLAY_PAUSE)
+        # simulate_media_key(KEY_PLAY_PAUSE)
+        import subprocess
+        subprocess.run(['osascript', '-e', 'tell application "Music" to playpause'])
         print("Play/Pause simulated")
     elif action == 'next':
-        simulate_media_key(KEY_NEXT)
+        # simulate_media_key(KEY_NEXT)
+        import subprocess
+        subprocess.run(['osascript', '-e', 'tell application "Music" to next track'])
         print("Next track simulated")
     elif action in ['prev', 'previous']:
-        simulate_media_key(KEY_PREVIOUS)
+        # simulate_media_key(KEY_PREVIOUS)
+        import subprocess
+        subprocess.run(['osascript', '-e', 'tell application "Music" to previous track'])
         print("Previous track simulated")
     elif action == 'stop':
         # Stop Music app

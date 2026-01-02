@@ -14,13 +14,15 @@ import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Asterisk
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Asterisk, Upload, Target, Settings, PowerOff
 } from 'lucide-react';
 import './index.css';
+import { parseRewFile } from './utils/rewParser';
 
 // Use current hostname to support access from any device on the local network
 const API_HOST = window.location.hostname;
-const API_URL = `http://${API_HOST}:3001/api`;
+const PROTOCOL = window.location.protocol;
+const API_URL = `${PROTOCOL}//${API_HOST}:3000/api`;
 
 // Device detection
 const isMobile = () => window.innerWidth < 768;
@@ -57,7 +59,7 @@ type BgColorId = typeof BACKGROUND_COLORS[number]['id'];
 interface SavedConfig {
   filters: FilterParam[];
   preamp: number;
-  sampleRate: number;
+  sampleRate: number | null;
   bitDepth: number;
   selectedPreset: string | null;
   activeMode?: 'playback' | 'processing' | 'lyrics' | 'queue';
@@ -80,7 +82,7 @@ function App() {
   const [preamp, setPreamp] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [isBypass, setIsBypass] = useState(false);
-  const [sampleRate, setSampleRate] = useState(96000);
+  const [sampleRate, setSampleRate] = useState<number | null>(96000);
   const [bitDepth, setBitDepth] = useState(24);
   const [isLoaded, setIsLoaded] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<{
@@ -128,6 +130,20 @@ function App() {
   const secondaryContainerRef = useRef<HTMLDivElement>(null);
   const isSeeking = useRef(false);
 
+  // DSP Context Configuration
+  const [dspEnabledZones, setDspEnabledZones] = useState<string[]>(() => {
+    const saved = localStorage.getItem('artisNovaDSP_dspZones');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const toggleDspZone = (zoneId: string) => {
+    setDspEnabledZones(prev => {
+      const next = prev.includes(zoneId) ? prev.filter(id => id !== zoneId) : [...prev, zoneId];
+      localStorage.setItem('artisNovaDSP_dspZones', JSON.stringify(next));
+      return next;
+    });
+  };
+
   // Sync currentTime with nowPlaying.position
   useEffect(() => {
     if (!isSeeking.current) {
@@ -144,6 +160,19 @@ function App() {
     return () => clearInterval(interval);
   }, [nowPlaying.state]);
 
+  // Persist Media Source and Restore Roon Zone
+  useEffect(() => {
+    localStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
+    if (mediaSource === 'roon') {
+      const lastZone = localStorage.getItem('artisNovaDSP_lastRoonZone');
+      if (lastZone) selectRoonZone(lastZone);
+    }
+  }, [mediaSource]);
+
+  // Instant DSP State Detection
+  const activeRoonZone = roonZones.find(z => z.active);
+  // DSP is active if: Source is Apple OR (Source is Roon AND Zone ID is explicitly enabled)
+  const isDspActive = mediaSource === 'apple' || (mediaSource === 'roon' && (!activeRoonZone || (activeRoonZone.id && dspEnabledZones.includes(activeRoonZone.id))));
 
   // Apply background color
   useEffect(() => {
@@ -304,17 +333,27 @@ function App() {
   };
 
   const selectRoonZone = async (zoneId: string) => {
+    localStorage.setItem('artisNovaDSP_lastRoonZone', zoneId);
+
+    // Optimistic UI update for instant feedback
+    setRoonZones(prev => prev.map(z => ({
+      ...z,
+      active: z.id === zoneId
+    })));
+
     try {
       await axios.post(`${API_URL}/media/roon/select`, { zoneId });
       fetchRoonZones();
+      setTimeout(fetchNowPlaying, 100); // Trigger immediate update
+      setTimeout(fetchNowPlaying, 500); // Trigger separate check for latency
     } catch { }
   };
 
   // Poll for now playing info
-  useEffect(() => {
-    const fetchNowPlaying = async () => {
-      try {
-        const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`);
+  const fetchNowPlaying = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`);
+      if (res.data) {
         if (res.data.track !== nowPlaying.track) {
           setNowPlaying(res.data);
           fetchLyrics(res.data.track, res.data.artist);
@@ -323,15 +362,26 @@ function App() {
             ...prev,
             state: res.data.state,
             position: res.data.position || 0,
-            duration: res.data.duration || 0
+            duration: res.data.duration || 0,
+            // Ensure metadata updates even if track name is identical (e.g. same song, diff zone)
+            signalPath: res.data.signalPath,
+            artist: res.data.artist,
+            album: res.data.album,
+            artworkUrl: res.data.artworkUrl
           }));
         }
-      } catch { }
-    };
+      }
+    } catch { }
+  };
+
+  useEffect(() => {
+    // Initial fetch
     fetchNowPlaying();
-    const interval = setInterval(fetchNowPlaying, 2000);
+
+    // Poll loop
+    const interval = setInterval(fetchNowPlaying, 1000);
     return () => clearInterval(interval);
-  }, [nowPlaying.track, nowPlaying.state, mediaSource]);
+  }, [mediaSource, nowPlaying.track, nowPlaying.state]);
 
   const fetchLyrics = async (track: string, artist: string) => {
     if (!track || !artist) {
@@ -414,7 +464,7 @@ function App() {
     loadPresets();
     checkStatus();
     fetchQueue();
-    const statusInterval = setInterval(checkStatus, 2000);
+    const statusInterval = setInterval(checkStatus, 1000);
     const queueInterval = setInterval(fetchQueue, 5000);
     return () => { clearInterval(statusInterval); clearInterval(queueInterval); };
   }, [mediaSource, nowPlaying.track]);
@@ -429,9 +479,15 @@ function App() {
       const res = await axios.get(`${API_URL}/status`);
       setIsRunning(res.data.running);
 
-      // Update sample rate and bit depth from server if DSP is running (dynamic update)
-      if (res.data.running && res.data.sampleRate > 0) {
-        setSampleRate(res.data.sampleRate);
+      // Update sample rate and bit depth from server (dynamic update)
+      if (res.data.running) {
+        // Prefer explicit Roon rate if available (even if null), otherwise fallback to DSP rate
+        if (res.data.roonSampleRate !== undefined) {
+          setSampleRate(res.data.roonSampleRate);
+        } else {
+          setSampleRate(res.data.sampleRate > 0 ? res.data.sampleRate : null);
+        }
+
         setBitDepth(res.data.bitDepth);
         setIsBypass(res.data.bypass || false);
       }
@@ -652,7 +708,7 @@ function App() {
                 className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-8 text-center uppercase"
                 style={{ color: '#9b59b6' }}
               >
-                {(sampleRate / 1000).toFixed(1)} kHz — {bitDepth} bits
+                {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
               </div>
 
               {/* Volume */}
@@ -688,6 +744,40 @@ function App() {
 
   // Render Processing Tools
   const renderProcessingTools = () => {
+    // If we're playing to an external zone (Direct Mode), show unavailable message
+    if (!isDspActive) {
+      return (
+        <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep items-center justify-center p-8 text-center space-y-4">
+          <div className="p-4 bg-white/5 rounded-full mb-2">
+            <Target size={48} className="text-themed-muted opacity-50" />
+          </div>
+          <h2 className="text-xl font-bold text-themed-primary">Processing Unavailable</h2>
+          <p className="text-sm text-themed-muted max-w-md">
+            Audio is being routed directly to an external device (Direct Mode).
+            DSP processing, VU meters, and PEQ are only available when playing through CamillaDSP.
+          </p>
+          <div>
+            <div className="text-[10px] uppercase tracking-widest text-[#9b59b6] font-bold mt-4 mb-6">
+              External Playback Active
+            </div>
+
+            {activeRoonZone && (
+              <button
+                onClick={() => toggleDspZone(activeRoonZone.id)}
+                className="px-6 py-3 bg-themed-panel border border-themed-medium rounded-xl hover:bg-white/5 hover:border-themed-subtle transition-all flex items-center gap-3 group"
+              >
+                <Zap size={16} className="text-accent-primary group-hover:scale-110 transition-transform" />
+                <div className="text-left">
+                  <div className="text-[10px] font-black uppercase text-themed-muted tracking-wider">Enable DSP for</div>
+                  <div className="text-sm font-bold text-themed-primary">{activeRoonZone.name}</div>
+                </div>
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep overflow-hidden">
         <div className="flex-1 flex flex-col h-full p-3 md:p-8 pt-14 md:pt-20 space-y-2 md:space-y-4 overflow-hidden">
@@ -727,6 +817,9 @@ function App() {
                       {presets.map(p => <option key={p} value={p}>{p.replace('.txt', '')}</option>)}
                     </select>
                     <button onClick={handleSave} className="p-2 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-primary hover:border-accent-primary rounded-lg transition-all shrink-0" title="Save Preset"><Save size={15} /></button>
+
+
+
                   </div>
                 </div>
 
@@ -764,6 +857,64 @@ function App() {
                           {isBypass ? '● BYP' : 'BYPASS'}
                         </button>
                       </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Tools */}
+                <div className="flex flex-col">
+                  <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1.5">Tools</span>
+                  <div className="flex items-center gap-2">
+                    {/* REW Import Button */}
+                    <div className="relative group/rew">
+                      <button
+                        onClick={() => document.getElementById('rew-upload')?.click()}
+                        className="p-2 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-warning hover:border-accent-warning rounded-lg transition-all shrink-0"
+                        title="Import REW Filter"
+                      >
+                        <Upload size={15} />
+                      </button>
+                      <input
+                        type="file"
+                        id="rew-upload"
+                        accept=".txt"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const reader = new FileReader();
+                          reader.onload = (ev) => {
+                            const content = ev.target?.result as string;
+                            if (content) {
+                              const newFilters = parseRewFile(content);
+                              if (newFilters.length > 0) {
+                                setFilters(newFilters);
+                                alert(`Imported ${newFilters.length} filters from REW!`);
+                                e.target.value = '';
+                              } else {
+                                alert('No valid filters found in file.');
+                              }
+                            }
+                          };
+                          reader.readAsText(file);
+                        }}
+                      />
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full mb-2 right-0 hidden group-hover/rew:block w-48 p-2 bg-black/90 border border-themed-subtle rounded-lg text-[10px] text-gray-300 z-50 pointer-events-none shadow-xl backdrop-blur-md">
+                        <p className="font-bold text-white mb-1">Import REW Filters</p>
+                        Export your filters from REW as text (File &gt; Export &gt; Filter Settings as text) and select the file here.
+                      </div>
+                    </div>
+
+                    {/* Disable DSP Button (Symmetrical Action) */}
+                    {isDspActive && mediaSource === 'roon' && activeRoonZone && (
+                      <button
+                        onClick={() => toggleDspZone(activeRoonZone.id)}
+                        className="p-2 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-danger hover:border-accent-danger rounded-lg transition-all shrink-0"
+                        title={`Disable DSP for ${activeRoonZone.name} (Direct Mode)`}
+                      >
+                        <PowerOff size={15} />
+                      </button>
                     )}
                   </div>
                 </div>
@@ -890,7 +1041,8 @@ function App() {
                     <div className="flex items-center gap-3"><Activity size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Processing</span></div>
                     {activeMode === 'processing' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
                   </button>
-                  <button onClick={() => { setActiveMode('lyrics'); setMenuOpen(false); }} disabled={!lyrics} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${!lyrics ? 'opacity-30 cursor-not-allowed' : activeMode === 'lyrics' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
+
+                  <button onClick={() => { setActiveMode('lyrics'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'lyrics' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
                     <div className="flex items-center gap-3"><MessageCircle size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Lyrics</span></div>
                     {activeMode === 'lyrics' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
                   </button>
@@ -899,6 +1051,19 @@ function App() {
                     {activeMode === 'queue' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
                   </button>
                 </div>
+              </div>
+
+              <div className="mx-4 border-t border-[#2a2a3e] my-1" />
+
+              {/* Settings Trigger */}
+              <div className="p-2">
+                <button onClick={() => setMenuView('settings')} className="w-full flex items-center justify-between px-3 py-3 rounded-lg hover:bg-white/5 text-themed-secondary transition-all">
+                  <div className="flex items-center gap-3">
+                    <Settings size={18} style={{ color: '#ffffff' }} />
+                    <span className="text-sm font-bold">Settings</span>
+                  </div>
+                  <ChevronRight size={16} style={{ color: '#ffffff' }} />
+                </button>
               </div>
 
               <div className="mx-4 border-t border-[#2a2a3e] my-1" />
@@ -923,7 +1088,7 @@ function App() {
                   <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-accent-primary shadow-[0_0_8px_var(--glow-cyan)]' : 'bg-accent-danger'}`} />
                   <span className="text-[10px] font-black text-themed-muted uppercase tracking-widest">{isRunning ? 'DSP ON' : 'DSP OFF'}</span>
                 </div>
-                <span className="text-[9px] text-accent-primary font-black tracking-widest">{(sampleRate / 1000).toFixed(1)}K / {bitDepth}B</span>
+                <span className="text-[9px] text-accent-primary font-black tracking-widest">{isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)}K / ${bitDepth}B` : '--') : 'DIRECT'}</span>
               </div>
             </>
           ) : menuView === 'settings' ? (
@@ -965,6 +1130,26 @@ function App() {
                         {bd} bit
                       </button>
                     ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
+                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">DSP Enabled Zones</label>
+                  <div className="space-y-1">
+                    {roonZones.length === 0 ? <div className="text-[10px] text-themed-muted italic px-2">No Roon zones found</div> :
+                      roonZones.map(zone => (
+                        <button
+                          key={zone.id}
+                          onClick={() => toggleDspZone(zone.id)}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border transition-all ${dspEnabledZones.includes(zone.id) ? 'bg-accent-primary/10 border-accent-primary/30 text-accent-primary' : 'bg-themed-deep border-themed-medium text-themed-muted hover:border-themed-secondary'}`}
+                        >
+                          <span className="text-[11px] font-bold">{zone.name}</span>
+                          <div className={`w-8 h-4 rounded-full relative transition-colors ${dspEnabledZones.includes(zone.id) ? 'bg-accent-primary' : 'bg-themed-medium'}`}>
+                            <div className={`absolute top-0.5 bottom-0.5 w-3 h-3 rounded-full bg-white transition-all shadow-sm ${dspEnabledZones.includes(zone.id) ? 'right-0.5' : 'left-0.5'}`} />
+                          </div>
+                        </button>
+                      ))
+                    }
                   </div>
                 </div>
               </div>
@@ -1013,7 +1198,8 @@ function App() {
             </p>
           </div>
         </div>
-      )}
+      )
+      }
 
 
 
@@ -1111,7 +1297,7 @@ function App() {
         nowPlayingRect={nowPlayingContainerRef.current?.getBoundingClientRect()}
         secondaryRect={secondaryContainerRef.current?.getBoundingClientRect()}
       />
-    </div>
+    </div >
   );
 }
 

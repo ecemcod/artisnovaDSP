@@ -67,11 +67,6 @@ class RoonController {
                                     console.log(`RoonController: Auto-selecting zone: ${z.display_name} (${z.zone_id})`);
                                     this.setActiveZone(z.zone_id); // Use setter to trigger queue subscription
                                 }
-
-                                // Check initial sample rate
-                                if (z.zone_id === this.activeZoneId) {
-                                    this._checkSampleRateChange(z);
-                                }
                             });
                         }
                         if (data.zones_added) {
@@ -83,12 +78,15 @@ class RoonController {
                         if (data.zones_changed) {
                             data.zones_changed.forEach(z => {
                                 const old = this.zones.get(z.zone_id) || {};
-                                this.zones.set(z.zone_id, { ...old, ...z });
+                                const combinedZone = { ...old, ...z };
 
-                                // Check for sample rate change in active zone
-                                if (z.zone_id === this.activeZoneId) {
-                                    this._checkSampleRateChange(this.zones.get(z.zone_id));
+                                // Detect Playback Start (e.g. paused -> playing, stopped -> playing)
+                                if (z.state === 'playing' && old.state !== 'playing') {
+                                    console.log(`RoonController: Playback STARTED for zone "${combinedZone.display_name}"`);
+                                    if (this.onPlaybackStart) this.onPlaybackStart(combinedZone);
                                 }
+
+                                this.zones.set(z.zone_id, combinedZone);
                             });
                         }
                         if (data.zones_removed) {
@@ -102,6 +100,11 @@ class RoonController {
                             });
                         }
                         console.log(`RoonController: Current Map size after update: ${this.zones.size}`);
+
+                        // NEW: Scan ALL zones for active playback to determine sample rate
+                        // This ensures we detect sample rate even if playing to a "Direct" zone
+                        this._scanForActiveSampleRate();
+
                         this._notifyStatus();
                     }
                 });
@@ -109,6 +112,7 @@ class RoonController {
                 // Periodic debug log
                 setInterval(() => {
                     console.log(`RoonController: Heartbeat - Zones count: ${this.zones.size}`);
+                    this._scanForActiveSampleRate(); // Force periodic scan
                 }, 30000);
             },
 
@@ -148,6 +152,34 @@ class RoonController {
     }
 
 
+
+    async control(action, val) {
+        if (!this.transport || !this.activeZoneId) return;
+        const zone = this.zones.get(this.activeZoneId);
+        if (!zone) return;
+
+        console.log(`RoonController: sending control "${action}" val="${val}" to zone "${zone.display_name}"`);
+
+        return new Promise((resolve, reject) => {
+            if (action === 'volume') {
+                this.transport.change_volume(zone, 'absolute', val, (err) => {
+                    if (err) reject(err); else resolve();
+                });
+            } else if (action === 'mute') {
+                this.transport.mute(zone, 'toggle', (err) => {
+                    if (err) reject(err); else resolve();
+                });
+            } else if (action === 'unmute') {
+                this.transport.mute(zone, 'unmute', (err) => {
+                    if (err) reject(err); else resolve();
+                });
+            } else {
+                this.transport.control(zone, action, (err) => {
+                    if (err) reject(err); else resolve();
+                });
+            }
+        });
+    }
 
     getZones() {
         const zoneList = Array.from(this.zones.values()).map(z => ({
@@ -449,7 +481,7 @@ class RoonController {
             if (newRate !== this.currentSampleRate) {
                 console.log(`RoonController: Sample rate CHANGED: ${this.currentSampleRate || 'none'} -> ${newRate}Hz`);
                 this.currentSampleRate = newRate;
-                if (this.onSampleRateChange) this.onSampleRateChange(newRate);
+                if (this.onSampleRateChange) this.onSampleRateChange(newRate, zone);
             } else if (albumChanged) {
                 // Album changed but rate is the same - notify for stream recovery
                 console.log(`RoonController: Album CHANGED: "${previousAlbum}" -> "${newAlbum}" (same rate: ${newRate}Hz)`);
@@ -488,9 +520,9 @@ class RoonController {
                         if (this.onAlbumChange) this.onAlbumChange(newAlbum, false);
                     } else {
                         this.currentAlbum = newAlbum;
-                        if (this.onSampleRateChange) this.onSampleRateChange('CHECK');
+                        if (this.onSampleRateChange) this.onSampleRateChange('CHECK', zone);
                     }
-                }, 2500);
+                }, 1000);
             }
         } else {
             // If paused/stopped, clear any pending check
@@ -498,6 +530,44 @@ class RoonController {
                 clearTimeout(this.checkTimeout);
                 this.checkTimeout = null;
             }
+        }
+    }
+
+    // NEW: Scan all zones to find the active sample rate
+    // Prioritizes "Camilla" zone if playing, otherwise takes any playing zone
+    _scanForActiveSampleRate() {
+        let bestCandidate = null;
+        console.log('RoonController: Scanning zones for active rate...');
+
+        for (const zone of this.zones.values()) {
+            if (zone.state === 'playing') {
+                console.log(`RoonController: Found playing zone: "${zone.display_name}"`);
+                // DEBUG: Log the FULL zone data to find signal_path
+                try {
+                    // Avoid circular references if any (though Roon zones are usually plain objects)
+                    console.log(`RoonController: FULL ZONE [${zone.display_name}]:`, JSON.stringify(zone, null, 2));
+                } catch (e) {
+                    console.log('Error logging full zone data', e.message);
+                    // Fallback: log keys
+                    console.log('Zone Keys:', Object.keys(zone));
+                }
+
+                if (zone.display_name === 'Camilla') {
+                    // Critical priority
+                    bestCandidate = zone;
+                    break;
+                } else if (!bestCandidate) {
+                    // Fallback
+                    bestCandidate = zone;
+                }
+            }
+        }
+
+        if (bestCandidate) {
+            console.log(`RoonController: Best candidate for rate: "${bestCandidate.display_name}"`);
+            this._checkSampleRateChange(bestCandidate);
+        } else {
+            console.log('RoonController: No playing zones found during scan.');
         }
     }
 }
