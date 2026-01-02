@@ -16,6 +16,7 @@
     "node-roon-api-browse": "github:roonlabs/node-roon-api-browse",
     "node-roon-api-image": "github:roonlabs/node-roon-api-image",
     "node-roon-api-transport": "github:roonlabs/node-roon-api-transport",
+    "sqlite3": "^5.1.7",
     "ws": "^8.18.3"
   }
 }

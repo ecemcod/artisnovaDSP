@@ -1,6 +1,7 @@
 const RoonApi = require("node-roon-api");
 const RoonApiTransport = require("node-roon-api-transport");
 const RoonApiImage = require("node-roon-api-image");
+const RoonApiBrowse = require("node-roon-api-browse");
 
 // Node 22 workaround
 if (typeof WebSocket === 'undefined') {
@@ -20,6 +21,7 @@ class RoonController {
         this.roon = null;
         this.core = null;
         this.transport = null;
+        this.browseApi = null;
         this.activeZoneId = null;
         this.zones = new Map();
         this.statusCallback = null;
@@ -52,7 +54,13 @@ class RoonController {
                 console.log('Roon Core Paired:', core.display_name);
                 this.core = core;
                 this.transport = core.services.RoonApiTransport;
+                this.browseApi = core.services.RoonApiBrowse;
                 this.isPaired = true;
+
+                // Probe History on Pair
+                setTimeout(() => {
+                    this.probeHistoryAccess();
+                }, 5000);
 
                 this.transport.subscribe_zones((status, data) => {
                     console.log(`RoonController: SubscribeZones Status=${status}`);
@@ -77,6 +85,7 @@ class RoonController {
                         }
                         if (data.zones_changed) {
                             data.zones_changed.forEach(z => {
+                                console.log(`RoonController: Zone Changed ${z.display_name}`);
                                 const old = this.zones.get(z.zone_id) || {};
                                 const combinedZone = { ...old, ...z };
 
@@ -120,6 +129,7 @@ class RoonController {
                 console.log('Roon Core Unpaired');
                 this.core = null;
                 this.transport = null;
+                this.browseApi = null;
                 this.isPaired = false;
                 this._notifyStatus();
             }
@@ -127,12 +137,13 @@ class RoonController {
 
         try {
             this.roon.init_services({
-                required_services: [RoonApiTransport, RoonApiImage]
+                required_services: [RoonApiTransport, RoonApiImage, RoonApiBrowse]
             });
             console.log('RoonController: Services initialized');
         } catch (err) {
             console.error('RoonController: Service init failed:', err);
         }
+
 
         console.log('RoonController: Starting discovery in 2s...');
         setTimeout(() => {
@@ -314,38 +325,6 @@ class RoonController {
             signalPath: track.signal_path,
             bitDepth: this._extractBitDepth(track.signal_path)
         };
-    }
-
-    async control(action, value) {
-        if (!this.transport || !this.activeZoneId) return;
-
-        const zone = this.zones.get(this.activeZoneId);
-        if (!zone) return;
-
-        switch (action) {
-            case 'playpause': this.transport.control(zone, 'playpause'); break;
-            case 'play': this.transport.control(zone, 'play'); break;
-            case 'pause': this.transport.control(zone, 'pause'); break;
-            case 'next': this.transport.control(zone, 'next'); break;
-            case 'prev': this.transport.control(zone, 'previous'); break;
-            case 'seek': this.transport.seek(zone, 'absolute', value); break;
-            case 'seekToStart': this.transport.seek(zone, 'absolute', 0); break;
-            case 'mute':
-                if (zone.outputs?.[0]) {
-                    this.transport.mute(zone.outputs[0], 'mute');
-                }
-                break;
-            case 'unmute':
-                if (zone.outputs?.[0]) {
-                    this.transport.mute(zone.outputs[0], 'unmute');
-                }
-                break;
-            case 'volume':
-                if (zone.outputs?.[0]) {
-                    this.transport.change_volume(zone.outputs[0], 'absolute', value);
-                }
-                break;
-        }
     }
 
     playQueueItem(queueItemId) {
@@ -568,6 +547,81 @@ class RoonController {
             this._checkSampleRateChange(bestCandidate);
         } else {
             console.log('RoonController: No playing zones found during scan.');
+        }
+    }
+
+    async probeHistoryAccess() {
+        if (!this.browseApi) return;
+        console.log('RoonController: Probing History Access (Deep Search)...');
+
+        const loadItems = (opts) => {
+            return new Promise((resolve, reject) => {
+                this.browseApi.load(opts, (err, payload) => {
+                    if (err) return reject(err);
+                    resolve(payload);
+                });
+            });
+        };
+
+        const browse = (opts) => {
+            return new Promise((resolve, reject) => {
+                this.browseApi.browse(opts, (err, payload) => {
+                    if (err) return reject(err);
+                    resolve(payload);
+                });
+            });
+        };
+
+        const getItems = async (opts) => {
+            let payload = await browse(opts);
+            let items = payload.items;
+            if (payload.action === 'list' && !items) {
+                const listPayload = await loadItems({
+                    hierarchy: "browse",
+                    level: payload.list.level,
+                    offset: 0,
+                    count: 100
+                });
+                items = listPayload.items;
+            }
+            return items || [];
+        };
+
+        try {
+            // Step 1: Browse Root
+            const rootItems = await getItems({ hierarchy: "browse", zone_or_output_id: null });
+            console.log('RoonController: Root Items:', rootItems.map(i => i.title).join(', '));
+
+            // Check Root first
+            let history = rootItems.find(i => ['History', 'Played', 'Show History', 'Recent'].includes(i.title));
+            if (history) {
+                console.log(`RoonController: FOUND HISTORY AT ROOT: "${history.title}" (key: ${history.item_key})`);
+                return;
+            }
+
+            // Step 2: Iterate all root items to depth 1
+            for (const item of rootItems) {
+                if (['Search', 'Settings', 'Zone'].includes(item.title)) continue; // Skip unlikely
+
+                console.log(`RoonController: Checking inside "${item.title}"...`);
+                try {
+                    const children = await getItems({ hierarchy: "browse", item_key: item.item_key });
+                    console.log(`RoonController:   Items in "${item.title}":`, children.map(i => i.title).join(', '));
+
+                    history = children.find(i => ['History', 'Played', 'Show History'].includes(i.title));
+                    if (history) {
+                        console.log(`RoonController: FOUND HISTORY IN "${item.title}": "${history.title}" (key: ${history.item_key})`);
+                        return;
+                    }
+                } catch (err) {
+                    console.log(`RoonController:   Failed to browse "${item.title}": ${err.message}`);
+                }
+            }
+
+            console.log('RoonController: History probe finished. History item NOT found.');
+
+        } catch (e) {
+            console.error('RoonController: Probe Error:', e);
         }
     }
 }

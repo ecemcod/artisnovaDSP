@@ -9,8 +9,11 @@ const os = require('os');
 global.WebSocket = require('ws');
 
 const http = require('http');
+const https = require('https');
 const DSPManager = require('./dsp-manager');
 const FilterParser = require('./parser');
+const db = require('./database'); // History DB
+
 
 const app = express();
 app.use(cors());
@@ -40,6 +43,21 @@ function getBlackHoleSampleRate() {
     return null;
 }
 
+
+
+// History Tracking State
+let historyState = {
+    currentTrack: null,
+    currentArtist: null,
+    currentAlbum: null,
+    currentSource: null,
+    currentDevice: null,
+    startTime: 0, // Unix timestamp when track started
+    accumulatedTime: 0, // Seconds played
+    isPlaying: false,
+    lastCheck: 0,
+    metadata: { genre: null, artworkUrl: null }
+};
 
 const PORT = 3000;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
@@ -315,7 +333,129 @@ setInterval(async () => {
         console.log('Server: [Poll] DSP Crash detected. Recovering...');
         handleSampleRateChange(currentRate, 'CrashRecovery');
     }
+
+    // HISTORY CHECK
+    const now = Date.now();
+    const roonState = roonController.getNowPlaying();
+    let currentTrack = null;
+    let currentArtist = null;
+    let currentAlbum = null;
+    let isPlaying = false;
+    let source = null;
+    let device = null;
+
+    if (roonState && roonController.activeZoneId) {
+        // Roon is active
+        source = 'roon';
+        if (roonState.state === 'playing' || roonState.state === 'paused') {
+            isPlaying = roonState.state === 'playing';
+            currentTrack = roonState.track;
+            currentArtist = roonState.artist;
+            currentAlbum = roonState.album;
+            const zone = roonController.zones.get(roonController.activeZoneId);
+            device = zone ? zone.display_name : 'Unknown Zone';
+        }
+    } else {
+        // Check Apple Music / System via media_keys (Simplified: assume if not Roon, check request could happen here but it's async)
+        // For now, tracking Apple Music is harder in a sync loop. 
+        // We will skip async Apple Music check in this sync loop to avoid blocking, 
+        // or implement it if polling becomes async (it is async lambda).
+        // Let's rely on Roon for now as primary, but if Roon isn't valid, we could try media_keys if we want full coverage.
+    }
+
+    // Logic:
+    if (currentTrack && currentTrack !== historyState.currentTrack) {
+        // Track Changed
+        // Save previous if valid
+        if (historyState.currentTrack && historyState.accumulatedTime > 30) {
+            console.log(`History: Saving "${historyState.currentTrack}" (Listened ${historyState.accumulatedTime}s)`);
+            db.saveTrack({
+                title: historyState.currentTrack,
+                artist: historyState.currentArtist,
+                album: historyState.currentAlbum,
+                style: historyState.metadata.genre || 'Unknown',
+                source: historyState.currentSource,
+                device: historyState.currentDevice,
+                artworkUrl: historyState.metadata.artworkUrl,
+                timestamp: Math.floor(historyState.startTime / 1000),
+                durationListened: historyState.accumulatedTime
+            }).catch(e => console.error('History Error:', e));
+        }
+
+        // New Track
+        historyState.currentTrack = currentTrack;
+        historyState.currentArtist = currentArtist;
+        historyState.currentAlbum = currentAlbum;
+        historyState.currentSource = source || 'apple'; // Default to Apple if not Roon (approx)
+        historyState.currentDevice = device || 'Local / Mac';
+        historyState.startTime = now;
+        historyState.accumulatedTime = 0;
+        historyState.isPlaying = isPlaying;
+        historyState.metadata = { genre: null, artworkUrl: null };
+
+        // Fetch Metadata (Genre)
+        getMetadataFromiTunes(currentTrack, currentArtist, currentAlbum).then(meta => {
+            if (historyState.currentTrack === currentTrack) { // Ensure still same track
+                historyState.metadata = meta;
+                if (meta.genre) console.log(`History: Found genre for "${currentTrack}": ${meta.genre}`);
+            }
+        });
+
+    } else if (currentTrack && currentTrack === historyState.currentTrack) {
+        // Same Track, accumulate time
+        if (isPlaying) {
+            const delta = (now - historyState.lastCheck) / 1000;
+            if (delta > 0 && delta < 10) { // prevent huge jumps on sleep/wake
+                historyState.accumulatedTime += delta;
+            }
+        }
+    } else if (!currentTrack && historyState.currentTrack) {
+        // Stopped / Cleared
+        if (historyState.accumulatedTime > 30) {
+            console.log(`History: Saving "${historyState.currentTrack}" (Listened ${historyState.accumulatedTime}s) - Stopped`);
+            db.saveTrack({
+                title: historyState.currentTrack,
+                artist: historyState.currentArtist,
+                album: historyState.currentAlbum,
+                style: historyState.metadata.genre || 'Unknown',
+                source: historyState.currentSource,
+                device: historyState.currentDevice,
+                artworkUrl: historyState.metadata.artworkUrl,
+                timestamp: Math.floor(historyState.startTime / 1000),
+                durationListened: historyState.accumulatedTime
+            }).catch(e => console.error('History Error:', e));
+        }
+        historyState.currentTrack = null;
+        historyState.accumulatedTime = 0;
+    }
+
+    historyState.lastCheck = now;
+
 }, 5000);
+
+// History API
+app.get('/api/history/stats', async (req, res) => {
+    try {
+        const range = req.query.range || 'all';
+        const stats = await db.getStats(range);
+        res.json(stats);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/history/list', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = (page - 1) * limit;
+
+        const history = await db.getHistory(limit, offset);
+        res.json({ items: history, page, limit });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 
 // Routes
@@ -470,24 +610,20 @@ const runMediaCommand = (action, args = []) => {
     });
 };
 
-const getArtworkFromiTunes = (track, artist, album) => {
+const getMetadataFromiTunes = (track, artist, album) => {
     return new Promise((resolve) => {
-        if (!artist && !track && !album) return resolve(null);
+        if (!artist && !track && !album) return resolve({ artworkUrl: null, genre: null });
 
         const searches = [];
-        // 1. Exact Album match (ES store for Spanish music support)
         if (album && artist) searches.push({ term: `${album} ${artist}`, entity: 'album' });
-        // 2. Exact Track match
         if (track && artist) searches.push({ term: `${track} ${artist}`, entity: 'song' });
-        // 3. Fallback: Any album by this artist (better than no image)
         if (artist) searches.push({ term: artist, entity: 'album' });
 
         const trySearch = (index) => {
-            if (index >= searches.length) return resolve(null);
+            if (index >= searches.length) return resolve({ artworkUrl: null, genre: null });
 
             const item = searches[index];
             const query = encodeURIComponent(item.term);
-            // Default to ES store which has better coverage for user's music
             const url = `https://itunes.apple.com/search?term=${query}&entity=${item.entity}&limit=1&country=ES`;
 
             https.get(url, (res) => {
@@ -497,9 +633,10 @@ const getArtworkFromiTunes = (track, artist, album) => {
                     try {
                         const json = JSON.parse(data);
                         if (json.results && json.results.length > 0) {
-                            // Get high res image
-                            const artworkUrl = json.results[0].artworkUrl100.replace('100x100bb.jpg', '600x600bb.jpg');
-                            resolve(artworkUrl);
+                            const result = json.results[0];
+                            const artworkUrl = result.artworkUrl100 || null;
+                            const genre = result.primaryGenreName;
+                            resolve({ artworkUrl, genre });
                         } else {
                             trySearch(index + 1);
                         }
@@ -808,6 +945,12 @@ app.get('/api/media/info', async (req, res) => {
             const raw = roonController.getNowPlaying() || { state: 'unknown' };
             const info = { ...raw };
 
+            const zone = roonController.zones.get(roonController.activeZoneId);
+            info.device = zone ? zone.display_name : 'Unknown Zone';
+            if (info.track === historyState.currentTrack) {
+                info.style = historyState.metadata.genre;
+            }
+
             // Dynamic Signal Path Generation from Roon Metadata
             // Dynamic Signal Path Generation from Roon Metadata
             let uiNodes = [];
@@ -858,7 +1001,10 @@ app.get('/api/media/info', async (req, res) => {
             }
 
             // Always Add DSP and Final Output nodes if DSP is running (Chain: Roon -> DSP -> Hardware)
-            if (dsp.isRunning()) {
+            // BUT only if we are actually playing through the Camilla zone (for Roon source)
+            const isUsingCamillaZone = source !== 'roon' || (info.device === 'Camilla');
+
+            if (dsp.isRunning() && isUsingCamillaZone) {
                 uiNodes.push(
                     {
                         type: 'dsp',
@@ -885,6 +1031,11 @@ app.get('/api/media/info', async (req, res) => {
 
         const output = await runMediaCommand('info');
         const info = JSON.parse(output);
+
+        info.device = 'Local / Mac';
+        if (info.track === historyState.currentTrack) {
+            info.style = historyState.metadata.genre;
+        }
 
         // Try iTunes if local artwork failed or is missing
         if (!info.artwork && (info.track || info.album) && info.artist) {
@@ -1026,7 +1177,7 @@ app.post('/api/volume', (req, res) => {
 
 
 // Serve Frontend with anti-cache headers
-const FRONTEND_DIST = path.join(CAMILLA_ROOT, 'web-app-new', 'dist');
+const FRONTEND_DIST = path.join(__dirname, 'public');
 if (fs.existsSync(FRONTEND_DIST)) {
     // Disable caching for all requests
     app.use((req, res, next) => {

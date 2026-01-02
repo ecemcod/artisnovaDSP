@@ -10,11 +10,12 @@ import {
 } from "react-resizable-panels";
 import PlayQueue from './components/PlayQueue';
 import Lyrics from './components/Lyrics';
+import History from './components/History';
 import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Asterisk, Upload, Target, Settings, PowerOff
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Target, Settings, PowerOff, Asterisk
 } from 'lucide-react';
 import './index.css';
 import { parseRewFile } from './utils/rewParser';
@@ -62,7 +63,7 @@ interface SavedConfig {
   sampleRate: number | null;
   bitDepth: number;
   selectedPreset: string | null;
-  activeMode?: 'playback' | 'processing' | 'lyrics' | 'queue';
+  activeMode?: 'playback' | 'processing' | 'lyrics' | 'queue' | 'history';
   backend?: 'local' | 'raspi';
   bypass?: boolean;
   bgColor?: BgColorId;
@@ -73,7 +74,7 @@ const BACKENDS = {
   raspi: { name: 'Raspberry Pi', wsUrl: 'ws://raspberrypi.local:5005' }
 } as const;
 
-type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'queue';
+type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'queue' | 'history';
 
 function App() {
   const [presets, setPresets] = useState<string[]>([]);
@@ -102,6 +103,8 @@ function App() {
         status: string;
       }[];
     };
+    style?: string;
+    device?: string;
   }>({ state: 'unknown', track: '', artist: '', position: 0, duration: 0 });
   const [lyrics, setLyrics] = useState<string | null>(null);
   const [queue, setQueue] = useState<{ track: string; artist: string; album?: string; artworkUrl?: string }[]>([]);
@@ -356,7 +359,7 @@ function App() {
       if (res.data) {
         if (res.data.track !== nowPlaying.track) {
           setNowPlaying(res.data);
-          fetchLyrics(res.data.track, res.data.artist);
+          fetchLyrics(res.data.track, res.data.artist, res.data.device);
         } else {
           setNowPlaying(prev => ({
             ...prev,
@@ -367,7 +370,9 @@ function App() {
             signalPath: res.data.signalPath,
             artist: res.data.artist,
             album: res.data.album,
-            artworkUrl: res.data.artworkUrl
+            artworkUrl: res.data.artworkUrl,
+            style: res.data.style,
+            device: res.data.device
           }));
         }
       }
@@ -383,8 +388,14 @@ function App() {
     return () => clearInterval(interval);
   }, [mediaSource, nowPlaying.track, nowPlaying.state]);
 
-  const fetchLyrics = async (track: string, artist: string) => {
+  const fetchLyrics = async (track: string, artist: string, device?: string) => {
     if (!track || !artist) {
+      setLyrics(null);
+      return;
+    }
+    // Safety: If track matches device name, it's a Roon metadata artifact (e.g. AirPlay stream)
+    if (device && track === device) {
+      console.log('Skipping lyrics: Track equals Device name (Metadata artifact)');
       setLyrics(null);
       return;
     }
@@ -629,10 +640,17 @@ function App() {
                     <Asterisk size={16} strokeWidth={3} style={{ color: '#ffffff' }} />
                   </button>
                 </div>
-                <div className="flex items-center justify-center">
+                <div className="flex flex-col items-center justify-center">
                   <p className="text-base md:text-lg text-white/60 font-medium truncate max-w-[95%]">
                     <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'}</span> — {nowPlaying.artist || 'System Ready'}
                   </p>
+                  {nowPlaying.style && (
+                    <div className="mt-4 animate-in fade-in slide-in-from-top-1 duration-500">
+                      <span className="inline-block px-10 py-1.5 rounded-full bg-white/5 text-[10px] font-bold uppercase text-accent-secondary border border-white/10 shadow-sm backdrop-blur-md">
+                        {nowPlaying.style}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -733,6 +751,11 @@ function App() {
                 </div>
                 <Volume2 size={14} style={{ color: '#ffffff' }} />
               </div>
+              {nowPlaying.device && (
+                <div className="mt-4 text-center animate-in fade-in duration-700 delay-150">
+                  <span className="text-[10px] text-white/30 font-black uppercase tracking-[0.25em]">{nowPlaying.device}</span>
+                </div>
+              )}
             </div>
 
           </div>
@@ -942,6 +965,7 @@ function App() {
         case 'processing': return renderProcessingTools();
         case 'lyrics': return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
         case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
+        case 'history': return <History />;
         default: return renderNowPlaying();
       }
     }
@@ -966,9 +990,11 @@ function App() {
         </Separator>
         <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
           <div ref={secondaryContainerRef} className="h-full w-full flex flex-col">
+            {/* 3. LYRICS/QUEUE/HISTORY/PROCESSING - Based on activeMode */}
             {activeMode === 'processing' && renderProcessingTools()}
             {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
             {activeMode === 'queue' && <PlayQueue queue={queue} mediaSource={mediaSource} />}
+            {activeMode === 'history' && <History />}
           </div>
         </Panel>
       </Group>
@@ -1049,6 +1075,10 @@ function App() {
                   <button onClick={() => { setActiveMode('queue'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'queue' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
                     <div className="flex items-center gap-3"><Music size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Queue</span></div>
                     {activeMode === 'queue' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
+                  </button>
+                  <button onClick={() => { setActiveMode('history'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'history' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
+                    <div className="flex items-center gap-3"><RefreshCcw size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">History</span></div>
+                    {activeMode === 'history' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
                   </button>
                 </div>
               </div>
