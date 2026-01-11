@@ -75,6 +75,12 @@ class RoonController {
                                     console.log(`RoonController: Auto-selecting zone: ${z.display_name} (${z.zone_id})`);
                                     this.setActiveZone(z.zone_id); // Use setter to trigger queue subscription
                                 }
+
+                                // If we have a restored activeZoneId, trigger queue subscription when it's found
+                                if (this.activeZoneId === z.zone_id && !this._queueSubscription) {
+                                    console.log(`RoonController: Restored zone ${z.display_name} found, subscribing to queue.`);
+                                    this._subscribeQueue();
+                                }
                             });
                         }
                         if (data.zones_added) {
@@ -201,6 +207,14 @@ class RoonController {
         }));
         console.log(`RoonController: getZones called. count=${zoneList.length}, active=${this.activeZoneId}`);
         return zoneList;
+    }
+
+    getZone(zoneId) {
+        return this.zones.get(zoneId) || null;
+    }
+
+    getActiveZone() {
+        return this.getZone(this.activeZoneId);
     }
 
     setActiveZone(zoneId) {

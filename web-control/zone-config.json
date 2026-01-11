@@ -1,0 +1,11 @@
+{
+    "zones": {
+        "Raspberry": "raspi",
+        "Camilla": "local"
+    },
+    "defaults": {
+        "dspBackend": "local"
+    },
+    "lastActiveZoneId": "1601c7b8516f3a07537339f01d88c74e4f5b",
+    "lastActiveZoneName": "Raspberry"
+}

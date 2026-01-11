@@ -11,6 +11,7 @@ global.WebSocket = require('ws');
 const http = require('http');
 const https = require('https');
 const DSPManager = require('./dsp-manager');
+const RemoteDSPManager = require('./remote-dsp-manager');
 const FilterParser = require('./parser');
 const db = require('./database'); // History DB
 
@@ -18,6 +19,14 @@ const db = require('./database'); // History DB
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+        const duration = Date.now() - start;
+        console.log(`${new Date().toISOString()} ${req.method} ${req.url} ${res.statusCode} ${duration}ms`);
+    });
+    next();
+});
 
 // Roon Integration
 const roonController = require('./roon-controller');
@@ -62,8 +71,150 @@ let historyState = {
 const PORT = 3000;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
 const PRESETS_DIR = path.join(CAMILLA_ROOT, 'presets');
+const ZONE_CONFIG_PATH = path.join(__dirname, 'zone-config.json');
 
+// LOCAL DSP Manager (Mac Mini)
 const dsp = new DSPManager(CAMILLA_ROOT);
+
+// REMOTE DSP Manager (Raspberry Pi)
+const remoteDsp = new RemoteDSPManager({
+    host: 'raspberrypi.local',
+    port: 1234
+});
+
+// Available backends registry
+const DSP_BACKENDS = {
+    local: { name: 'Local', manager: dsp, wsUrl: 'ws://localhost:5005' },
+    raspi: { name: 'Raspberry Pi', manager: remoteDsp, wsUrl: 'ws://raspberrypi.local:1234' }
+};
+
+// Zone configuration (loaded from file)
+let zoneConfig = { zones: {}, defaults: { dspBackend: 'local' }, backendSettings: {} };
+
+function loadRaspiCredentials() {
+    try {
+        const raspiTxtPath = path.join(CAMILLA_ROOT, 'raspi.txt');
+        if (fs.existsSync(raspiTxtPath)) {
+            const content = fs.readFileSync(raspiTxtPath, 'utf8');
+            const lines = content.split('\n');
+            const creds = {};
+            lines.forEach(line => {
+                const [key, value] = line.split('=').map(s => s.trim());
+                if (key && value) creds[key] = value;
+            });
+            if (creds.user && creds.host && creds.password) {
+                console.log('Server: Loaded Raspberry Pi credentials from raspi.txt');
+                remoteDsp.setOptions({
+                    host: creds.host,
+                    user: creds.user,
+                    password: creds.password
+                });
+            }
+        }
+    } catch (err) {
+        console.error('Server: Failed to load raspi.txt:', err.message);
+    }
+}
+
+function loadZoneConfig() {
+    try {
+        if (fs.existsSync(ZONE_CONFIG_PATH)) {
+            const content = fs.readFileSync(ZONE_CONFIG_PATH, 'utf8');
+            zoneConfig = JSON.parse(content);
+            console.log('Server: Loaded zone config:', JSON.stringify(zoneConfig, null, 2));
+
+            // Apply last active zone if present
+            if (zoneConfig.lastActiveZoneId) {
+                console.log(`Server: Restoring last active zone ID: ${zoneConfig.lastActiveZoneId}`);
+                roonController.activeZoneId = zoneConfig.lastActiveZoneId;
+            }
+            if (zoneConfig.lastActiveZoneName) {
+                console.log(`Server: Restoring last active zone Name: ${zoneConfig.lastActiveZoneName}`);
+                // If it looks like we need the remote DSP, connect now to sync state
+                if (zoneConfig.lastActiveZoneName === 'Raspberry') {
+                    console.log('Server: Auto-connecting to Remote DSP to sync state...');
+                    remoteDsp.connect().catch(err => console.error('Server: Initial auto-connect failed:', err.message));
+                }
+            }
+            if (zoneConfig.backendSettings) {
+                if (zoneConfig.backendSettings.raspi) {
+                    remoteDsp.setOptions(zoneConfig.backendSettings.raspi);
+                    if (zoneConfig.backendSettings.raspi.host) {
+                        DSP_BACKENDS.raspi.wsUrl = `ws://${zoneConfig.backendSettings.raspi.host}:${zoneConfig.backendSettings.raspi.port || 1234}`;
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Server: Failed to load zone config:', err.message);
+    }
+}
+
+function saveZoneConfig() {
+    try {
+        fs.writeFileSync(ZONE_CONFIG_PATH, JSON.stringify(zoneConfig, null, 4));
+        console.log('Server: Saved zone config');
+    } catch (err) {
+        console.error('Server: Failed to save zone config:', err.message);
+    }
+}
+
+// Load credentials and config on startup
+loadRaspiCredentials();
+loadZoneConfig();
+
+/**
+ * Get the correct DSP manager based on Roon zone configuration
+ * @param {string} zoneName - Name of the Roon zone
+ * @returns {DSPManager|RemoteDSPManager} The appropriate DSP manager
+ */
+function getDspForZone(zoneName) {
+    // 1. Try by provided zone name
+    let backendId = zoneConfig.zones[zoneName];
+
+    // 2. If not found, try using keywords in the zone name (robustness)
+    if (!backendId && zoneName) {
+        const lowerName = zoneName.toLowerCase();
+        if (lowerName.includes('raspberry') || lowerName.includes('pi')) {
+            backendId = 'raspi';
+        } else if (lowerName.includes('camilla') || lowerName.includes('local')) {
+            backendId = 'local';
+        }
+    }
+
+    backendId = backendId || zoneConfig.defaults.dspBackend || 'local';
+
+    const backend = DSP_BACKENDS[backendId];
+    if (backend) {
+        console.log(`Server: Using ${backend.name} DSPManager (Zone: "${zoneName || 'active'}", Backend: ${backendId})`);
+        return backend.manager;
+    }
+
+    console.log(`Server: Using local DSPManager (fallback)`);
+    return dsp;
+}
+
+/**
+ * Get backend ID for a zone
+ */
+function getBackendIdForZone(zoneName) {
+    return zoneConfig.zones[zoneName] || zoneConfig.defaults.dspBackend || 'local';
+}
+
+/**
+ * Get current active zone name from Roon
+ */
+function getActiveZoneName() {
+    if (roonController.activeZoneId) {
+        const zone = roonController.zones.get(roonController.activeZoneId);
+        if (zone) return zone.display_name;
+    }
+
+    // Fallback to persisted name if Roon hasn't loaded zones yet
+    if (zoneConfig.lastActiveZoneName) return zoneConfig.lastActiveZoneName;
+
+    return null;
+}
 
 // Ensure presets dir exists
 if (!fs.existsSync(PRESETS_DIR)) {
@@ -81,28 +232,29 @@ const MIN_RESTART_INTERVAL = 5000;  // Minimum 5 seconds between restarts
 // ----------------------------------------------------------------------
 async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
     isProcessingSampleRateChange = true;
-    console.log(`Server: [${source}] Sample rate change detected: ${dsp.currentState.sampleRate} -> ${newRate}Hz`);
 
-    // Update global tracker regardless of zone (so UI shows correct Roon rate)
-    lastDetectedSampleRate = newRate;
-
-    // CHECK: Only react if the active Roon zone is "Camilla"
-    // If we have a specific zone object passed (from new scanner), check that.
-    // Fallback to roonController.activeZoneId if not passed.
+    // Determine which zone we're dealing with
     let checkZone = zone;
     if (!checkZone && roonController.activeZoneId) {
         checkZone = roonController.zones.get(roonController.activeZoneId);
     }
+    const zoneName = checkZone ? checkZone.display_name : null;
 
-    if (checkZone && checkZone.display_name !== 'Camilla') {
-        console.log(`Server: [${source}] Rate change detected but source zone is "${checkZone.display_name}" (not "Camilla"). Ignoring DSP restart.`);
+    // Get the appropriate DSP manager for this zone
+    const activeDsp = getDspForZone(zoneName);
+
+    // Skip zones that don't have managed DSP. 
+    // If the backendId for this zone is 'local' or 'raspi', we process it.
+    const backendId = getBackendIdForZone(zoneName);
+    if (!backendId) {
+        console.log(`Server: [${source}] Zone "${zoneName}" doesn't use managed DSP. Ignoring.`);
         isProcessingSampleRateChange = false;
         return;
     }
 
     // Ensure DSP is running before checking rate (if not running, currentDSPRate might be stale)
-    const isActuallyRunning = dsp.isRunning();
-    const currentDSPRate = dsp.currentState.sampleRate;
+    const isActuallyRunning = activeDsp.isRunning();
+    const currentDSPRate = activeDsp.currentState.sampleRate;
 
     // Allow forced restarts for album changes or playback health checks
     const isForceRecovery = source === 'AlbumChangeRecovery' || source === 'PlaybackHealthCheck';
@@ -129,36 +281,38 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
         console.log(`Server: [Transition] Output muted (Roon still streaming)`);
 
         // ============ PHASE 2: RESTART DSP ============
-        console.log(`Server: [Transition] Phase 2: Restarting DSP at ${newRate}Hz...`);
+        console.log(`Server: [Transition] Phase 2: Restarting DSP at ${newRate}Hz (${zoneName === 'Raspberry' ? 'Remote' : 'Local'})...`);
 
         // Record restart time for debounce
         lastRestartTime = Date.now();
 
         // Stop current DSP
-        await dsp.stop();
-        dsp.shouldBeRunning = true;
+        await activeDsp.stop();
+        activeDsp.shouldBeRunning = true;
 
-        // Wait for audio device to be fully released
-        await new Promise(r => setTimeout(r, 1000));
+        // Wait for audio device to be fully released (only needed for local DSP)
+        if (zoneName !== 'Raspberry') {
+            await new Promise(r => setTimeout(r, 1000));
+        }
 
         // Check if we were in bypass mode - we need to respect this
-        const wasInBypass = dsp.currentState.bypass;
+        const wasInBypass = activeDsp.currentState.bypass;
 
         // Start DSP with new rate (respecting bypass mode)
         try {
             if (wasInBypass) {
                 // Restart in bypass mode with new sample rate
-                await dsp.startBypass(newRate);
+                await activeDsp.startBypass(newRate);
                 console.log(`Server: [Transition] CamillaDSP started in BYPASS mode at ${newRate}Hz`);
             } else {
                 // Restart with filters
-                let filterData = dsp.lastFilterData ? { ...dsp.lastFilterData } : null;
+                let filterData = activeDsp.lastFilterData ? { ...activeDsp.lastFilterData } : null;
 
                 // Fallback: Restore from file if memory is lost but preset is known (Persistence)
-                if (!filterData && dsp.currentState.presetName) {
+                if (!filterData && activeDsp.currentState.presetName) {
                     try {
-                        console.log(`Server: [Transition] Restoring preset "${dsp.currentState.presetName}" from disk...`);
-                        const presetPath = path.join(PRESETS_DIR, dsp.currentState.presetName);
+                        console.log(`Server: [Transition] Restoring preset "${activeDsp.currentState.presetName}" from disk...`);
+                        const presetPath = path.join(PRESETS_DIR, activeDsp.currentState.presetName);
                         if (fs.existsSync(presetPath)) {
                             const content = fs.readFileSync(presetPath, 'utf8');
                             filterData = FilterParser.parse(content);
@@ -171,12 +325,12 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
                 // Final fallback
                 if (!filterData) filterData = { filters: [], preamp: -3 };
 
-                const baseOptions = dsp.lastOptions ? { ...dsp.lastOptions } : { bitDepth: 24, presetName: dsp.currentState.presetName };
+                const baseOptions = activeDsp.lastOptions ? { ...activeDsp.lastOptions } : { bitDepth: 24, presetName: activeDsp.currentState.presetName };
                 const options = {
                     ...baseOptions,
                     sampleRate: newRate
                 };
-                await dsp.start(filterData, options);
+                await activeDsp.start(filterData, options);
                 console.log(`Server: [Transition] CamillaDSP started at ${newRate}Hz`);
             }
         } catch (startError) {
@@ -218,23 +372,30 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
 // Playback Health Check (User Request: "Check if everything OK on Play")
 // ----------------------------------------------------------------------
 roonController.onPlaybackStart = async (zone) => {
-    // Only care about "Camilla" zone for DSP health checks
-    if (zone.display_name === 'Camilla') {
-        console.log('Server: [PlaybackStart] Zone "Camilla" started playing. Performing health check...');
+    const zoneName = zone.display_name;
+    const backendId = getBackendIdForZone(zoneName);
+
+    // If it's a managed zone, perform health check
+    if (backendId) {
+        console.log(`Server: [PlaybackStart] Zone "${zoneName}" started playing. Performing health check...`);
+        const activeDsp = getDspForZone(zoneName);
 
         // 1. Ensure Running first (starts if stopped)
-        await dsp.ensureRunning();
+        await activeDsp.ensureRunning();
 
         // 2. Force a sample rate consistency check
-        // We trigger handleSampleRateChange with a special source.
-        // Even if rate matches, this ensures we are in a known good state.
-        const currentRate = getBlackHoleSampleRate();
-
-        // If getting BlackHole rate fails, we have bigger problems
-        if (currentRate) {
-            handleSampleRateChange(currentRate, 'PlaybackHealthCheck');
+        // Only local Mac Mini can poll hardware rate via BlackHole
+        if (backendId === 'local') {
+            const currentRate = getBlackHoleSampleRate();
+            if (currentRate) {
+                handleSampleRateChange(currentRate, 'PlaybackHealthCheck', zoneName);
+            } else {
+                console.log('Server: [PlaybackStart] Warning: Could not detect BlackHole rate.');
+            }
         } else {
-            console.log('Server: [PlaybackStart] Warning: Could not detect BlackHole rate.');
+            // For remote, just ensure we're at the expected rate
+            const rate = activeDsp.currentState.sampleRate || 44100;
+            handleSampleRateChange(rate, 'PlaybackHealthCheck', zoneName);
         }
     }
 };
@@ -244,41 +405,46 @@ roonController.onPlaybackStart = async (zone) => {
 // ----------------------------------------------------------------------
 // Triggered immediately when Roon track metadata changes
 roonController.onSampleRateChange = async (newRate, zone) => {
+    const zoneName = zone?.display_name || getActiveZoneName();
+    const activeDsp = getDspForZone(zoneName);
+    const backendId = getBackendIdForZone(zoneName);
+
     if (newRate === 'CHECK') {
         // CHECK: Verify if we should even probe hardware
-        // If this is an external zone (not "Camilla"), probing BlackHole is useless/misleading.
-        if (zone && zone.display_name !== 'Camilla') {
-            console.log(`Server: [ActiveProbe] Zone is "${zone.display_name}" (External). Skipping hardware probe.`);
+        // If this is an external zone (not managed), probing hardware is useless.
+        if (!backendId) {
+            console.log(`Server: [ActiveProbe] Zone is "${zoneName}" (External). Skipping hardware probe.`);
             lastDetectedSampleRate = null; // Unknown rate
             return;
         }
 
-        // First, check hardware rate WITHOUT stopping DSPremains same for now) ...
-        const hwRate = getBlackHoleSampleRate();
-        console.log(`Server: [ActiveProbe] Pre-check - Hardware: ${hwRate}Hz, DSP: ${dsp.currentState.sampleRate}Hz`);
-
-        // ... (ActiveProbe logic omitted for brevity as it needs zone context passed through or refactored)
-        // For now, ActiveProbe is mainly for fallback when signal path is missing.
-        // We can rely on the standard flow for most cases.
-
-        // Re-implement probe if needed, but for now let's focus on the standard flow:
-        if (hwRate && hwRate !== dsp.currentState.sampleRate) {
-            console.log(`Server: [ActiveProbe] Rate mismatch. Unlocking device...`);
-            if (dsp.isRunning()) await dsp.stop();
-            await new Promise(r => setTimeout(r, 1500));
-            const detected = getBlackHoleSampleRate();
-            if (detected) handleSampleRateChange(detected, 'ActiveProbe', zone);
+        // For remote backends, ActiveProbe (based on BlackHole) is not applicable
+        if (backendId !== 'local') {
+            console.log(`Server: [ActiveProbe] Zone is remote. Skipping local hardware probe.`);
+            return;
         }
 
-    } else if (newRate && newRate !== dsp.currentState.sampleRate) {
-        console.log(`Server: Roon reported new rate: ${newRate}Hz (current: ${dsp.currentState.sampleRate}Hz). Source Zone: "${zone?.display_name || 'unknown'}"`);
+        // First, check hardware rate WITHOUT stopping DSP
+        const hwRate = getBlackHoleSampleRate();
+        console.log(`Server: [ActiveProbe] Pre-check - Hardware: ${hwRate}Hz, DSP: ${activeDsp.currentState.sampleRate}Hz`);
+
+        if (hwRate && hwRate !== activeDsp.currentState.sampleRate) {
+            console.log(`Server: [ActiveProbe] Rate mismatch. Unlocking device...`);
+            if (activeDsp.isRunning()) await activeDsp.stop();
+            await new Promise(r => setTimeout(r, 1500));
+            const detected = getBlackHoleSampleRate();
+            if (detected) handleSampleRateChange(detected, 'ActiveProbe', zoneName);
+        }
+
+    } else if (newRate && newRate !== activeDsp.currentState.sampleRate) {
+        console.log(`Server: Roon reported new rate: ${newRate}Hz (current: ${activeDsp.currentState.sampleRate}Hz). Source Zone: "${zoneName || 'unknown'}"`);
         // PASS ZONE TO HANDLER
-        handleSampleRateChange(newRate, 'RoonMetadata', zone);
+        handleSampleRateChange(newRate, 'RoonMetadata', zoneName);
     } else {
         // Even if rate is same, we might want to update global state? 
         // handleSampleRateChange handles global state update even if it returns early for DSP.
         // But we need to call it if we want the UI to reflect Roon's rate even if matching.
-        handleSampleRateChange(newRate, 'RoonMetadataUpdate', zone);
+        handleSampleRateChange(newRate, 'RoonMetadataUpdate', zoneName);
     }
 };
 
@@ -288,50 +454,53 @@ roonController.onSampleRateChange = async (newRate, zone) => {
 // When album changes (different disc) but sample rate is the same,
 // the audio stream may need recovery. Force DSP restart.
 roonController.onAlbumChange = async (albumName, sameRate) => {
-    console.log(`Server: Album changed to "${albumName}" (sameRate: ${sameRate}). Forcing DSP restart for stream recovery...`);
+    const zoneName = getActiveZoneName();
+    const activeDsp = getDspForZone(zoneName);
 
-    if (!dsp.isRunning() || isProcessingSampleRateChange) {
+    console.log(`Server: Album changed to "${albumName}" (sameRate: ${sameRate}) on zone "${zoneName}". Forcing DSP restart for stream recovery...`);
+
+    if (!activeDsp.isRunning() || isProcessingSampleRateChange) {
         console.log('Server: DSP not running or already processing, skipping album change restart');
         return;
     }
 
     // Get current hardware rate
-    const hwRate = getBlackHoleSampleRate() || dsp.currentState.sampleRate || 44100;
+    // Note: Remote RPi doesn't use BlackHole, so we use their last known sample rate
+    const isRemote = getBackendIdForZone(zoneName) === 'raspi';
+    const hwRate = isRemote ? activeDsp.currentState.sampleRate : (getBlackHoleSampleRate() || activeDsp.currentState.sampleRate || 44100);
 
     // Force restart at the same rate to recover the stream
-    // Use a slightly different source name so logs are clear
-    handleSampleRateChange(hwRate, 'AlbumChangeRecovery');
+    handleSampleRateChange(hwRate, 'AlbumChangeRecovery', zoneName);
 };
 
 // ----------------------------------------------------------------------
 // Fallback Polling (Legacy/Safety)
 // ----------------------------------------------------------------------
 setInterval(async () => {
-    // Always track the current sample rate
-    const currentRate = getBlackHoleSampleRate();
-    if (!currentRate) return;
+    const zoneName = getActiveZoneName();
+    const activeDsp = getDspForZone(zoneName);
+    const backendId = getBackendIdForZone(zoneName);
+    const isRemote = backendId === 'raspi';
 
-    // Initialize lastDetectedSampleRate on first detection - DISABLED to allow "Unknown" state validation
-    // if (lastDetectedSampleRate === null) {
-    //     lastDetectedSampleRate = currentRate;
-    //     console.log(`Server: Initial BlackHole sample rate: ${currentRate}Hz`);
-    //     return;
-    // }
+    // Hardware rate polling ONLY makes sense for the local Mac Mini (BlackHole)
+    if (!isRemote) {
+        const currentRate = getBlackHoleSampleRate();
+        if (currentRate) {
+            const dspRate = activeDsp.currentState.sampleRate;
 
-    // Allow forced restarts for album changes or playback health checks
-    // const isForceRecovery = source === 'AlbumChangeRecovery' || source === 'PlaybackHealthCheck';
+            if (currentRate !== dspRate && activeDsp.isRunning() && !isProcessingSampleRateChange) {
+                // Hardware rate differs from DSP - need to restart
+                console.log(`Server: [Poll] Rate mismatch detected! Hardware: ${currentRate}Hz, DSP: ${dspRate}Hz. Restarting...`);
+                handleSampleRateChange(currentRate, 'RateMismatchRecovery', zoneName);
+            }
+        }
+    }
 
-    // Check for rate mismatch between hardware and DSP
-    const dspRate = dsp.currentState.sampleRate;
-
-    if (currentRate !== dspRate && dsp.isRunning() && !isProcessingSampleRateChange) {
-        // Hardware rate differs from DSP - need to restart
-        console.log(`Server: [Poll] Rate mismatch detected! Hardware: ${currentRate}Hz, DSP: ${dspRate}Hz. Restarting...`);
-        handleSampleRateChange(currentRate, 'RateMismatchRecovery');
-    } else if (dsp.shouldBeRunning && !dsp.isRunning() && !isProcessingSampleRateChange) {
-        // Crash recovery case
-        console.log('Server: [Poll] DSP Crash detected. Recovering...');
-        handleSampleRateChange(currentRate, 'CrashRecovery');
+    // Crash recovery case (for both local and remote)
+    if (activeDsp.shouldBeRunning && !activeDsp.isRunning() && !isProcessingSampleRateChange) {
+        console.log(`Server: [Poll] ${isRemote ? 'Remote' : 'Local'} DSP Crash or Disconnect detected. Recovering...`);
+        const rate = isRemote ? (activeDsp.currentState.sampleRate || 44100) : (getBlackHoleSampleRate() || 44100);
+        handleSampleRateChange(rate, 'CrashRecovery', zoneName);
     }
 
     // HISTORY CHECK
@@ -518,6 +687,12 @@ app.post('/api/start', async (req, res) => {
             return res.status(400).json({ error: 'No preset specified' });
         }
 
+        // Determine which DSP to use
+        const zoneName = getActiveZoneName();
+        const activeDsp = getDspForZone(zoneName);
+
+        console.log(`API [v6]: Start called for zone "${zoneName}". Selected DSP: ${activeDsp.constructor.name}`);
+
         // Auto-detect sample rate from BlackHole if not specified or use BlackHole's current rate
         const detectedRate = getBlackHoleSampleRate();
         const options = {
@@ -525,29 +700,32 @@ app.post('/api/start', async (req, res) => {
             bitDepth: parseInt(bitDepth) || 24,
             presetName: presetName
         };
-        console.log(`Starting DSP with sample rate: ${options.sampleRate}Hz (requested: ${sampleRate}, detected: ${detectedRate})`);
+        console.log(`Starting ${zoneName || 'Local'} DSP with sample rate: ${options.sampleRate}Hz`);
 
-        await dsp.start(filterData, options);
-        res.json({ success: true, state: 'running', sampleRate: options.sampleRate, bitDepth: options.bitDepth });
+        await activeDsp.start(filterData, options);
+        res.json({ success: true, state: 'running', sampleRate: options.sampleRate, bitDepth: options.bitDepth, backend: getBackendIdForZone(zoneName) });
     } catch (err) {
+        console.error('API Start Error:', err);
         res.status(500).json({ error: err.message });
     }
 });
 
 // 5. Stop DSP
 app.post('/api/stop', async (req, res) => {
-    await dsp.stop();
+    const zoneName = getActiveZoneName();
+    const activeDsp = getDspForZone(zoneName);
+    await activeDsp.stop();
     res.json({ success: true, state: 'stopped' });
 });
 
 // 5b. Bypass Mode (no DSP processing, direct audio)
 app.post('/api/bypass', async (req, res) => {
     try {
-        const detectedRate = getBlackHoleSampleRate();
-        const sampleRate = detectedRate || 96000;
-
-        await dsp.startBypass(sampleRate);
-        res.json({ success: true, state: 'bypass', sampleRate });
+        const zoneName = getActiveZoneName();
+        const activeDsp = getDspForZone(zoneName);
+        const rate = getBlackHoleSampleRate() || 96000;
+        await activeDsp.startBypass(rate);
+        res.json({ success: true, state: 'bypass', sampleRate: rate });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -555,15 +733,21 @@ app.post('/api/bypass', async (req, res) => {
 
 // 6. Status (includes current sample rate for dynamic UI updates)
 app.get('/api/status', (req, res) => {
-    // Get actual hardware sample rate for real-time accuracy
-    const hardwareRate = getBlackHoleSampleRate();
-    const dspRate = dsp.currentState.sampleRate || 0;
+    // Determine which DSP to query based on active zone
+    const zoneName = getActiveZoneName();
+    const backendId = getBackendIdForZone(zoneName);
+    const activeDsp = getDspForZone(zoneName);
+    const isRemote = backendId === 'raspi';
+
+    // Get actual hardware sample rate for real-time accuracy (only for local DSP)
+    const hardwareRate = isRemote ? null : getBlackHoleSampleRate();
+    const dspRate = activeDsp.currentState.sampleRate || 0;
 
     // Use hardware rate if available, otherwise use DSP reported rate
     const currentSampleRate = hardwareRate || dspRate;
 
     // Determine source bit depth (prefer Roon's actual source if available)
-    let currentBitDepth = dsp.currentState.bitDepth || 24;
+    let currentBitDepth = activeDsp.currentState.bitDepth || 24;
 
     // If Roon is active/playing, try to get the real source bit depth
     const roonState = roonController.getNowPlaying();
@@ -577,16 +761,20 @@ app.get('/api/status', (req, res) => {
     }
 
     res.json({
-        running: dsp.isRunning(),
-        bypass: dsp.currentState.bypass || false,
+        running: activeDsp.isRunning(),
+        bypass: activeDsp.currentState.bypass || false,
         sampleRate: currentSampleRate,
         bitDepth: currentBitDepth,
-        presetName: dsp.currentState.presetName || null,
-        filtersCount: dsp.currentState.filtersCount || 0,
-        preamp: dsp.currentState.preamp || 0,
+        presetName: activeDsp.currentState.presetName || null,
+        filtersCount: activeDsp.currentState.filtersCount || 0,
+        preamp: activeDsp.currentState.preamp || 0,
         // Diagnostic: rate mismatch detection
         rateMismatch: hardwareRate && dspRate && hardwareRate !== dspRate,
-        roonSampleRate: lastDetectedSampleRate
+        roonSampleRate: lastDetectedSampleRate,
+        // Zone and backend info for frontend sync
+        backend: backendId,
+        zone: zoneName || null,
+        isAutoSelected: !!zoneName // Signal to frontend that this was a zone-based selection
     });
 });
 
@@ -795,9 +983,10 @@ app.post('/api/media/playpause', async (req, res) => {
     console.log(`Server: Received playpause request. Source=${source}`);
     try {
         // Ensure DSP is running before any playback action
-        console.log('Server: Calling dsp.ensureRunning()...');
-        await dsp.ensureRunning();
-        console.log('Server: dsp.ensureRunning() passed.');
+        const zoneName = getActiveZoneName();
+        const activeDsp = getDspForZone(zoneName);
+        console.log(`Server: Ensuring ${zoneName || 'Local'} DSP is running...`);
+        await activeDsp.ensureRunning();
 
         if (source === 'roon' && roonController.activeZoneId) {
             console.log(`Server: Sending 'playpause' to Roon Zone ${roonController.activeZoneId}`);
@@ -978,16 +1167,13 @@ app.get('/api/media/info', async (req, res) => {
                 });
             } else {
                 // Fallback if no detailed signal path available
+                const zoneName = info.device;
+                const activeDsp = getDspForZone(zoneName);
+
                 // Use detected sample rate if available
-                const sr = dsp.currentState.sampleRate || 0;
+                const sr = activeDsp.currentState.sampleRate || 0;
                 const rateStr = sr ? `${sr / 1000}kHz` : 'Unknown';
-
-                // Smart Labeling: > 48kHz = High Res. <= 48kHz = Standard (CD/PCM). 
-                // We avoid "Lossy" label since we can't distinguish CD from MP3 without metadata.
                 const isHiRes = sr > 48000;
-
-                // Use 'lossless' status for standard (Blue/Purple) instead of 'lossy' (Orange)
-                // This gives CD quality the benefit of the doubt.
                 pathQuality = isHiRes ? 'enhanced' : 'lossless';
 
                 uiNodes = [
@@ -1001,21 +1187,24 @@ app.get('/api/media/info', async (req, res) => {
             }
 
             // Always Add DSP and Final Output nodes if DSP is running (Chain: Roon -> DSP -> Hardware)
-            // BUT only if we are actually playing through the Camilla zone (for Roon source)
-            const isUsingCamillaZone = source !== 'roon' || (info.device === 'Camilla');
+            // BUT only if we are actually playing through a managed zone
+            const zoneName = info.device;
+            const activeDsp = getDspForZone(zoneName);
+            const backendId = getBackendIdForZone(zoneName);
+            const isRemote = backendId === 'raspi';
 
-            if (dsp.isRunning() && isUsingCamillaZone) {
+            if (activeDsp.isRunning() && backendId) {
                 uiNodes.push(
                     {
                         type: 'dsp',
-                        description: 'CamillaDSP',
-                        details: `64-bit Processing • ${dsp.currentState.presetName || 'Custom'}`,
+                        description: isRemote ? 'CamillaDSP (Remote)' : 'CamillaDSP',
+                        details: `64-bit Processing • ${activeDsp.currentState.presetName || 'Custom'}`,
                         status: 'enhanced'
                     },
                     {
                         type: 'output',
-                        description: 'D50 III',
-                        details: `${dsp.currentState.sampleRate / 1000}kHz Output`,
+                        description: isRemote ? 'Raspberry Pi DAC' : 'D50 III',
+                        details: `${activeDsp.currentState.sampleRate / 1000}kHz Output`,
                         status: 'enhanced'
                     }
                 );
@@ -1064,18 +1253,23 @@ app.get('/api/media/info', async (req, res) => {
                 ]
             };
 
-            if (dsp.isRunning()) {
+            // For non-Roon sources (Apple Music / Airplay), we check the active zone (usually 'Camilla' local)
+            const zoneName = getActiveZoneName();
+            const activeDsp = getDspForZone(zoneName);
+            const isRemote = getBackendIdForZone(zoneName) === 'raspi';
+
+            if (activeDsp.isRunning()) {
                 info.signalPath.nodes.push(
                     {
                         type: 'dsp',
-                        description: 'CamillaDSP',
-                        details: `64-bit Processing • ${dsp.currentState.presetName || 'Custom'} (${dsp.currentState.filtersCount} filters) • Gain: ${dsp.currentState.preamp || 0}dB`,
+                        description: isRemote ? 'CamillaDSP (Remote)' : 'CamillaDSP',
+                        details: `64-bit Processing • ${activeDsp.currentState.presetName || 'Custom'} (${activeDsp.currentState.filtersCount || 0} filters) • Gain: ${activeDsp.currentState.preamp || 0}dB`,
                         status: 'enhanced'
                     },
                     {
                         type: 'output',
-                        description: 'D50 III',
-                        details: `${dsp.currentState.sampleRate / 1000}kHz • ${dsp.currentState.bitDepth}-bit Hardware Output`,
+                        description: isRemote ? 'Raspberry Pi DAC' : 'D50 III',
+                        details: `${activeDsp.currentState.sampleRate / 1000}kHz • ${activeDsp.currentState.bitDepth}-bit Hardware Output`,
                         status: 'enhanced'
                     }
                 );
@@ -1096,8 +1290,22 @@ app.get('/api/media/roon/zones', (req, res) => {
 
 app.post('/api/media/roon/select', (req, res) => {
     const { zoneId } = req.body;
+    if (!zoneId) return res.status(400).json({ error: 'Missing zoneId' });
+
     roonController.setActiveZone(zoneId);
-    res.json({ success: true });
+
+    // Persist selection
+    zoneConfig.lastActiveZoneId = zoneId;
+
+    // Also persist name if we can find it
+    const zone = roonController.getZone(zoneId);
+    if (zone) {
+        zoneConfig.lastActiveZoneName = zone.display_name;
+    }
+
+    saveZoneConfig();
+
+    res.json({ success: true, activeZoneId: zoneId });
 });
 
 app.get('/api/media/roon/image/:imageKey', (req, res) => {
@@ -1173,6 +1381,93 @@ app.post('/api/volume', (req, res) => {
         }
         res.json({ success: true, volume });
     });
+});
+
+// ========== ZONE CONFIGURATION API ==========
+
+// Get zone configuration and available backends
+app.get('/api/zones/config', (req, res) => {
+    // Return current config plus list of available backends
+    const backends = Object.entries(DSP_BACKENDS).map(([id, backend]) => ({
+        id,
+        name: backend.name,
+        wsUrl: backend.wsUrl
+    }));
+
+    res.json({
+        zones: zoneConfig.zones,
+        defaults: zoneConfig.defaults,
+        backends
+    });
+});
+
+// Update zone configuration (set which backend a zone uses)
+app.post('/api/zones/config', (req, res) => {
+    const { zoneId, backend } = req.body;
+
+    if (!zoneId) {
+        return res.status(400).json({ error: 'zoneId is required' });
+    }
+
+    // Validate backend exists
+    if (backend && !DSP_BACKENDS[backend]) {
+        return res.status(400).json({
+            error: `Invalid backend. Available: ${Object.keys(DSP_BACKENDS).join(', ')}`
+        });
+    }
+
+    // Update or remove zone config
+    if (backend) {
+        zoneConfig.zones[zoneId] = backend;
+        console.log(`Server: Zone "${zoneId}" configured to use backend "${backend}"`);
+    } else {
+        // If backend is null/undefined, remove the zone config (use default)
+        delete zoneConfig.zones[zoneId];
+        console.log(`Server: Zone "${zoneId}" reset to default backend`);
+    }
+
+    saveZoneConfig();
+    res.json({ success: true, zones: zoneConfig.zones });
+});
+
+// Set default backend
+app.post('/api/zones/default', (req, res) => {
+    const { backend } = req.body;
+
+    if (!DSP_BACKENDS[backend]) {
+        return res.status(400).json({
+            error: `Invalid backend. Available: ${Object.keys(DSP_BACKENDS).join(', ')}`
+        });
+    }
+
+    zoneConfig.defaults.dspBackend = backend;
+    saveZoneConfig();
+    console.log(`Server: Default backend set to "${backend}"`);
+    res.json({ success: true, defaults: zoneConfig.defaults });
+});
+
+
+// Update backend settings
+app.post('/api/zones/backend-settings', (req, res) => {
+    const { backendId, settings } = req.body;
+
+    if (!backendId || !settings) {
+        return res.status(400).json({ error: 'backendId and settings are required' });
+    }
+
+    if (!zoneConfig.backendSettings) zoneConfig.backendSettings = {};
+    zoneConfig.backendSettings[backendId] = { ...zoneConfig.backendSettings[backendId], ...settings };
+
+    // Apply to manager if it's raspi
+    if (backendId === 'raspi') {
+        remoteDsp.setOptions(settings);
+        if (settings.host) {
+            DSP_BACKENDS.raspi.wsUrl = `ws://${settings.host}:${settings.port || 5005}`;
+        }
+    }
+
+    saveZoneConfig();
+    res.json({ success: true, backendSettings: zoneConfig.backendSettings });
 });
 
 

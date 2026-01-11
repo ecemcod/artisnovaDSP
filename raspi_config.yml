@@ -1,0 +1,27 @@
+devices:
+  samplerate: 96000
+  chunksize: 4096
+  capture:
+    type: Alsa
+    channels: 2
+    device: "hw:Loopback,1"
+    format: S32LE
+  playback:
+    type: Alsa
+    channels: 2
+    device: "hw:III"
+    format: S32LE
+
+filters:
+  volume:
+    type: Gain
+    parameters:
+      gain: 0.0
+
+pipeline:
+  - type: Filter
+    channels:
+      - 0
+      - 1
+    names:
+      - volume

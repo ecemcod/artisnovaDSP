@@ -1,0 +1,6 @@
+{
+  "GetConfigJson": {
+    "result": "Ok",
+    "value": "{\"title\":null,\"description\":null,\"devices\":{\"samplerate\":96000,\"chunksize\":4096,\"queuelimit\":null,\"silence_threshold\":null,\"silence_timeout\":null,\"capture\":{\"type\":\"Alsa\",\"channels\":2,\"device\":\"hw:Loopback,1\",\"format\":\"S32LE\",\"stop_on_inactive\":null,\"link_volume_control\":null,\"link_mute_control\":null,\"labels\":null},\"playback\":{\"type\":\"Alsa\",\"channels\":2,\"device\":\"hw:III\",\"format\":\"S32LE\"},\"enable_rate_adjust\":null,\"target_level\":null,\"adjust_period\":null,\"resampler\":null,\"capture_samplerate\":null,\"stop_on_rate_change\":null,\"rate_measure_interval\":null,\"volume_ramp_time\":null,\"volume_limit\":null,\"multithreaded\":null,\"worker_threads\":null},\"mixers\":null,\"filters\":{\"volume\":{\"type\":\"Gain\",\"description\":null,\"parameters\":{\"gain\":0.0,\"inverted\":null,\"mute\":null,\"scale\":null}}},\"processors\":null,\"pipeline\":[{\"type\":\"Filter\",\"channels\":[0,1],\"names\":[\"volume\"],\"description\":null,\"bypassed\":null}]}"
+  }
+}

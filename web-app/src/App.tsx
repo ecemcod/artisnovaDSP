@@ -15,7 +15,7 @@ import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Target, Settings, PowerOff, Asterisk
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk
 } from 'lucide-react';
 import './index.css';
 import { parseRewFile } from './utils/rewParser';
@@ -71,7 +71,7 @@ interface SavedConfig {
 
 const BACKENDS = {
   local: { name: 'Local', wsUrl: `ws://${window.location.hostname}:5005` },
-  raspi: { name: 'Raspberry Pi', wsUrl: 'ws://raspberrypi.local:5005' }
+  raspi: { name: 'Raspberry Pi', wsUrl: 'ws://raspberrypi.local:1234' }
 } as const;
 
 type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'queue' | 'history';
@@ -134,18 +134,65 @@ function App() {
   const isSeeking = useRef(false);
 
   // DSP Context Configuration
-  const [dspEnabledZones, setDspEnabledZones] = useState<string[]>(() => {
-    const saved = localStorage.getItem('artisNovaDSP_dspZones');
-    return saved ? JSON.parse(saved) : [];
+
+  const [availableBackends, setAvailableBackends] = useState<{ id: string, name: string, wsUrl: string }[]>([]);
+  const [fullZoneConfig, setFullZoneConfig] = useState<{ zones: Record<string, string>, defaults: { dspBackend: string } }>({ zones: {}, defaults: { dspBackend: 'local' } });
+
+  // Backend URL overrides (e.g. if .local doesn't work in browser)
+  const [backendOverrides, setBackendOverrides] = useState<Record<string, string>>(() => {
+    const saved = localStorage.getItem('artisNovaDSP_backendOverrides');
+    return saved ? JSON.parse(saved) : {};
   });
 
-  const toggleDspZone = (zoneId: string) => {
-    setDspEnabledZones(prev => {
-      const next = prev.includes(zoneId) ? prev.filter(id => id !== zoneId) : [...prev, zoneId];
-      localStorage.setItem('artisNovaDSP_dspZones', JSON.stringify(next));
-      return next;
-    });
+  const getActiveWsUrl = (backendId: string) => {
+    if (backendOverrides[backendId]) return backendOverrides[backendId];
+    const backend = availableBackends.find(b => b.id === backendId);
+    if (backend) return backend.wsUrl;
+    // Fallback to constants
+    const fallback = (BACKENDS as any)[backendId];
+    return fallback ? fallback.wsUrl : `ws://${window.location.hostname}:5005`;
   };
+
+  const updateBackendOverride = async (backendId: string, url: string) => {
+    const next = { ...backendOverrides, [backendId]: url };
+    setBackendOverrides(next);
+    localStorage.setItem('artisNovaDSP_backendOverrides', JSON.stringify(next));
+
+    // Sync with server if it's an IP or custom host
+    try {
+      if (url.startsWith('ws://')) {
+        const parts = url.replace('ws://', '').split(':');
+        const host = parts[0];
+        const port = parts[1] ? parseInt(parts[1]) : 5005;
+        await axios.post(`${API_URL}/zones/backend-settings`, {
+          backendId,
+          settings: { host, port }
+        });
+      }
+    } catch (err) {
+      console.error('Failed to sync backend settings to server:', err);
+    }
+  };
+
+  const fetchZoneConfig = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/zones/config`);
+      setAvailableBackends(res.data.backends || []);
+      setFullZoneConfig({ zones: res.data.zones || {}, defaults: res.data.defaults || { dspBackend: 'local' } });
+    } catch (err) {
+      console.error('Failed to fetch zone config:', err);
+    }
+  };
+
+  const updateZoneBackend = async (zoneName: string, backendId: string | null) => {
+    try {
+      await axios.post(`${API_URL}/zones/config`, { zoneId: zoneName, backend: backendId });
+      fetchZoneConfig();
+    } catch (err) {
+      console.error('Failed to update zone backend:', err);
+    }
+  };
+
 
   // Sync currentTime with nowPlaying.position
   useEffect(() => {
@@ -173,9 +220,10 @@ function App() {
   }, [mediaSource]);
 
   // Instant DSP State Detection
-  const activeRoonZone = roonZones.find(z => z.active);
   // DSP is active if: Source is Apple OR (Source is Roon AND Zone ID is explicitly enabled)
-  const isDspActive = mediaSource === 'apple' || (mediaSource === 'roon' && (!activeRoonZone || (activeRoonZone.id && dspEnabledZones.includes(activeRoonZone.id))));
+  // DSP is active if: Source is Apple OR (Source is Roon AND Zone ID is explicitly enabled)
+  // v1.3: Simplified - Assume all active zones are DSP enabled
+  const isDspActive = true;
 
   // Apply background color
   useEffect(() => {
@@ -204,15 +252,10 @@ function App() {
     axios.get(`${API_URL}/hostname`)
       .then(res => setHostname(res.data.hostname || 'Local'))
       .catch(() => setHostname('Local'));
+
+    fetchZoneConfig();
   }, []);
 
-  useEffect(() => {
-    // Load saved source preference specifically
-    const savedSource = localStorage.getItem('artisNovaDSP_mediaSource') as 'apple' | 'roon' | null;
-    if (savedSource) {
-      setMediaSource(savedSource);
-    }
-  }, []);
 
   useEffect(() => {
     // Save source preference independently
@@ -503,6 +546,13 @@ function App() {
         setIsBypass(res.data.bypass || false);
       }
 
+      // Auto-sync backend with server's zone-based selection
+      // Only switch if the server explicitly found a matching zone (isAutoSelected)
+      if (res.data.isAutoSelected && res.data.backend && res.data.backend !== backend) {
+        console.log(`App: Auto-switching backend to "${res.data.backend}" based on zone "${res.data.zone}"`);
+        setBackend(res.data.backend as 'local' | 'raspi');
+      }
+
       // Auto-start CamillaDSP if not running (only on first load)
       if (!res.data.running && !hasAutoStartedRef.current) {
         hasAutoStartedRef.current = true;
@@ -767,39 +817,6 @@ function App() {
 
   // Render Processing Tools
   const renderProcessingTools = () => {
-    // If we're playing to an external zone (Direct Mode), show unavailable message
-    if (!isDspActive) {
-      return (
-        <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep items-center justify-center p-8 text-center space-y-4">
-          <div className="p-4 bg-white/5 rounded-full mb-2">
-            <Target size={48} className="text-themed-muted opacity-50" />
-          </div>
-          <h2 className="text-xl font-bold text-themed-primary">Processing Unavailable</h2>
-          <p className="text-sm text-themed-muted max-w-md">
-            Audio is being routed directly to an external device (Direct Mode).
-            DSP processing, VU meters, and PEQ are only available when playing through CamillaDSP.
-          </p>
-          <div>
-            <div className="text-[10px] uppercase tracking-widest text-[#9b59b6] font-bold mt-4 mb-6">
-              External Playback Active
-            </div>
-
-            {activeRoonZone && (
-              <button
-                onClick={() => toggleDspZone(activeRoonZone.id)}
-                className="px-6 py-3 bg-themed-panel border border-themed-medium rounded-xl hover:bg-white/5 hover:border-themed-subtle transition-all flex items-center gap-3 group"
-              >
-                <Zap size={16} className="text-accent-primary group-hover:scale-110 transition-transform" />
-                <div className="text-left">
-                  <div className="text-[10px] font-black uppercase text-themed-muted tracking-wider">Enable DSP for</div>
-                  <div className="text-sm font-bold text-themed-primary">{activeRoonZone.name}</div>
-                </div>
-              </button>
-            )}
-          </div>
-        </div>
-      );
-    }
 
     return (
       <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep overflow-hidden">
@@ -807,7 +824,7 @@ function App() {
 
           {/* 1. ANALOG MONITORING - Flexible Height (Constrained to ~30% of view) */}
           <div className="flex-none h-[25%] md:h-[30%] min-h-[120px] md:min-h-[200px] flex flex-col">
-            <VUMeter isRunning={isRunning} wsUrl={BACKENDS[backend].wsUrl} className="flex-1" />
+            <VUMeter isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} className="flex-1" />
           </div>
 
 
@@ -929,16 +946,6 @@ function App() {
                       </div>
                     </div>
 
-                    {/* Disable DSP Button (Symmetrical Action) */}
-                    {isDspActive && mediaSource === 'roon' && activeRoonZone && (
-                      <button
-                        onClick={() => toggleDspZone(activeRoonZone.id)}
-                        className="p-2 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-danger hover:border-accent-danger rounded-lg transition-all shrink-0"
-                        title={`Disable DSP for ${activeRoonZone.name} (Direct Mode)`}
-                      >
-                        <PowerOff size={15} />
-                      </button>
-                    )}
                   </div>
                 </div>
               </div>
@@ -1164,24 +1171,66 @@ function App() {
                 </div>
 
                 <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
-                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">DSP Enabled Zones</label>
-                  <div className="space-y-1">
+                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Backend URL Configuration</label>
+                  <p className="text-[9px] text-themed-muted px-1 pb-1">Override default WebSocket URLs (use IP if .local fails).</p>
+                  <div className="space-y-2">
+                    {availableBackends.map(b => (
+                      <div key={b.id} className="space-y-1 bg-themed-deep p-2 rounded-lg border border-themed-medium">
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-[11px] font-bold text-themed-primary">{b.name}</span>
+                          <span className="text-[9px] text-accent-primary font-mono">{getActiveWsUrl(b.id)}</span>
+                        </div>
+                        <input
+                          type="text"
+                          defaultValue={backendOverrides[b.id] || b.wsUrl}
+                          placeholder={b.wsUrl}
+                          onBlur={(e) => updateBackendOverride(b.id, e.target.value)}
+                          className="w-full bg-black/40 border border-themed-medium rounded px-2 py-1.5 text-[10px] text-themed-secondary focus:outline-none focus:border-accent-primary transition-colors"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
+                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Zone Backend Configuration</label>
+                  <p className="text-[9px] text-themed-muted px-1 pb-1">Map Roon zones to specific CamillaDSP instances.</p>
+                  <div className="space-y-2">
                     {roonZones.length === 0 ? <div className="text-[10px] text-themed-muted italic px-2">No Roon zones found</div> :
                       roonZones.map(zone => (
-                        <button
-                          key={zone.id}
-                          onClick={() => toggleDspZone(zone.id)}
-                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border transition-all ${dspEnabledZones.includes(zone.id) ? 'bg-accent-primary/10 border-accent-primary/30 text-accent-primary' : 'bg-themed-deep border-themed-medium text-themed-muted hover:border-themed-secondary'}`}
-                        >
-                          <span className="text-[11px] font-bold">{zone.name}</span>
-                          <div className={`w-8 h-4 rounded-full relative transition-colors ${dspEnabledZones.includes(zone.id) ? 'bg-accent-primary' : 'bg-themed-medium'}`}>
-                            <div className={`absolute top-0.5 bottom-0.5 w-3 h-3 rounded-full bg-white transition-all shadow-sm ${dspEnabledZones.includes(zone.id) ? 'right-0.5' : 'left-0.5'}`} />
+                        <div key={zone.id} className="space-y-1 bg-themed-deep p-2 rounded-lg border border-themed-medium">
+                          <div className="flex items-center justify-between px-1">
+                            <span className="text-[11px] font-bold text-themed-primary">{zone.name}</span>
+                            <div className="text-[9px] text-themed-muted font-black uppercase tracking-widest">
+                              {fullZoneConfig.zones[zone.name] || 'Default'}
+                            </div>
                           </div>
-                        </button>
+                          <div className="grid grid-cols-3 gap-1 mt-1">
+                            <button
+                              onClick={() => updateZoneBackend(zone.name, null)}
+                              className={`py-1 rounded text-[9px] font-black uppercase tracking-tighter transition-all ${!fullZoneConfig.zones[zone.name] ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' : 'bg-black/40 text-themed-muted border border-themed-medium'}`}
+                            >
+                              Default
+                            </button>
+                            <button
+                              onClick={() => updateZoneBackend(zone.name, 'local')}
+                              className={`py-1 rounded text-[9px] font-black uppercase tracking-tighter transition-all ${fullZoneConfig.zones[zone.name] === 'local' ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' : 'bg-black/40 text-themed-muted border border-themed-medium'}`}
+                            >
+                              Local
+                            </button>
+                            <button
+                              onClick={() => updateZoneBackend(zone.name, 'raspi')}
+                              className={`py-1 rounded text-[9px] font-black uppercase tracking-tighter transition-all ${fullZoneConfig.zones[zone.name] === 'raspi' ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' : 'bg-black/40 text-themed-muted border border-themed-medium'}`}
+                            >
+                              Raspi
+                            </button>
+                          </div>
+                        </div>
                       ))
                     }
                   </div>
                 </div>
+
               </div>
             </>
           ) : (
@@ -1193,6 +1242,7 @@ function App() {
                 </button>
                 <div className="text-sm font-black text-themed-primary header-text">Background Color</div>
               </div>
+
 
               {/* Colors Content */}
               <div className="p-2 overflow-y-auto max-h-[400px] custom-scrollbar">
