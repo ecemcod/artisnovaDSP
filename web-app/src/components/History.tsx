@@ -288,6 +288,7 @@ const History = () => {
                                                         src={item.artwork_url.startsWith('http') ? item.artwork_url : `${PROTOCOL}//${API_HOST}:3000${item.artwork_url.startsWith('/') ? '' : '/'}${item.artwork_url}`}
                                                         alt="art"
                                                         className="w-6 h-6 rounded shadow-sm object-cover"
+                                                        style={{ maxWidth: '24px', maxHeight: '24px' }}
                                                     />
                                                 ) : (
                                                     <div className="w-6 h-6 rounded bg-white/5 flex items-center justify-center text-themed-muted">

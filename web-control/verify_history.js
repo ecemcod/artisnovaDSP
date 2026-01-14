@@ -1,26 +1,28 @@
-const http = require('http');
+const db = require('./database');
 
-const options = {
-    hostname: 'localhost',
-    port: 3000,
-    path: '/api/history/list?page=1&limit=5',
-    method: 'GET'
-};
+console.log('Verifying database initialization...');
 
-const req = http.request(options, (res) => {
-    console.log(`STATUS: ${res.statusCode}`);
-    console.log(`HEADERS: ${JSON.stringify(res.headers)}`);
-    res.setEncoding('utf8');
-    res.on('data', (chunk) => {
-        console.log(`BODY: ${chunk}`);
+// Allow time for the constructor to run init()
+setTimeout(() => {
+    db.db.all("SELECT name FROM sqlite_master WHERE type='table' AND name='listening_history'", (err, rows) => {
+        if (err) {
+            console.error('Error checking table:', err);
+        } else {
+            console.log('Table check result:', rows);
+            if (rows.length === 0) {
+                console.log('Table missing! Attempting explicit init...');
+                db.init();
+                setTimeout(() => {
+                    db.db.all("SELECT name FROM sqlite_master WHERE type='table' AND name='listening_history'", (err, rows) => {
+                        console.log('Re-check table result:', rows);
+                    });
+                }, 1000);
+            } else {
+                console.log('Table exists.');
+                db.db.get("SELECT COUNT(*) as count FROM listening_history", (err, row) => {
+                    console.log('Record count:', row.count);
+                });
+            }
+        }
     });
-    res.on('end', () => {
-        console.log('No more data in response.');
-    });
-});
-
-req.on('error', (e) => {
-    console.error(`problem with request: ${e.message}`);
-});
-
-req.end();
+}, 1000);
