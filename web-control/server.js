@@ -216,10 +216,20 @@ class LevelProbe {
         this.macPollInterval = null;
         this.subscribers = new Set();
         this.lastLevels = [-100, -100];
+
+        // Watchdog state
+        this.shouldBeRunning = false;
+        this.restartTimeout = null;
+        this.healthCheckInterval = null;
     }
 
     start() {
+        this.shouldBeRunning = true; // Intent: User wants it running
         if (this.process) return;
+
+        // Start health check interval
+        if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+        this.healthCheckInterval = setInterval(() => this.checkHealth(), 5000);
 
         console.log('Probe: Starting Level Probe...');
 
@@ -250,16 +260,23 @@ class LevelProbe {
                     } catch (e) { }
                 });
 
-                this.process.on('close', () => this.stop());
-                this.analyzer.on('close', () => this.stop());
+                this.process.on('close', (code) => {
+                    console.log(`Probe: Process exited with code ${code}`);
+                    this.process = null;
+                    this.handleProcessExit();
+                });
+                this.analyzer.on('close', () => {
+                    // Analyzer close usually follows process close
+                });
             } else {
 
                 // Mac: Use secondary camilladsp instance as a proxy
-                console.log('Probe: Spawning camilladsp probe on Mac (BlackHole) on port 5006...');
+                const currentRate = getBlackHoleSampleRate() || 44100;
+                console.log(`Probe: Spawning camilladsp probe on Mac (BlackHole) on port 5006 using ${currentRate}Hz...`);
                 const probeConfigPath = path.join(CAMILLA_ROOT, 'probe-config.yml');
                 const probeConfig = {
                     devices: {
-                        samplerate: 44100,
+                        samplerate: currentRate,
                         chunksize: 1024,
                         capture: {
                             type: 'CoreAudio',
@@ -268,7 +285,8 @@ class LevelProbe {
                             format: 'FLOAT32LE'
                         },
                         playback: {
-                            type: 'Null',
+                            type: 'File',
+                            filename: '/dev/null',
                             channels: 2,
                             format: 'FLOAT32LE'
                         }
@@ -282,7 +300,15 @@ class LevelProbe {
                     probeConfigPath
                 ]);
 
-                this.process.on('close', () => this.stop());
+                // Capture child instance to avoid race conditions with restarts
+                const child = this.process;
+                child.on('close', (code) => {
+                    console.log(`Probe: Process exited with code ${code}`);
+                    if (this.process === child) {
+                        this.process = null;
+                        this.handleProcessExit();
+                    }
+                });
 
                 // Wait 1s for camilladsp to start before connecting to its WS
                 setTimeout(() => this.startMacPolling(), 1000);
@@ -325,9 +351,19 @@ class LevelProbe {
                 this.macPollInterval = null;
             }
             this.macWs = null;
-            // Reconnect if probe process still running
+
+            // Check if process is actually healthy before trying to reconnect
             if (this.process) {
-                setTimeout(() => this.startMacPolling(), 1000);
+                try {
+                    process.kill(this.process.pid, 0);
+                    // If still alive, retry connection
+                    setTimeout(() => this.startMacPolling(), 1000);
+                } catch (e) {
+                    // Process is dead
+                    console.log('WS Monitor: Process found dead. Triggering restart.');
+                    this.process = null;
+                    this.handleProcessExit();
+                }
             }
         });
 
@@ -337,8 +373,17 @@ class LevelProbe {
     }
 
     stop() {
-        console.log('Probe: Stopping...');
+        console.log(`Probe: Stopping... (shouldBeRunning: ${this.shouldBeRunning})`);
+        this.shouldBeRunning = false; // Intent: User wants it stopped
+
+        if (this.restartTimeout) {
+            console.log('Probe: Clearing pending restart');
+            clearTimeout(this.restartTimeout);
+            this.restartTimeout = null;
+        }
+
         if (this.process) {
+            console.log('Probe: Killing process');
             this.process.kill();
             this.process = null;
         }
@@ -354,6 +399,49 @@ class LevelProbe {
             clearInterval(this.macPollInterval);
             this.macPollInterval = null;
         }
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+            this.healthCheckInterval = null;
+        }
+    }
+
+    checkHealth() {
+        if (this.shouldBeRunning && this.process) {
+            // Check if process is still alive
+            try {
+                // kill(0) throws if process doesn't exist, returns true if it does
+                process.kill(this.process.pid, 0);
+            } catch (e) {
+                console.log(`Probe: Process ${this.process.pid} is dead (health check). Triggering restart...`);
+                this.process = null; // Mark as gone
+                this.handleProcessExit();
+            }
+        } else if (this.shouldBeRunning && !this.process && !this.restartTimeout) {
+            // Should be running but no process and no pending restart? Restart.
+            console.log('Probe: Should be running but no process. Restarting...');
+            this.start();
+        }
+    }
+
+    handleProcessExit() {
+        console.log(`Probe: handleProcessExit called. shouldBeRunning: ${this.shouldBeRunning}`);
+        if (this.shouldBeRunning) {
+            console.log('Probe: Process died unexpectedly (Crash or Rate Change). Restarting in 2s...');
+
+            // Clean up any lingering resources effectively
+            if (this.macWs) { this.macWs.close(); this.macWs = null; }
+            if (this.macPollInterval) { clearInterval(this.macPollInterval); this.macPollInterval = null; }
+
+            this.restartTimeout = setTimeout(() => {
+                console.log('Probe: Executing restart now...');
+                this.start();
+            }, 2000);
+        } else {
+            console.log('Probe: Process stopped intentionally.');
+            // We don't call stop() here to avoid infinite loops if stop() called this,
+            // but we ensure resources are cleaned up.
+            this.stop();
+        }
     }
 
     broadcast(levels) {
@@ -367,7 +455,18 @@ class LevelProbe {
 
     addSubscriber(ws) {
         this.subscribers.add(ws);
-        if (this.subscribers.size === 1) {
+
+        // If there was a pending stop, cancel it
+        if (this.stopTimeout) {
+            console.log('Probe: New subscriber joined, cancelling pending stop.');
+            clearTimeout(this.stopTimeout);
+            this.stopTimeout = null;
+        }
+
+        if (this.subscribers.size === 1 && !this.isRunning() && !this.shouldBeRunning) {
+            this.start();
+        } else if (this.shouldBeRunning && !this.process) {
+            // Edge case: Should be running but isn't? 
             this.start();
         }
     }
@@ -375,8 +474,18 @@ class LevelProbe {
     removeSubscriber(ws) {
         this.subscribers.delete(ws);
         if (this.subscribers.size === 0) {
-            this.stop();
+            console.log('Probe: No subscribers, scheduling stop in 5s...');
+            if (this.stopTimeout) clearTimeout(this.stopTimeout);
+            this.stopTimeout = setTimeout(() => {
+                console.log('Probe: No subscribers for 5s, stopping now.');
+                this.stop();
+                this.stopTimeout = null;
+            }, 5000);
         }
+    }
+
+    isRunning() {
+        return !!this.process;
     }
 }
 
@@ -1067,6 +1176,7 @@ app.get('/api/status', (req, res) => {
         backend: backendId,
         isDspManaged: !!backendId,
         zone: zoneName || null,
+        activeZoneId: roonController.activeZoneId || null,
         isAutoSelected: !!zoneName // Signal to frontend that this was a zone-based selection
     };
 
@@ -2260,8 +2370,60 @@ function broadcast(type, data) {
     });
 }
 
+// Auto-Mute Logic for Hybrid Groups (Direct + DSP)
+let isAutoMuted = false;
+
+function checkHybridGroupMute() {
+    try {
+        const zone = roonController.getActiveZone();
+        if (!zone || !zone.outputs) return;
+
+        // definition: Group (>1 output) containing a "Camilla/Probe" output (BlackHole)
+        const outputs = zone.outputs;
+        const hasCamilla = outputs.some(o =>
+            o.display_name.toLowerCase().includes('camilla') ||
+            o.display_name.toLowerCase().includes('probe') ||
+            o.display_name.toLowerCase().includes('analyzer')
+        );
+        const isGroup = outputs.length > 1;
+
+        // Get the DSP responsible for this zone or the default local one
+        const activeDsp = getDspForZone(zone.display_name);
+
+        if (isGroup && hasCamilla) {
+            // Only mute if running and not already muted
+            if (activeDsp && typeof activeDsp.isRunning === 'function' && activeDsp.isRunning()) {
+                const isMuted = activeDsp.currentState?.mute || false;
+                if (!isMuted) {
+                    console.log('Server: Detected Hybrid Group (Direct + DSP). Auto-muting DSP output to prevent double audio.');
+                    if (typeof activeDsp.setMute === 'function') {
+                        activeDsp.setMute(true);
+                        isAutoMuted = true;
+                    } else {
+                        console.warn('Server: activeDsp does not support setMute');
+                    }
+                }
+            }
+        } else {
+            // If we previously auto-muted, and now the condition is gone (or group dissolved), UNMUTE.
+            if (isAutoMuted) {
+                console.log('Server: Hybrid Group ended. Auto-unmuting DSP output.');
+                if (activeDsp && typeof activeDsp.setMute === 'function') {
+                    activeDsp.setMute(false);
+                }
+                isAutoMuted = false;
+            }
+        }
+    } catch (e) {
+        console.error('Server: Error in checkHybridGroupMute:', e.message);
+    }
+}
+
 // Global broadcast for Roon changes
 roonController.init((info) => {
+    // Check for hybrid group conditions on every update
+    checkHybridGroupMute();
+
     // We can't easily calculate the full UI info (signalPath etc) here without 
     // duplicating logic from /api/media/info. For now, we'll signal a REFRESH
     // or send the raw info so the frontend can choose to fetch full details or use raw.

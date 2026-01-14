@@ -104,16 +104,16 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                     )}
                 </div>
 
-                <div className="flex flex-wrap gap-6 mb-10 opacity-60">
+                <div className="flex flex-col gap-4 opacity-70 mb-10">
                     {a.activeYears && (
-                        <div className="flex flex-col">
-                            <span className="text-[8px] font-black uppercase tracking-widest text-themed-muted">Active Years</span>
+                        <div className="flex items-center gap-4 py-2 border-b border-themed-subtle/50">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-themed-muted w-24 flex-shrink-0">Active Years</span>
                             <span className="text-sm font-bold text-themed-primary">{a.activeYears}</span>
                         </div>
                     )}
                     {a.tags && (
-                        <div className="flex flex-col">
-                            <span className="text-[8px] font-black uppercase tracking-widest text-themed-muted">Genre Tags</span>
+                        <div className="flex items-center gap-4 py-2 border-b border-themed-subtle/50">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-themed-muted w-24 flex-shrink-0">Genre Tags</span>
                             <span className="text-sm font-bold text-themed-primary">{a.tags}</span>
                         </div>
                     )}

@@ -1,5 +1,5 @@
 devices:
-  samplerate: 44100
+  samplerate: 96000
   chunksize: 1024
   capture:
     type: CoreAudio
@@ -7,6 +7,7 @@ devices:
     device: BlackHole 2ch
     format: FLOAT32LE
   playback:
-    type: 'Null'
+    type: File
+    filename: /dev/null
     channels: 2
     format: FLOAT32LE

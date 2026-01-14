@@ -235,8 +235,18 @@ function App() {
   }, [nowPlaying.state]);
 
   // Persist Media Source and Restore Roon Zone
+  const isInitialMount = useRef(true);
+
   useEffect(() => {
     localStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
+
+    // FIX: Only restore zone if it's a manual switch (not initial mount)
+    // On initial mount, we trust the server's active zone (synced via checkStatus)
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
     if (mediaSource === 'roon') {
       const lastZone = localStorage.getItem('artisNovaDSP_lastRoonZone');
       if (lastZone) selectZone(lastZone, 'roon');
@@ -681,6 +691,21 @@ function App() {
             setMediaSource('roon');
           }
         }).catch(() => { });
+      }
+
+      // SYNC ACTIVE ZONE: If server says we are on Zone X, update UI to reflect it
+      // This ensures that on reload, we pick up the correct persistent zone from the server
+      if (res.data.activeZoneId && mediaSource === 'roon') {
+        // Check if our local UI state matches the server
+        const activeZone = mediaZones.find(z => z.active);
+        if (!activeZone || activeZone.id !== res.data.activeZoneId) {
+          console.log(`App: Syncing active zone from server: ${res.data.zone} (${res.data.activeZoneId})`);
+          // We update the local state without calling API (prevent loop)
+          setMediaZones(prev => prev.map(z => ({
+            ...z,
+            active: z.id === res.data.activeZoneId && z.source === 'roon'
+          })));
+        }
       }
 
       // Auto-start CamillaDSP if not running (only on first load)
