@@ -1,0 +1,36 @@
+const fs = require('fs');
+const { execSync } = require('child_process');
+
+function getCreds() {
+    const raspiTxtPath = '/Users/manuelcouceiro/Audio Calibration/camilla/raspi.txt';
+    const content = fs.readFileSync(raspiTxtPath, 'utf8');
+    const lines = content.split('\n');
+    const creds = {};
+    lines.forEach(line => {
+        const [key, value] = line.split('=').map(s => s.trim());
+        if (key && value) creds[key] = value;
+    });
+    return creds;
+}
+
+const creds = getCreds();
+const host = creds.host;
+const user = creds.user;
+const password = creds.password;
+
+// Check LMS server and plugins
+const cmds = [
+    'curl -s "http://localhost:9000/jsonrpc.js" -d \'{"id":1,"method":"slim.request","params":["",["pref","plugin.spotty:enable"]]}\'',
+    'ls -la /var/lib/squeezeboxserver/prefs/plugin/',
+    'sudo systemctl status logitechmediaserver'
+];
+
+for (const cmd of cmds) {
+    console.log(`\n=== ${cmd} ===`);
+    try {
+        const output = execSync(`python3 automate_pty.py ${password} ssh -o StrictHostKeyChecking=no ${user}@${host} "${cmd}"`, { encoding: 'utf8' });
+        console.log(output);
+    } catch (e) {
+        console.error("Error:", e.message);
+    }
+}

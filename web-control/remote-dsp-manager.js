@@ -6,6 +6,7 @@ const WebSocket = require('ws');
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const yaml = require('js-yaml');
 
 class RemoteDSPManager {
     constructor(options = {}) {
@@ -30,7 +31,18 @@ class RemoteDSPManager {
             bitDepth: 24,
             presetName: null,
             filtersCount: 0,
-            preamp: 0
+            preamp: 0,
+            device: 'D50 III (via Loopback)'
+        };
+
+        // Health state for watchdog parity
+        this.healthState = {
+            startTime: null,
+            lastCheck: null,
+            reconnectCount: 0,
+            lastError: null,
+            signalPresent: false,
+            signalLevels: { left: -1000, right: -1000 }
         };
 
         console.log(`RemoteDSPManager initialized for ${this.wsUrl}`);
@@ -53,6 +65,8 @@ class RemoteDSPManager {
                 this.ws.onopen = () => {
                     clearTimeout(timeout);
                     this.connected = true;
+                    this.healthState.startTime = Date.now();
+                    this.healthState.lastError = null;
                     console.log(`RemoteDSP: Connected to ${this.wsUrl}`);
                     resolve(true);
                 };
@@ -338,7 +352,7 @@ class RemoteDSPManager {
             names: pipelineNames
         }];
 
-        return JSON.stringify(config);
+        return yaml.dump(config);
     }
 
     /**
@@ -532,6 +546,42 @@ class RemoteDSPManager {
         }
 
         return true;
+    }
+
+    /**
+     * Get health report for API consistency with local DSPManager
+     */
+    getHealthReport() {
+        this.healthState.lastCheck = Date.now();
+
+        return {
+            dsp: {
+                running: this.isRunning(),
+                uptime: this.healthState.startTime ? Math.floor((Date.now() - this.healthState.startTime) / 1000) : 0,
+                restartCount: this.healthState.reconnectCount,
+                bypass: this.currentState.bypass
+            },
+            devices: {
+                capture: {
+                    name: 'Loopback (ALSA)',
+                    status: this.connected ? 'ok' : 'unknown'
+                },
+                playback: {
+                    name: this.currentState.device || 'D50 III',
+                    status: this.connected ? 'ok' : 'unknown'
+                }
+            },
+            signal: {
+                present: this.healthState.signalPresent,
+                levels: this.healthState.signalLevels,
+                silenceDuration: 0
+            },
+            remote: true,
+            host: this.host,
+            connected: this.connected,
+            lastError: this.healthState.lastError,
+            lastCheck: this.healthState.lastCheck
+        };
     }
 }
 

@@ -6,9 +6,10 @@ const yaml = require('js-yaml');
 class DSPManager {
     constructor(baseDir) {
         this.process = null;
+        this.isLinux = process.platform === 'linux';
         this.baseDir = baseDir; // camilla dir
         this.presetsDir = path.join(baseDir, 'presets');
-        this.dspPath = path.join(baseDir, 'camilladsp');
+        this.dspPath = this.isLinux ? 'camilladsp' : path.join(baseDir, 'camilladsp');
         this.bypassConfigPath = path.join(baseDir, 'config-bypass.yml');
         this.stateFilePath = path.join(baseDir, 'state.json');
 
@@ -19,7 +20,22 @@ class DSPManager {
             bitDepth: 0,
             presetName: null,
             filtersCount: 0,
-            preamp: 0
+            preamp: 0,
+            device: null
+        };
+
+        // Watchdog health state
+        this.healthState = {
+            lastCheck: null,
+            deviceStatus: 'unknown', // 'ok', 'missing', 'switched'
+            captureDevice: 'BlackHole 2ch',
+            playbackDevice: null,
+            signalPresent: false,
+            signalLevels: { left: -1000, right: -1000 },
+            restartCount: 0,
+            lastError: null,
+            startTime: null,
+            silenceDuration: 0 // seconds of silence
         };
 
         // Load persisted state to determine intent
@@ -53,9 +69,68 @@ class DSPManager {
             console.error('Failed to save state.json:', e);
         }
     }
-
     isRunning() {
         return this.process !== null && !this.process.killed;
+    }
+
+    getAvailableDevices() {
+        if (this.isLinux) {
+            try {
+                const output = execSync('aplay -l', { encoding: 'utf8' });
+                const devices = [];
+                const lines = output.split('\n');
+                lines.forEach(line => {
+                    const match = line.match(/card \d+: (.+) \[.+\]/);
+                    if (match) {
+                        devices.push(match[1].trim());
+                    }
+                });
+                return devices;
+            } catch (e) {
+                console.error('Failed to get available devices (Linux):', e.message);
+                return ['III']; // Fallback for D50 III
+            }
+        }
+        try {
+            const output = execSync('system_profiler SPAudioDataType', { encoding: 'utf8' });
+            const devices = [];
+            const lines = output.split('\n');
+
+            // Devices are usually indented by 8 spaces in the standard output
+            // Example:
+            //         BlackHole 2ch:
+            //           Manufacturer: Existential Audio Inc.
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                // Match lines that look like "        Device Name:"
+                const match = line.match(/^ {8}(.+):$/);
+                if (match) {
+                    const devName = match[1].trim();
+                    if (devName !== 'Devices') {
+                        devices.push(devName);
+                    }
+                }
+            }
+            return devices;
+        } catch (e) {
+            console.error('Failed to get available devices:', e.message);
+            return [];
+        }
+    }
+
+    findBestOutputDevice() {
+        const devices = this.getAvailableDevices();
+        console.log('Available output devices:', devices.join(', '));
+
+        const priorities = ['D50 III', 'III', 'UMC204HD 192k', 'USB Audio', 'KT_USB_AUDIO', 'BlackHole 2ch', 'Mac mini Speakers'];
+        for (const target of priorities) {
+            if (devices.includes(target) || (this.isLinux && devices.some(d => d.includes(target)))) {
+                // On Linux, return the card name or ID if it matches
+                const found = this.isLinux ? devices.find(d => d.includes(target)) : target;
+                return found;
+            }
+        }
+        return devices.length > 0 ? devices[0] : (this.isLinux ? 'III' : 'D50 III');
     }
 
     generateConfig(filterData, options = {}) {
@@ -66,14 +141,24 @@ class DSPManager {
             devices: {
                 samplerate: sampleRate,
                 chunksize: 4096,
-                capture: {
+                capture: this.isLinux ? {
+                    type: 'Alsa',
+                    device: 'hw:Loopback,1',
+                    channels: 2,
+                    format: 'S32LE'
+                } : {
                     type: 'CoreAudio',
                     device: 'BlackHole 2ch',
                     channels: 2
                 },
-                playback: {
+                playback: this.isLinux ? {
+                    type: 'Alsa',
+                    device: `hw:${this.findBestOutputDevice()}`,
+                    channels: 2,
+                    format: 'S32LE'
+                } : {
                     type: 'CoreAudio',
-                    device: 'D50 III',
+                    device: this.findBestOutputDevice(),
                     channels: 2
                 }
             },
@@ -150,7 +235,8 @@ class DSPManager {
                     bitDepth: options.bitDepth,
                     presetName: options.presetName || 'Manual',
                     filtersCount: filterData.filters?.length || 0,
-                    preamp: filterData.preamp || 0
+                    preamp: filterData.preamp || 0,
+                    device: options.device || (this.isLinux ? 'D50 III' : this.findBestOutputDevice())
                 };
 
                 this.process.stdout.on('data', (data) => console.log(`DSP out: ${data}`));
@@ -185,23 +271,196 @@ class DSPManager {
 
     startWatchdog() {
         if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+        if (this.signalCheckInterval) clearInterval(this.signalCheckInterval);
+        if (this.deviceCheckInterval) clearInterval(this.deviceCheckInterval);
 
-        console.log('Starting DSP Watchdog...');
+        console.log('Starting Enhanced DSP Watchdog...');
+        this.healthState.startTime = Date.now();
+        this.healthState.restartCount = 0;
+
+        // Process health check - every 5 seconds
         this.watchdogInterval = setInterval(() => {
+            this.healthState.lastCheck = Date.now();
+
             if (this.shouldBeRunning && !this.isRunning()) {
+                // Circuit breaker: max 5 restarts in 5 minutes
+                if (this.healthState.restartCount >= 5) {
+                    console.log('Watchdog: Circuit breaker triggered - too many restarts. Manual intervention required.');
+                    this.healthState.lastError = 'Circuit breaker: too many restart attempts';
+                    return;
+                }
+
                 console.log('Watchdog: DSP process died unexpectedly. Attempting restart...');
+                this.healthState.restartCount++;
+
                 if (this.lastFilterData) {
-                    // Retry start. Note: start() clears the interval, so this won't stack.
-                    // We use a simplified start call or just call start() which handles everything.
-                    // But we should catch errors to avoid unhandled rejections in interval.
                     this.start(this.lastFilterData, this.lastOptions)
-                        .then(() => console.log('Watchdog: Restart successful'))
-                        .catch(e => console.error('Watchdog: Restart failed', e));
+                        .then(() => {
+                            console.log('Watchdog: Restart successful');
+                            this.healthState.lastError = null;
+                        })
+                        .catch(e => {
+                            this.healthState.lastError = e.message;
+                            if (e.message.includes('Could not find playback device')) {
+                                console.log('Watchdog: Device missing, checking for fallback...');
+                                this.handleDeviceFallback();
+                            } else {
+                                console.error('Watchdog: Restart failed', e);
+                            }
+                        });
                 } else {
                     console.log('Watchdog: Must restart but no last config found.');
+                    this.healthState.lastError = 'No configuration available for restart';
                 }
             }
-        }, 5000); // Check every 5 seconds
+        }, 5000);
+
+        // Device health check - every 10 seconds
+        this.deviceCheckInterval = setInterval(() => {
+            this.checkDeviceHealth();
+        }, 10000);
+
+        // Signal presence check - every 2 seconds
+        this.signalCheckInterval = setInterval(() => {
+            this.checkSignalPresence();
+        }, 2000);
+
+        // Initial checks
+        this.checkDeviceHealth();
+    }
+
+    stopWatchdog() {
+        if (this.watchdogInterval) {
+            clearInterval(this.watchdogInterval);
+            this.watchdogInterval = null;
+        }
+        if (this.signalCheckInterval) {
+            clearInterval(this.signalCheckInterval);
+            this.signalCheckInterval = null;
+        }
+        if (this.deviceCheckInterval) {
+            clearInterval(this.deviceCheckInterval);
+            this.deviceCheckInterval = null;
+        }
+    }
+
+    checkDeviceHealth() {
+        const devices = this.getAvailableDevices();
+        const currentPlayback = this.currentState.device || this.healthState.playbackDevice;
+
+        // Check if capture device exists
+        const captureOk = devices.includes(this.healthState.captureDevice) || this.isLinux;
+
+        // Check if playback device exists
+        const playbackOk = currentPlayback && devices.includes(currentPlayback);
+
+        if (!captureOk) {
+            this.healthState.deviceStatus = 'missing';
+            this.healthState.lastError = `Capture device "${this.healthState.captureDevice}" not found`;
+            console.log('Watchdog: Capture device missing!');
+        } else if (!playbackOk && currentPlayback) {
+            this.healthState.deviceStatus = 'missing';
+            this.healthState.lastError = `Playback device "${currentPlayback}" not found`;
+            console.log('Watchdog: Playback device missing! Will attempt fallback on next restart.');
+        } else {
+            this.healthState.deviceStatus = 'ok';
+        }
+
+        this.healthState.playbackDevice = currentPlayback;
+    }
+
+    async checkSignalPresence() {
+        if (!this.isRunning()) {
+            this.healthState.signalPresent = false;
+            return;
+        }
+
+        try {
+            const WebSocket = require('ws');
+            const ws = new WebSocket('ws://localhost:5005');
+
+            const timeout = setTimeout(() => {
+                ws.terminate();
+            }, 1500);
+
+            ws.on('open', () => {
+                ws.send('"GetCaptureSignalPeak"');
+            });
+
+            ws.on('message', (data) => {
+                clearTimeout(timeout);
+                try {
+                    const response = JSON.parse(data.toString());
+                    if (response.GetCaptureSignalPeak?.result === 'Ok') {
+                        const [left, right] = response.GetCaptureSignalPeak.value;
+                        this.healthState.signalLevels = { left, right };
+
+                        // Signal present if above -60 dB
+                        const hasSignal = left > -60 || right > -60;
+                        if (hasSignal) {
+                            this.healthState.signalPresent = true;
+                            this.healthState.silenceDuration = 0;
+                        } else {
+                            this.healthState.silenceDuration += 2; // 2 second check interval
+                            if (this.healthState.silenceDuration >= 5) {
+                                this.healthState.signalPresent = false;
+                            }
+                        }
+                    }
+                } catch (e) { }
+                ws.close();
+            });
+
+            ws.on('error', () => {
+                clearTimeout(timeout);
+            });
+        } catch (e) {
+            // WebSocket module might not be available in all contexts
+        }
+    }
+
+    handleDeviceFallback() {
+        const bestDevice = this.findBestOutputDevice();
+        if (bestDevice && bestDevice !== this.healthState.playbackDevice) {
+            console.log(`Watchdog: Switching to fallback device "${bestDevice}"`);
+            this.healthState.deviceStatus = 'switched';
+            this.healthState.playbackDevice = bestDevice;
+
+            if (this.lastFilterData && this.lastOptions) {
+                this.lastOptions.device = bestDevice;
+                this.start(this.lastFilterData, this.lastOptions)
+                    .then(() => console.log('Watchdog: Fallback device started successfully'))
+                    .catch(e => console.error('Watchdog: Fallback start failed', e));
+            }
+        }
+    }
+
+    getHealthReport() {
+        return {
+            dsp: {
+                running: this.isRunning(),
+                uptime: this.healthState.startTime ? Math.floor((Date.now() - this.healthState.startTime) / 1000) : 0,
+                restartCount: this.healthState.restartCount,
+                bypass: this.currentState.bypass
+            },
+            devices: {
+                capture: {
+                    name: this.healthState.captureDevice,
+                    status: this.healthState.deviceStatus === 'ok' || this.isLinux ? 'ok' : 'missing'
+                },
+                playback: {
+                    name: this.healthState.playbackDevice || this.currentState.device,
+                    status: this.healthState.deviceStatus
+                }
+            },
+            signal: {
+                present: this.healthState.signalPresent,
+                levels: this.healthState.signalLevels,
+                silenceDuration: this.healthState.silenceDuration
+            },
+            lastError: this.healthState.lastError,
+            lastCheck: this.healthState.lastCheck
+        };
     }
 
     async ensureRunning() {
@@ -231,10 +490,7 @@ class DSPManager {
         this.shouldBeRunning = false; // Mark as explicitly stopped by user/system
         this.saveState({ running: false });
 
-        if (this.watchdogInterval) {
-            clearInterval(this.watchdogInterval);
-            this.watchdogInterval = null;
-        }
+        this.stopWatchdog();
 
         if (this.process) {
             console.log('Stopping CamillaDSP instance...');
@@ -332,14 +588,49 @@ class DSPManager {
         return new Promise((resolve, reject) => {
             try {
                 // Read and modify bypass config with current sample rate
-                let bypassConfig = fs.readFileSync(this.bypassConfigPath, 'utf8');
-                const config = yaml.load(bypassConfig);
-                config.devices.samplerate = sampleRate || 96000;
+                // For Linux, we override the whole devices section to ensure ALSA
+                const config = {
+                    devices: {
+                        samplerate: sampleRate || 96000,
+                        chunksize: 4096,
+                        capture: this.isLinux ? {
+                            type: 'Alsa',
+                            device: 'hw:Loopback,1',
+                            channels: 2,
+                            format: 'S32LE'
+                        } : {
+                            type: 'CoreAudio',
+                            device: 'BlackHole 2ch',
+                            channels: 2
+                        },
+                        playback: this.isLinux ? {
+                            type: 'Alsa',
+                            device: 'hw:III',
+                            channels: 2,
+                            format: 'S32LE'
+                        } : {
+                            type: 'CoreAudio',
+                            device: this.findBestOutputDevice(),
+                            channels: 2
+                        }
+                    },
+                    filters: {
+                        volume: {
+                            type: 'Gain',
+                            parameters: { gain: 0.0 }
+                        }
+                    },
+                    pipeline: [{
+                        type: 'Filter',
+                        channels: [0, 1],
+                        names: ['volume']
+                    }]
+                };
 
                 const configPath = path.join(this.baseDir, 'temp_config.yml');
                 fs.writeFileSync(configPath, yaml.dump(config));
 
-                console.log(`Starting CamillaDSP in BYPASS mode at ${config.devices.samplerate}Hz`);
+                console.log(`Starting CamillaDSP in BYPASS mode at ${config.devices.samplerate}Hz (${this.isLinux ? 'ALSA' : 'CoreAudio'})`);
 
                 const dspArgs = ['-a', '0.0.0.0', '-p', '5005', configPath];
                 this.process = spawn(this.dspPath, dspArgs, {
@@ -353,7 +644,8 @@ class DSPManager {
                     bitDepth: 24,
                     presetName: 'BYPASS',
                     filtersCount: 0,
-                    preamp: 0
+                    preamp: 0,
+                    device: config.devices.playback.device
                 };
 
                 this.process.stdout.on('data', (data) => console.log(`DSP out: ${data}`));

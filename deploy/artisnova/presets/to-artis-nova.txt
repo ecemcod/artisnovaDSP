@@ -1,0 +1,26 @@
+Notes:To artis nova
+Generic
+Number Enabled Control Type Frequency(Hz) Gain(dB) Q Bandwidth(Hz) TargetT60(ms) Shape Slope_dB/oct Frequency2(Hz) _Q2_ Slope2_dB/oct 
+1 True Auto PK 40.75 -7.7 2.679 15.21 
+2 True Manual LS 59.00 5.9 
+3 True Auto PK 60.00 -11.1 1.453 41.29 
+4 True Auto PK 102.00 -9.2 1.379 73.97 
+5 True Auto PK 323.00 -1.8 4.985 64.79 
+6 True Auto PK 400.00 -5.4 4.884 81.90 
+7 True Auto None 
+8 True Auto None 
+9 True Auto None 
+10 True Auto None 
+11 True Auto None 
+12 True Auto None 
+13 True Auto None 
+14 True Auto None 
+15 True Auto None 
+16 True Auto None 
+17 True Auto None 
+18 True Auto None 
+19 True Auto None 
+20 True Auto None 
+Compound_filters
+1 True Auto None 
+2 True Auto None 

@@ -35,6 +35,7 @@ class RoonController {
         this.checkTimeout = null; // Debounce for missing signal path
         this.queue = [];      // Current zone playback queue
         this._queueSubscription = null;
+        this.isQueueSubscribed = false;
     }
 
     init(callback) {
@@ -77,7 +78,7 @@ class RoonController {
                                 }
 
                                 // If we have a restored activeZoneId, trigger queue subscription when it's found
-                                if (this.activeZoneId === z.zone_id && !this._queueSubscription) {
+                                if (this.activeZoneId === z.zone_id && !this.isQueueSubscribed) {
                                     console.log(`RoonController: Restored zone ${z.display_name} found, subscribing to queue.`);
                                     this._subscribeQueue();
                                 }
@@ -137,6 +138,7 @@ class RoonController {
                 this.transport = null;
                 this.browseApi = null;
                 this.isPaired = false;
+                this._unsubscribeQueue();
                 this._notifyStatus();
             }
         });
@@ -183,7 +185,7 @@ class RoonController {
                     if (err) reject(err); else resolve();
                 });
             } else if (action === 'mute') {
-                this.transport.mute(zone, 'toggle', (err) => {
+                this.transport.mute(zone, 'mute', (err) => {
                     if (err) reject(err); else resolve();
                 });
             } else if (action === 'unmute') {
@@ -236,43 +238,59 @@ class RoonController {
         if (!this.transport || !this.activeZoneId) return;
 
         // Ensure no existing subscription (safety)
-        this._unsubscribeQueue();
+        if (this.isQueueSubscribed) {
+            this._unsubscribeQueue();
+        }
 
         const zone = this.zones.get(this.activeZoneId);
         if (!zone) return;
 
         console.log(`RoonController: Subscribing to queue for zone: ${zone.display_name}`);
+        this.isQueueSubscribed = true;
 
         this._queueSubscription = this.transport.subscribe_queue(zone, { subscription_key: Date.now() }, (status, data) => {
             console.log(`RoonController: Queue Status=${status} Zone=${zone.display_name}`);
+
             if (status === "Subscribed") {
                 console.log(`RoonController: Queue Subscribed. Items: ${data.items ? data.items.length : 0}`);
                 this.queue = data.items || [];
             } else if (status === "Changed") {
-                // If we get a full replacement list, use it
+                // 1. Full replacement list
                 if (data.items) {
                     console.log(`RoonController: Queue Full Update. Items: ${data.items.length}`);
                     this.queue = data.items;
                 }
-                // Handle partial updates by forcing a refresh (simplest robust strategy)
-                else {
-                    console.log('RoonController: Partial queue update detected. Re-subscribing to force full sync...');
-                    // Use setTimeout to decouple from current event loop stack
-                    setTimeout(() => {
-                        this._subscribeQueue();
-                    }, 50);
+                // 2. Partial updates (changes array)
+                else if (data.changes) {
+                    console.log(`RoonController: Queue Partial Update. ${data.changes.length} changes.`);
+                    data.changes.forEach(change => {
+                        if (change.operation === "insert") {
+                            this.queue.splice(change.index, 0, ...change.items);
+                        } else if (change.operation === "remove") {
+                            this.queue.splice(change.index, change.count);
+                        } else if (change.operation === "update") {
+                            this.queue.splice(change.index, change.items.length, ...change.items);
+                        }
+                    });
+                    console.log(`RoonController: Queue updated. New size: ${this.queue.length}`);
                 }
+            } else if (status === "Unsubscribed") {
+                console.log(`RoonController: Queue Unsubscribed for ${zone.display_name}`);
+                this.isQueueSubscribed = false;
+                this._queueSubscription = null;
             }
         });
     }
 
     _unsubscribeQueue() {
         if (this._queueSubscription) {
+            console.log('RoonController: Destroying queue subscription');
             if (typeof this._queueSubscription.destroy === 'function') {
                 this._queueSubscription.destroy();
             }
             this._queueSubscription = null;
         }
+        this.isQueueSubscribed = false;
         this.queue = [];
     }
 
@@ -320,12 +338,11 @@ class RoonController {
 
         console.log(`Roon Metadata [${z.display_name}]: ${track.three_line?.line1} - SignalPath: ${track.signal_path ? 'YES' : 'NO'}`);
 
-        // DEBUG: Dump track to find source sample rate
-        console.log('Roon Track Debug:', JSON.stringify(track, null, 2));
-
-        if (track.signal_path) {
-            console.log('Roon SignalPath Details:', JSON.stringify(track.signal_path));
-        }
+        // DEBUG: Verbose logging disabled for performance
+        // console.log('Roon Track Debug:', JSON.stringify(track, null, 2));
+        // if (track.signal_path) {
+        //     console.log('Roon SignalPath Details:', JSON.stringify(track.signal_path));
+        // }
 
         return {
             state: z.state,
@@ -362,25 +379,27 @@ class RoonController {
     }
 
     getImage(imageKey, res) {
-        console.log('Roon getImage called for:', imageKey);
+        console.log(`RoonController: getImage request for key: ${imageKey}`);
         if (!this.core) {
-            console.log('Roon getImage: No core available');
-            return res.status(404).end();
+            console.warn('RoonController: getImage failed - No core available');
+            return res.status(404).json({ error: 'No Roon Core' });
         }
 
         const imageService = this.core.services.RoonApiImage;
         if (!imageService) {
-            console.log('Roon getImage: No image service available');
-            return res.status(404).end();
+            console.warn('RoonController: getImage failed - No image service available');
+            return res.status(404).json({ error: 'No Image Service' });
         }
 
         imageService.get_image(imageKey, { format: "image/jpeg", width: 600, height: 600, scale: "fit" }, (err, contentType, data) => {
-            console.log('Roon image callback:', err ? 'ERROR' : 'OK', contentType);
             if (err) {
-                console.error('Roon image error:', err);
+                console.error(`RoonController: getImage ERROR for key ${imageKey}:`, err);
                 return res.status(404).end();
             }
+            console.log(`RoonController: getImage SUCCESS for key ${imageKey}. Content-Type: ${contentType}, Size: ${data.length} bytes`);
             res.set("Content-Type", contentType);
+            // Disable caching for images to allow retries with different keys if needed
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
             res.send(data);
         });
     }
@@ -534,16 +553,8 @@ class RoonController {
 
         for (const zone of this.zones.values()) {
             if (zone.state === 'playing') {
-                console.log(`RoonController: Found playing zone: "${zone.display_name}"`);
-                // DEBUG: Log the FULL zone data to find signal_path
-                try {
-                    // Avoid circular references if any (though Roon zones are usually plain objects)
-                    console.log(`RoonController: FULL ZONE [${zone.display_name}]:`, JSON.stringify(zone, null, 2));
-                } catch (e) {
-                    console.log('Error logging full zone data', e.message);
-                    // Fallback: log keys
-                    console.log('Zone Keys:', Object.keys(zone));
-                }
+                // DEBUG: Verbose logging disabled for performance
+                // console.log(`RoonController: Found playing zone: "${zone.display_name}"`);
 
                 if (zone.display_name === 'Camilla') {
                     // Critical priority

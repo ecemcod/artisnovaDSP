@@ -91,16 +91,35 @@ def main():
                     
                     -- Try to get artwork
                     set artworkPath to ""
+                    set lastTrackFile to "/tmp/artisnova_last_track.txt"
+                    set currentTrackID to trackName & artistName
+                    
+                    set lastTrackID to ""
                     try
-                        set artworkData to data of artwork 1 of current track
-                        set artworkPath to "/tmp/artisnova_artwork.jpg"
-                        set fileRef to open for access (POSIX file artworkPath) with write permission
-                        set eof of fileRef to 0
-                        write artworkData to fileRef
-                        close access fileRef
-                    on error
-                        set artworkPath to ""
+                        set lastTrackID to do shell script "cat " & quoted form of lastTrackFile
                     end try
+                    
+                    if currentTrackID is not lastTrackID or (do shell script "[ -f /tmp/artisnova_artwork.jpg ] && echo 'yes' || echo 'no'") is "no" then
+                        try
+                            set artworkData to data of artwork 1 of current track
+                            set tempPath to "/tmp/artisnova_artwork_tmp.jpg"
+                            set fileRef to open for access (POSIX file tempPath) with write permission
+                            set eof of fileRef to 0
+                            write artworkData to fileRef
+                            close access fileRef
+                            
+                            -- Atomic rename
+                            set artworkPath to "/tmp/artisnova_artwork.jpg"
+                            do shell script "mv " & quoted form of tempPath & " " & quoted form of artworkPath
+                            
+                            -- Update last track file
+                            do shell script "echo " & quoted form of currentTrackID & " > " & quoted form of lastTrackFile
+                        on error
+                            set artworkPath to ""
+                        end try
+                    else
+                        set artworkPath to "/tmp/artisnova_artwork.jpg"
+                    end if
                     
                     return playState & "|" & trackName & "|" & artistName & "|" & albumName & "|" & artworkPath & "|" & trackDuration & "|" & playerPos
                 else
@@ -143,6 +162,9 @@ def main():
             print(json.dumps({"state": "error", "track": "", "artist": "", "album": "", "artwork": "", "duration": 0, "position": 0, "error": str(e)}))
     elif action == 'queue':
         # Get upcoming tracks from the current playlist using AppleScript
+        # NOTE: Apple Music streaming tracks (URL tracks) are NOT part of the local library.
+        # Their "Up Next" queue is NOT exposed via AppleScript - this is a platform limitation.
+        # We can only get the queue when playing from a local playlist.
         import subprocess
         import json
         
@@ -151,25 +173,30 @@ def main():
             try
                 if not (exists current track) then return "STOPPED"
                 
-                -- Use current playlist as the most reliable source
-                set sourceObj to current playlist
+                -- Check if current playlist is accessible (only works for local library playback)
+                try
+                    set p to current playlist
+                    if not (exists track 1 of p) then return "STREAMING"
+                on error
+                    -- No current playlist = streaming from Apple Music catalog
+                    return "STREAMING"
+                end try
                 
                 set curIdx to index of current track
-                set totalCount to count tracks of sourceObj
+                set totalCount to count tracks of p
                 
-                -- Gather up to 50 next tracks
-                set stopIdx to curIdx + 50
+                if curIdx >= totalCount then return "EMPTY"
+                
+                set stopIdx to curIdx + 20
                 if stopIdx > totalCount then set stopIdx to totalCount
                 
                 set results to {}
-                if curIdx < totalCount then
-                    repeat with i from (curIdx + 1) to stopIdx
-                        try
-                            set t to track i of sourceObj
-                            set end of results to (name of t & "|" & artist of t & "|" & album of t)
-                        end try
-                    end repeat
-                end if
+                repeat with i from (curIdx + 1) to stopIdx
+                    try
+                        set t to track i of p
+                        set end of results to (name of t & "|" & artist of t & "|" & album of t)
+                    end try
+                end repeat
                 
                 if (count results) is 0 then return "EMPTY"
                 
@@ -182,11 +209,13 @@ def main():
         '''
         
         try:
-            result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=5)
+            # Short timeout to prevent blocking the node server
+            result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=3)
             output = result.stdout.strip()
             
-            if output in ["STOPPED", "EMPTY"] or output.startswith("ERROR"):
-                print(json.dumps({"queue": []}))
+            if output in ["STOPPED", "EMPTY", "STREAMING"] or output.startswith("ERROR"):
+                # For streaming, we could indicate this specially in the future
+                print(json.dumps({"queue": [], "streaming": output == "STREAMING"}))
             else:
                 queue = []
                 for item in output.split('!!'):
@@ -199,7 +228,8 @@ def main():
                         })
                 print(json.dumps({"queue": queue}))
         except Exception as e:
-            print(json.dumps({"queue": [], "error": str(e)}))
+            # Fallback for timeout or other error
+            print(json.dumps({"queue": []}))
     elif action == 'seek':
         if len(sys.argv) < 3:
             print("Usage: python3 media_keys.py seek [seconds]")

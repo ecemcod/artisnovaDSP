@@ -284,7 +284,11 @@ const History = () => {
                                         <tr key={item.id} className="group odd:bg-transparent even:bg-white/5 hover:!bg-white/10 transition-colors">
                                             <td className="p-3 pl-4">
                                                 {item.artwork_url ? (
-                                                    <img src={item.artwork_url} alt="art" className="w-6 h-6 rounded shadow-sm object-cover" />
+                                                    <img
+                                                        src={item.artwork_url.startsWith('http') ? item.artwork_url : `${PROTOCOL}//${API_HOST}:3000${item.artwork_url.startsWith('/') ? '' : '/'}${item.artwork_url}`}
+                                                        alt="art"
+                                                        className="w-6 h-6 rounded shadow-sm object-cover"
+                                                    />
                                                 ) : (
                                                     <div className="w-6 h-6 rounded bg-white/5 flex items-center justify-center text-themed-muted">
                                                         <Music size={12} />
@@ -351,7 +355,10 @@ const History = () => {
 
 const StatsCard = ({ title, icon, data, color, formatter }: { title: string; icon: React.ReactNode; data?: { name: string; count: number; image?: string }[]; color: string, formatter?: (val: number) => string }) => {
     // Determine background image from the top item (data[0]) if available
-    const topImage = data && data.length > 0 && data[0].image ? data[0].image : null;
+    let topImage = data && data.length > 0 && data[0].image ? data[0].image : null;
+    if (topImage && !topImage.startsWith('http')) {
+        topImage = `${PROTOCOL}//${API_HOST}:3000${topImage.startsWith('/') ? '' : '/'}${topImage}`;
+    }
 
     return (
         <div className="relative bg-themed-panel border border-themed-medium rounded-xl p-6 shadow-lg flex flex-col h-[400px] animate-in fade-in zoom-in duration-300 overflow-hidden">

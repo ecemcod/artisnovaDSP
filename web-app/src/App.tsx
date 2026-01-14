@@ -11,11 +11,12 @@ import {
 import PlayQueue from './components/PlayQueue';
 import Lyrics from './components/Lyrics';
 import History from './components/History';
+import ArtistInfo from './components/ArtistInfo';
 import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk, Gauge, Power, X, ExternalLink, BookOpen
 } from 'lucide-react';
 import './index.css';
 import { parseRewFile } from './utils/rewParser';
@@ -23,7 +24,8 @@ import { parseRewFile } from './utils/rewParser';
 // Use current hostname to support access from any device on the local network
 const API_HOST = window.location.hostname;
 const PROTOCOL = window.location.protocol;
-const API_URL = `${PROTOCOL}//${API_HOST}:3000/api`;
+const API_BASE = `${PROTOCOL}//${API_HOST}:3000`;
+const API_URL = `${API_BASE}/api`;
 
 // Device detection
 const isMobile = () => window.innerWidth < 768;
@@ -38,6 +40,26 @@ const formatTime = (seconds: number) => {
 const STORAGE_KEY = `artisNovaDSP_config`;
 const PANEL_STORAGE_KEY = `artisNovaDSP_layout_v2`;
 const BG_COLOR_STORAGE_KEY = `artisNovaDSP_bgColor`;
+
+const resolveArtworkUrl = (url?: string | null, retryKey?: number) => {
+  if (!url) return null;
+
+  // If it's already a full URL, return it
+  if (url.startsWith('http')) return url;
+
+  // For relative API paths, ensure they work regardless of hostname/port
+  // Use relative path if we are on the same origin (standard for production build)
+  const isProd = import.meta.env.PROD || window.location.port !== '5173';
+  const baseUrl = isProd ? '' : API_BASE;
+
+  let finalUrl = `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+
+  if (retryKey && retryKey > 0) {
+    const separator = finalUrl.includes('?') ? '&' : '?';
+    finalUrl += `${separator}retry=${retryKey}`;
+  }
+  return finalUrl;
+};
 
 // Dark background color options
 const BACKGROUND_COLORS = [
@@ -63,7 +85,7 @@ interface SavedConfig {
   sampleRate: number | null;
   bitDepth: number;
   selectedPreset: string | null;
-  activeMode?: 'playback' | 'processing' | 'lyrics' | 'queue' | 'history';
+  activeMode?: 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'vumeters';
   backend?: 'local' | 'raspi';
   bypass?: boolean;
   bgColor?: BgColorId;
@@ -74,7 +96,7 @@ const BACKENDS = {
   raspi: { name: 'Raspberry Pi', wsUrl: 'ws://raspberrypi.local:1234' }
 } as const;
 
-type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'queue' | 'history';
+type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'vumeters';
 
 function App() {
   const [presets, setPresets] = useState<string[]>([]);
@@ -119,10 +141,10 @@ function App() {
     return (saved as BgColorId) || 'noir';
   });
   const [currentTime, setCurrentTime] = useState(0);
-  const [roonZones, setRoonZones] = useState<{ id: string, name: string, active: boolean, state: string }[]>([]);
-  const [mediaSource, setMediaSource] = useState<'apple' | 'roon'>(() => {
+  const [mediaZones, setMediaZones] = useState<{ id: string, name: string, active: boolean, state: string, source: 'apple' | 'roon' | 'lms' }[]>([]);
+  const [mediaSource, setMediaSource] = useState<'apple' | 'roon' | 'lms'>(() => {
     const saved = localStorage.getItem('artisNovaDSP_mediaSource');
-    return (saved === 'roon' || saved === 'apple') ? saved : 'apple';
+    return (saved === 'roon' || saved === 'apple' || saved === 'lms') ? saved : 'apple';
   });
   const [hostname, setHostname] = useState<string>('Local');
   const [sourcePopoverOpen, setSourcePopoverOpen] = useState(false);
@@ -131,12 +153,14 @@ function App() {
   const signalBtnRef = useRef<HTMLButtonElement>(null);
   const nowPlayingContainerRef = useRef<HTMLDivElement>(null);
   const secondaryContainerRef = useRef<HTMLDivElement>(null);
+  const [isDspManaged, setIsDspManaged] = useState(false);
   const isSeeking = useRef(false);
 
   // DSP Context Configuration
 
   const [availableBackends, setAvailableBackends] = useState<{ id: string, name: string, wsUrl: string }[]>([]);
   const [fullZoneConfig, setFullZoneConfig] = useState<{ zones: Record<string, string>, defaults: { dspBackend: string } }>({ zones: {}, defaults: { dspBackend: 'local' } });
+  const [settingsHost, setSettingsHost] = useState<'local' | 'raspi'>(backend);
 
   // Backend URL overrides (e.g. if .local doesn't work in browser)
   const [backendOverrides, setBackendOverrides] = useState<Record<string, string>>(() => {
@@ -215,15 +239,20 @@ function App() {
     localStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
     if (mediaSource === 'roon') {
       const lastZone = localStorage.getItem('artisNovaDSP_lastRoonZone');
-      if (lastZone) selectRoonZone(lastZone);
+      if (lastZone) selectZone(lastZone, 'roon');
     }
   }, [mediaSource]);
 
-  // Instant DSP State Detection
-  // DSP is active if: Source is Apple OR (Source is Roon AND Zone ID is explicitly enabled)
-  // DSP is active if: Source is Apple OR (Source is Roon AND Zone ID is explicitly enabled)
-  // v1.3: Simplified - Assume all active zones are DSP enabled
-  const isDspActive = true;
+  // DSP is active if the backend says the zone is managed and it's running
+  const isDspActive = isDspManaged && isRunning;
+
+  // Auto-switch to playback mode if the current zone is not managed but we are in processing mode
+  useEffect(() => {
+    if (activeMode === 'processing' && !isDspManaged) {
+      console.log('App: Auto-switching to playback mode (Zone not managed by DSP)');
+      setActiveMode('playback');
+    }
+  }, [activeMode, isDspManaged]);
 
   // Apply background color
   useEffect(() => {
@@ -344,17 +373,17 @@ function App() {
     if (!menuOpen && !sourcePopoverOpen) {
       setMenuView('main');
     } else {
-      fetchRoonZones();
+      fetchMediaZones();
     }
   }, [menuOpen, sourcePopoverOpen]);
 
-  // Periodic polling for Roon zones when popover or menu is open
+  // Periodic polling for zones when popover or menu is open
   useEffect(() => {
-    if ((menuOpen || sourcePopoverOpen) && mediaSource === 'roon') {
-      const interval = setInterval(fetchRoonZones, 5000);
+    if ((menuOpen || sourcePopoverOpen)) {
+      const interval = setInterval(fetchMediaZones, 5000);
       return () => clearInterval(interval);
     }
-  }, [menuOpen, sourcePopoverOpen, mediaSource]);
+  }, [menuOpen, sourcePopoverOpen]);
 
   // Auto-close timers for menus
   useEffect(() => {
@@ -371,65 +400,152 @@ function App() {
     }
   }, [sourcePopoverOpen, sourceActivity]);
 
-  const fetchRoonZones = async () => {
+  const fetchMediaZones = async () => {
     try {
-      const res = await axios.get(`${API_URL}/media/roon/zones`);
-      setRoonZones(res.data);
+      const res = await axios.get(`${API_URL}/media/zones`);
+      setMediaZones(res.data);
     } catch { }
   };
 
-  const selectRoonZone = async (zoneId: string) => {
-    localStorage.setItem('artisNovaDSP_lastRoonZone', zoneId);
+  const selectZone = async (zoneId: string, source: 'apple' | 'roon' | 'lms') => {
+    const targetZone = mediaZones.find(z => z.id === zoneId && z.source === source);
 
-    // Optimistic UI update for instant feedback
-    setRoonZones(prev => prev.map(z => ({
+    // Optimistic UI update
+    setMediaZones(prev => prev.map(z => ({
       ...z,
-      active: z.id === zoneId
+      active: z.id === zoneId && z.source === source
     })));
 
     try {
-      await axios.post(`${API_URL}/media/roon/select`, { zoneId });
-      fetchRoonZones();
-      setTimeout(fetchNowPlaying, 100); // Trigger immediate update
-      setTimeout(fetchNowPlaying, 500); // Trigger separate check for latency
+      if (source === 'apple') {
+        setMediaSource('apple');
+        setBackend('local');
+      } else if (source === 'roon') {
+        localStorage.setItem('artisNovaDSP_lastRoonZone', zoneId);
+        setMediaSource('roon');
+
+        // Context Awareness: Switch DSP backend based on Roon zone mapping
+        if (targetZone) {
+          const mappedBackend = fullZoneConfig?.zones?.[targetZone.name] || fullZoneConfig?.defaults?.dspBackend || 'local';
+          setBackend(mappedBackend as 'local' | 'raspi');
+        }
+
+        await axios.post(`${API_URL}/media/roon/select`, { zoneId });
+      } else if (source === 'lms') {
+        setMediaSource('lms');
+        setBackend('raspi'); // LMS is always on the Pi
+        await axios.post(`${API_URL}/media/lms/select`, { playerId: zoneId });
+      }
+      fetchMediaZones();
+      setTimeout(fetchNowPlaying, 100);
+      setTimeout(fetchNowPlaying, 500);
     } catch { }
   };
 
-  // Poll for now playing info
+  // WebSocket for instantaneous updates
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.hostname}:3000`;
+      console.log('App: Connecting to metadata WebSocket:', wsUrl);
+      ws = new WebSocket(wsUrl);
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'metadata_update') {
+            // ONLY trigger fetch if the update is for our current media source
+            // to prevent "flapping" when Roon background changes affect Apple Music view.
+            if (message.data?.source === mediaSource || !message.data?.source) {
+              console.log('App: Relevant metadata update received via WS');
+              fetchNowPlaying();
+            } else {
+              console.log(`App: Ignoring background metadata update from ${message.data?.source}`);
+            }
+          }
+        } catch (e) {
+          console.error('WS Message parsing error:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('App: Metadata WebSocket closed. Reconnecting...');
+        reconnectTimeout = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = (err) => {
+        console.warn('App: Metadata WebSocket error:', err);
+      };
+    };
+
+    connect();
+    return () => {
+      if (ws) ws.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, []);
+
+  // Poll for now playing info - reduced frequency if WS is active, 
+  // but keeping it for compatibility and background sync.
   const fetchNowPlaying = async () => {
     try {
-      const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`);
-      if (res.data) {
+      const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`, { timeout: 5000 });
+      if (res.data && !res.data.error) {
+        // TRACK CHANGE: Full update
         if (res.data.track !== nowPlaying.track) {
-          setNowPlaying(res.data);
+          console.log(`App: Track changed to "${res.data.track}". Full state update.`);
+          setNowPlaying({
+            ...nowPlaying,
+            ...res.data,
+            state: res.data.state || 'unknown',
+            track: res.data.track || '',
+            artist: res.data.artist || '',
+            album: res.data.album || '',
+            position: res.data.position || 0,
+            duration: res.data.duration || 0
+          });
+          setArtworkRetryKey(0); // Reset retry on track change
           fetchLyrics(res.data.track, res.data.artist, res.data.device);
         } else {
-          setNowPlaying(prev => ({
-            ...prev,
-            state: res.data.state,
-            position: res.data.position || 0,
-            duration: res.data.duration || 0,
-            // Ensure metadata updates even if track name is identical (e.g. same song, diff zone)
-            signalPath: res.data.signalPath,
-            artist: res.data.artist,
-            album: res.data.album,
-            artworkUrl: res.data.artworkUrl,
-            style: res.data.style,
-            device: res.data.device
-          }));
+          // SAME TRACK: Only update dynamic fields (position, state, signalPath)
+          // STABILITY FIX: Do NOT overwrite artist/album unless they actually changed
+          setNowPlaying(prev => {
+            // Preserve existing artist/album if the incoming data is the same
+            const newArtist = res.data.artist !== prev.artist ? res.data.artist : prev.artist;
+            const newAlbum = res.data.album !== prev.album ? res.data.album : prev.album;
+            const newArtworkUrl = res.data.artworkUrl !== prev.artworkUrl ? res.data.artworkUrl : prev.artworkUrl;
+
+            return {
+              ...prev,
+              state: res.data.state,
+              position: res.data.position || 0,
+              duration: res.data.duration || 0,
+              signalPath: res.data.signalPath,
+              artist: newArtist,
+              album: newAlbum,
+              artworkUrl: newArtworkUrl,
+              style: res.data.style,
+              device: res.data.device
+            };
+          });
         }
       }
-    } catch { }
+    } catch (err: any) {
+      console.warn('App: Fetch NowPlaying failed:', err.message);
+    }
   };
 
   useEffect(() => {
     // Initial fetch
     fetchNowPlaying();
 
-    // Poll loop
-    const interval = setInterval(fetchNowPlaying, 1000);
+    // Polling as safety backup (3 seconds instead of 1 if we have WS, but let's keep 2s for now)
+    const interval = setInterval(fetchNowPlaying, 2000);
     return () => clearInterval(interval);
-  }, [mediaSource, nowPlaying.track, nowPlaying.state]);
+  }, [mediaSource]); // Only re-run when source changes
 
   const fetchLyrics = async (track: string, artist: string, device?: string) => {
     if (!track || !artist) {
@@ -546,11 +662,25 @@ function App() {
         setIsBypass(res.data.bypass || false);
       }
 
+      setIsDspManaged(res.data.isDspManaged || false);
+
       // Auto-sync backend with server's zone-based selection
       // Only switch if the server explicitly found a matching zone (isAutoSelected)
       if (res.data.isAutoSelected && res.data.backend && res.data.backend !== backend) {
         console.log(`App: Auto-switching backend to "${res.data.backend}" based on zone "${res.data.zone}"`);
         setBackend(res.data.backend as 'local' | 'raspi');
+      }
+
+      // AUTO-SOURCE TOGGLE: If Roon is playing but we are on Apple source, switch to Roon
+      // This is critical on the Pi where Apple Music doesn't work.
+      if (res.data.zone && mediaSource !== 'roon') {
+        // Double check if Roon is actually the active player
+        axios.get(`${API_URL}/media/info?source=roon`).then(r => {
+          if (r.data.state === 'playing') {
+            console.log(`App: Auto-switching media source to ROON (detected playback in zone: ${res.data.zone})`);
+            setMediaSource('roon');
+          }
+        }).catch(() => { });
       }
 
       // Auto-start CamillaDSP if not running (only on first load)
@@ -589,9 +719,112 @@ function App() {
     catch (err: any) { alert("Load Failed: " + (err.response?.data?.error || err.message)); }
   };
 
+  const [artworkRetryKey, setArtworkRetryKey] = useState(0);
+
+  const handleArtworkError = () => {
+    if (artworkRetryKey < 10) {
+      console.log(`App: Artwork load failed (attempt ${artworkRetryKey + 1}). Retrying in 1s...`);
+      setTimeout(() => setArtworkRetryKey(prev => prev + 1), 1000);
+    } else {
+      console.warn('App: Artwork load failed after 10 retries.');
+    }
+  };
+
+  useEffect(() => {
+    setArtworkRetryKey(0);
+  }, [nowPlaying.artworkUrl]);
+
+  // MediaSession API for OS-level media key integration
+  // This enables keyboard media keys (⏯️ ⏭️ ⏮️) to control playback on all platforms
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+
+    // Update metadata when track changes
+    if (nowPlaying.track && nowPlaying.artist) {
+      const artworkUrl = resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey);
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: nowPlaying.track,
+        artist: nowPlaying.artist,
+        album: nowPlaying.album || '',
+        artwork: artworkUrl ? [
+          { src: artworkUrl, sizes: '512x512', type: 'image/jpeg' }
+        ] : []
+      });
+    }
+
+    // Update playback state
+    navigator.mediaSession.playbackState = nowPlaying.state === 'playing' ? 'playing' : 'paused';
+
+    // Register action handlers for media keys
+    const handlePlay = () => {
+      handleMediaControl('playpause');
+    };
+    const handlePause = () => {
+      handleMediaControl('playpause');
+    };
+    const handlePreviousTrack = () => {
+      handleMediaControl('prev');
+    };
+    const handleNextTrack = () => {
+      handleMediaControl('next');
+    };
+    const handleSeekTo = (details: MediaSessionActionDetails) => {
+      if (details.seekTime !== undefined) {
+        axios.post(`${API_URL}/media/seek?source=${mediaSource}`, { position: details.seekTime }).catch(() => { });
+      }
+    };
+
+    try {
+      navigator.mediaSession.setActionHandler('play', handlePlay);
+      navigator.mediaSession.setActionHandler('pause', handlePause);
+      navigator.mediaSession.setActionHandler('previoustrack', handlePreviousTrack);
+      navigator.mediaSession.setActionHandler('nexttrack', handleNextTrack);
+      navigator.mediaSession.setActionHandler('seekto', handleSeekTo);
+    } catch (e) {
+      // Some action handlers may not be supported on all platforms
+      console.log('MediaSession: Some handlers not supported', e);
+    }
+
+    // Update position state for seekbar display in OS
+    if (nowPlaying.duration > 0) {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: nowPlaying.duration,
+          playbackRate: 1,
+          position: Math.min(nowPlaying.position, nowPlaying.duration)
+        });
+      } catch (e) {
+        // Position state not supported on all platforms
+      }
+    }
+
+    // Cleanup handlers on unmount
+    return () => {
+      try {
+        navigator.mediaSession.setActionHandler('play', null);
+        navigator.mediaSession.setActionHandler('pause', null);
+        navigator.mediaSession.setActionHandler('previoustrack', null);
+        navigator.mediaSession.setActionHandler('nexttrack', null);
+        navigator.mediaSession.setActionHandler('seekto', null);
+      } catch (e) { }
+    };
+  }, [nowPlaying.track, nowPlaying.artist, nowPlaying.album, nowPlaying.artworkUrl, nowPlaying.state, nowPlaying.position, nowPlaying.duration, mediaSource]);
+
   const handleStart = async () => {
     try { await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth }); await checkStatus(); }
     catch (err: any) { alert("Start Failed: " + (err.response?.data?.error || err.message)); }
+  };
+
+  const handleMediaControl = async (action: string, params: any = {}) => {
+    try {
+      await axios.post(`${API_URL}/media/${action}`, { ...params, source: mediaSource });
+      // Immediate optimistic update or fetch
+      setTimeout(fetchNowPlaying, 100);
+      if (action === 'next' || action === 'prev') {
+        setTimeout(fetchNowPlaying, 500); // Second attempt for slower metadata updates
+      }
+    }
+    catch (err: any) { alert("Control Failed: " + (err.response?.data?.error || err.message)); }
   };
 
   const handleStop = async () => {
@@ -620,6 +853,16 @@ function App() {
     catch { alert('Save failed'); }
   };
 
+  const handleReboot = async () => {
+    if (!confirm("Are you sure you want to reboot the system?")) return;
+    try {
+      await axios.post(`${API_URL}/system/reboot`);
+      alert("System is rebooting...");
+    } catch (err: any) {
+      alert("Reboot Failed: " + (err.response?.data?.error || err.message));
+    }
+  };
+
   const handleNewPreset = () => {
     setSelectedPreset(null);
     setFilters([
@@ -638,28 +881,34 @@ function App() {
         <div className="absolute inset-0 z-0 overflow-hidden" style={{ backgroundColor: 'var(--bg-app)' }}>
           {/* Subtle radial gradient for depth */}
           <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_center,_var(--accent-primary)_0%,_transparent_70%)]" />
-
-          {nowPlaying.artworkUrl && (
+          {/* Dynamic Background */}
+          {nowPlaying.artworkUrl && artworkRetryKey < 10 && (
             <img
-              src={nowPlaying.artworkUrl.startsWith('http') ? nowPlaying.artworkUrl : `${API_URL.replace('/api', '')}${nowPlaying.artworkUrl}`}
+              src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
               alt=""
               className="absolute inset-0 w-full h-full object-cover filter blur-[100px] scale-[5.0] saturate-150 opacity-30"
+              onError={handleArtworkError}
             />
           )}
         </div>
 
         {/* 2. Content Layer */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar pt-8 md:pt-12 relative z-20 flex flex-col">
+        <div className="flex-1 overflow-y-auto custom-scrollbar pt-8 relative z-20 flex flex-col now-playing-header">
 
           {/* Main Content Container - Vertically Centered */}
           <div className="w-full max-w-lg mx-auto flex flex-col justify-center flex-1 min-h-0">
 
-            {/* Artwork - Larger Size */}
-            <div className="aspect-square w-full max-w-[380px] mx-auto mb-8 md:mb-12 relative group/art">
+            {/* Artwork - Responsive Size */}
+            <div className="aspect-square w-full max-w-[380px] mx-auto mb-8 relative group/art now-playing-artwork">
               <div className="absolute inset-0 bg-black/40 rounded-2xl transform translate-y-2 blur-xl opacity-50" />
               <div className="relative w-full h-full bg-white/5 rounded-2xl overflow-hidden shadow-2xl">
-                {nowPlaying.artworkUrl ? (
-                  <img src={nowPlaying.artworkUrl.startsWith('http') ? nowPlaying.artworkUrl : `${API_URL.replace('/api', '')}${nowPlaying.artworkUrl}`} alt="Album Art" className="w-full h-full object-cover" />
+                {nowPlaying.artworkUrl && artworkRetryKey < 10 ? (
+                  <img
+                    src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
+                    alt="Album Art"
+                    className="w-full h-full object-cover"
+                    onError={handleArtworkError}
+                  />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-white/20"><Music size={64} strokeWidth={1} /></div>
                 )}
@@ -667,7 +916,7 @@ function App() {
             </div>
 
             {/* Track Info & Actions - Centered */}
-            <div className="w-full flex flex-col items-center text-center mb-8 px-2">
+            <div className="w-full flex flex-col items-center text-center mb-6 px-2 now-playing-info">
               <div className="w-full relative">
                 <div className="flex items-center justify-center gap-4 mb-2">
                   <h2 className="text-xl md:text-3xl font-bold text-white leading-tight line-clamp-2">{nowPlaying.track || 'Not Playing'}</h2>
@@ -692,11 +941,11 @@ function App() {
                 </div>
                 <div className="flex flex-col items-center justify-center">
                   <p className="text-base md:text-lg text-white/60 font-medium truncate max-w-[95%]">
-                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'}</span> — {nowPlaying.artist || 'System Ready'}
+                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'}</span> — {nowPlaying.artist || 'Not Connected'}
                   </p>
                   {nowPlaying.style && (
                     <div className="mt-4 animate-in fade-in slide-in-from-top-1 duration-500">
-                      <span className="inline-block px-10 py-1.5 rounded-full bg-white/5 text-[10px] font-bold uppercase text-accent-secondary border border-white/10 shadow-sm backdrop-blur-md">
+                      <span className="inline-block px-10 py-1.5 rounded-full bg-white text-black text-[10px] font-black uppercase border border-white/20 shadow-xl backdrop-blur-md">
                         {nowPlaying.style}
                       </span>
                     </div>
@@ -709,7 +958,7 @@ function App() {
             {/* Controls Section - Floating, narrower width */}
             <div className="w-full max-w-[280px] mx-auto">
               {/* Progress Bar */}
-              <div className="w-full mx-auto mb-8">
+              <div className="w-full mx-auto mb-6 now-playing-progress">
                 <div className="relative h-4 w-full bg-gray-800/80 rounded-full cursor-pointer border-2 border-white/30">
                   {/* Progress fill */}
                   <div
@@ -731,8 +980,6 @@ function App() {
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                     onMouseDown={() => { isSeeking.current = true; }}
                     onMouseUp={() => { isSeeking.current = false; }}
-                    onTouchStart={() => { isSeeking.current = true; }}
-                    onTouchEnd={() => { isSeeking.current = false; }}
                     onInput={(e) => setCurrentTime(Number(e.currentTarget.value))}
                     onChange={(e) => handleSeek(Number(e.currentTarget.value))}
                   />
@@ -744,26 +991,23 @@ function App() {
               </div>
 
               {/* Transport Controls */}
-              <div className="flex items-center justify-center gap-6 mb-12">
+              <div className="flex items-center justify-center gap-6 mb-8 now-playing-controls">
                 <button
-                  onTouchStart={() => axios.post(`${API_URL}/media/prev?source=${mediaSource}`).catch(() => { })}
-                  onClick={() => axios.post(`${API_URL}/media/prev?source=${mediaSource}`).catch(() => { })}
+                  onClick={() => handleMediaControl('prev')}
                   className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
                   style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
                 >
                   <SkipBack size={20} fill="currentColor" />
                 </button>
                 <button
-                  onTouchStart={() => axios.post(`${API_URL}/media/playpause?source=${mediaSource}`).catch(() => { })}
-                  onClick={() => axios.post(`${API_URL}/media/playpause?source=${mediaSource}`).catch(() => { })}
+                  onClick={() => handleMediaControl('playpause')}
                   className="rounded-full p-3 hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl"
                   style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
                 >
                   {nowPlaying.state === 'playing' ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
                 </button>
                 <button
-                  onTouchStart={() => axios.post(`${API_URL}/media/next?source=${mediaSource}`).catch(() => { })}
-                  onClick={() => axios.post(`${API_URL}/media/next?source=${mediaSource}`).catch(() => { })}
+                  onClick={() => handleMediaControl('next')}
                   className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
                   style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
                 >
@@ -772,12 +1016,14 @@ function App() {
               </div>
 
               {/* Resolution Badge / Separator */}
-              <div
-                className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-8 text-center uppercase"
-                style={{ color: '#9b59b6' }}
-              >
-                {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
-              </div>
+              {isDspManaged && (
+                <div
+                  className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-4 text-center uppercase now-playing-badge"
+                  style={{ color: '#9b59b6' }}
+                >
+                  {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
+                </div>
+              )}
 
               {/* Volume */}
               <div className="w-full max-w-[240px] mx-auto flex items-center gap-3 px-4 py-2">
@@ -822,18 +1068,20 @@ function App() {
       <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep overflow-hidden">
         <div className="flex-1 flex flex-col h-full p-3 md:p-8 pt-14 md:pt-20 space-y-2 md:space-y-4 overflow-hidden">
 
-          {/* 1. ANALOG MONITORING - Flexible Height (Constrained to ~30% of view) */}
-          <div className="flex-none h-[25%] md:h-[30%] min-h-[120px] md:min-h-[200px] flex flex-col">
-            <VUMeter isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} className="flex-1" />
-          </div>
-
-
-
-          {/* 2. INTEGRATED PEQ EDITOR, ANALYZER & BANDS - Fills remaining space */}
-          <section className="bg-themed-panel border border-themed-medium rounded-xl p-4 md:p-8 shadow-lg mb-4 flex flex-col flex-1 min-h-0 overflow-hidden">
-            <div className="flex items-center gap-3 mb-6 shrink-0">
-              <div className="w-2 h-2 rounded-full bg-accent-primary shadow-[0_0_10px_var(--glow-cyan)]" />
-              <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">PEQ Editor, Analyzer & Bands</span>
+          {/* 1. INTEGRATED PEQ EDITOR, ANALYZER & BANDS - Fills remaining space */}
+          <section className="bg-themed-panel border border-themed-medium rounded-xl p-4 md:p-8 shadow-lg mb-4 flex flex-col flex-1 min-h-0 overflow-hidden relative">
+            <div className="flex items-center justify-between mb-6 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-2 h-2 rounded-full bg-accent-primary shadow-[0_0_10px_var(--glow-cyan)]" />
+                <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">PEQ Editor, Analyzer & Bands</span>
+              </div>
+              <button
+                onClick={() => setActiveMode('playback')}
+                className="p-2 hover:bg-white/5 rounded-lg transition-colors text-themed-muted hover:text-white"
+                title="Close DSP Settings"
+              >
+                <X size={20} />
+              </button>
             </div>
 
             <div className="flex-1 flex flex-col gap-6 md:gap-10 min-h-0 overflow-hidden">
@@ -961,6 +1209,94 @@ function App() {
     );
   };
 
+  // Render VU Meters fullscreen view (for Raspberry Pi)
+  const renderVUMetersView = () => {
+    return (
+      <div className="h-full w-full relative overflow-clip group flex flex-col bg-themed-deep">
+        {/* Dynamic Background */}
+        <div className="absolute inset-0 z-0 overflow-hidden" style={{ backgroundColor: 'var(--bg-app)' }}>
+          <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--accent-primary)_0%,_transparent_70%)]" />
+          {nowPlaying.artworkUrl && artworkRetryKey < 4 && (
+            <img
+              src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
+              alt=""
+              className="absolute inset-0 w-full h-full object-cover filter blur-[100px] scale-[5.0] saturate-100 opacity-20"
+              onError={handleArtworkError}
+            />
+          )}
+        </div>
+
+        {/* Main Content */}
+        <div className={`flex-1 flex flex-col relative z-10 min-h-0 ${isMobile() ? 'p-6 justify-center pt-20' : 'p-4 md:p-8'}`}>
+          {/* VU Meters - On mobile, we constrain height to avoid huge gaps */}
+          <div className={`${isMobile() ? 'h-[180px] shrink-0' : 'flex-1'} min-h-0 flex flex-col`}>
+            <VUMeter isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} className={isMobile() ? 'h-full' : 'flex-1'} />
+          </div>
+
+          {/* Track Info Section - Below VU Meters */}
+          <div className={`shrink-0 border-t border-white/10 ${isMobile() ? 'mt-3 pt-3' : 'mt-4 pt-4 md:pt-6'}`}>
+            {/* Track Title & Artist */}
+            <div className={`text-center ${isMobile() ? 'mb-1' : 'mb-3'}`}>
+              <h2 className={`${isMobile() ? 'text-lg' : 'text-xl md:text-2xl'} font-bold text-white leading-tight line-clamp-1 mb-0.5`}>
+                {nowPlaying.track || 'Not Playing'}
+              </h2>
+              <p className={`${isMobile() ? 'text-[11px]' : 'text-sm md:text-base'} text-white/60 font-medium truncate`}>
+                <span className="text-white/80">{nowPlaying.album || 'No Album'}</span>
+                {nowPlaying.artist && ` — ${nowPlaying.artist}`}
+              </p>
+            </div>
+
+            {/* Style Badge - Much smaller on mobile */}
+            {nowPlaying.style && (
+              <div className={`text-center ${isMobile() ? 'mb-1.5' : 'mb-3'}`}>
+                <span className={`inline-block px-4 py-0.5 rounded-full bg-white/5 text-[9px] font-bold uppercase text-accent-secondary border border-white/10 backdrop-blur-md`}>
+                  {nowPlaying.style}
+                </span>
+              </div>
+            )}
+
+            {/* Transport Controls - Compact on mobile */}
+            <div className={`flex items-center justify-center ${isMobile() ? 'gap-4 mb-2' : 'gap-6 mb-3'}`}>
+              <button
+                onClick={() => handleMediaControl('prev')}
+                className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
+                style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+              >
+                <SkipBack size={isMobile() ? 16 : 18} fill="currentColor" />
+              </button>
+              <button
+                onClick={() => handleMediaControl('playpause')}
+                className={`rounded-full hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl ${isMobile() ? 'p-2.5' : 'p-3'}`}
+                style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+              >
+                {nowPlaying.state === 'playing' ? <Pause size={isMobile() ? 20 : 24} fill="currentColor" /> : <Play size={isMobile() ? 20 : 24} fill="currentColor" />}
+              </button>
+              <button
+                onClick={() => handleMediaControl('next')}
+                className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
+                style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+              >
+                <SkipForward size={isMobile() ? 16 : 18} fill="currentColor" />
+              </button>
+            </div>
+
+            {/* Resolution Badge & Device */}
+            <div className="text-center">
+              <div
+                className="text-[10px] font-black tracking-[0.3em] leading-none select-none uppercase mb-1"
+                style={{ color: '#9b59b6' }}
+              >
+                {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
+              </div>
+              {nowPlaying.device && (
+                <span className="text-[9px] text-white/30 font-black uppercase tracking-[0.2em]">{nowPlaying.device}</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
 
   // Main layout
@@ -973,6 +1309,7 @@ function App() {
         case 'lyrics': return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
         case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
         case 'history': return <History />;
+        case 'vumeters': return renderVUMetersView();
         default: return renderNowPlaying();
       }
     }
@@ -989,6 +1326,11 @@ function App() {
       );
     }
 
+    // VU Meters - Fullscreen mode (no split panel)
+    if (activeMode === 'vumeters') {
+      return renderVUMetersView();
+    }
+
     return (
       <Group orientation="horizontal" className="h-full w-full" onLayoutChange={onLayoutChange}>
         <Panel defaultSize={panelSizes[0]} minSize={30} id="now-playing">{renderNowPlaying()}</Panel>
@@ -996,10 +1338,11 @@ function App() {
           <div className="w-1 h-12 bg-themed-medium rounded-full" />
         </Separator>
         <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
-          <div ref={secondaryContainerRef} className="h-full w-full flex flex-col">
+          <div ref={secondaryContainerRef} className="h-full w-full flex flex-col p-4 lg:p-6">
             {/* 3. LYRICS/QUEUE/HISTORY/PROCESSING - Based on activeMode */}
             {activeMode === 'processing' && renderProcessingTools()}
             {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
+            {activeMode === 'info' && <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />}
             {activeMode === 'queue' && <PlayQueue queue={queue} mediaSource={mediaSource} />}
             {activeMode === 'history' && <History />}
           </div>
@@ -1010,7 +1353,7 @@ function App() {
 
   return (
     <div
-      className="flex flex-col h-[100dvh] w-screen bg-themed-deep text-themed-primary overflow-clip transition-all duration-700 ease-in-out"
+      className="flex flex-col h-screen w-full bg-themed-deep text-themed-primary overflow-hidden"
       style={{ backgroundColor: 'var(--bg-app)' }}
     >
       {/* FLOATING MENU BUTTON - Safe area padding for mobile */}
@@ -1046,46 +1389,111 @@ function App() {
               </div>
 
               {/* Backend Section */}
-              <div className="p-2">
-                <div className="px-3 pt-1 pb-2 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Device</div>
-                <div className="flex gap-2 px-1">
-                  <button onClick={() => setBackend('local')} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${backend === 'local' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'local' ? '#000000' : 'transparent', color: '#ffffff' }}>
-                    <Monitor size={14} /><span className="text-[11px] font-black truncate max-w-[100px]">{hostname}</span>
-                    {backend === 'local' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
-                  </button>
-                  <button onClick={() => raspiOnline && setBackend('raspi')} disabled={!raspiOnline} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${!raspiOnline ? 'opacity-30 cursor-not-allowed bg-themed-deep border border-themed-medium text-themed-muted' : backend === 'raspi' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'raspi' ? '#000000' : 'transparent', color: '#ffffff' }}>
-                    <Server size={14} /><span className="text-[11px] font-black">RPi</span>
-                    {backend === 'raspi' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
-                  </button>
+              {isDspManaged && (
+                <div className="p-2">
+                  <div className="px-3 pt-1 pb-2 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Device</div>
+                  <div className="flex gap-2 px-1">
+                    <button onClick={() => setBackend('local')} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${backend === 'local' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'local' ? '#000000' : 'transparent', color: '#ffffff' }}>
+                      <Monitor size={14} /><span className="text-[11px] font-black truncate max-w-[100px]">{hostname}</span>
+                      {backend === 'local' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
+                    </button>
+                    <button onClick={() => raspiOnline && setBackend('raspi')} disabled={!raspiOnline} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${!raspiOnline ? 'opacity-30 cursor-not-allowed bg-themed-deep border border-themed-medium text-themed-muted' : backend === 'raspi' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'raspi' ? '#000000' : 'transparent', color: '#ffffff' }}>
+                      <Server size={14} /><span className="text-[11px] font-black">RPi</span>
+                      {backend === 'raspi' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
+                    </button>
+                  </div>
+                  <div className="mx-4 border-t border-themed-subtle my-2" />
                 </div>
-              </div>
-
-              <div className="mx-4 border-t border-themed-subtle my-1" />
+              )}
 
               {/* View Mode Section */}
               <div className="p-2">
                 <div className="px-3 pt-2 pb-1 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Navigation</div>
                 <div className="space-y-0.5">
-                  <button onClick={() => { setActiveMode('playback'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'playback' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
-                    <div className="flex items-center gap-3"><Play size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Playback Only</span></div>
-                    {activeMode === 'playback' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
-                  </button>
-                  <button onClick={() => { setActiveMode('processing'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'processing' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
-                    <div className="flex items-center gap-3"><Activity size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Processing</span></div>
-                    {activeMode === 'processing' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
+                  <button
+                    onClick={() => { setActiveMode('playback'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'playback' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'playback' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Play size={16} style={activeMode === 'playback' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">Playback Only</span>
+                    </div>
+                    {activeMode === 'playback' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
 
-                  <button onClick={() => { setActiveMode('lyrics'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'lyrics' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
-                    <div className="flex items-center gap-3"><MessageCircle size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Lyrics</span></div>
-                    {activeMode === 'lyrics' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
+                  {isDspManaged && (
+                    <button
+                      onClick={() => { setActiveMode('processing'); setMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'processing' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                      style={activeMode === 'processing' ? { backgroundColor: 'white', color: 'black' } : {}}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Activity size={16} style={activeMode === 'processing' ? { color: 'black' } : { color: '#606080' }} />
+                        <span className="text-sm font-black">DSP Control</span>
+                      </div>
+                      {activeMode === 'processing' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                    </button>
+                  )}
+
+                  <button
+                    onClick={() => { setActiveMode('lyrics'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'lyrics' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'lyrics' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <MessageCircle size={16} style={activeMode === 'lyrics' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">Lyrics</span>
+                    </div>
+                    {activeMode === 'lyrics' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
-                  <button onClick={() => { setActiveMode('queue'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'queue' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
-                    <div className="flex items-center gap-3"><Music size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">Queue</span></div>
-                    {activeMode === 'queue' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
+
+                  <button
+                    onClick={() => { setActiveMode('info'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'info' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'info' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <BookOpen size={16} style={activeMode === 'info' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">Music Info</span>
+                    </div>
+                    {activeMode === 'info' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
-                  <button onClick={() => { setActiveMode('history'); setMenuOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'history' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}>
-                    <div className="flex items-center gap-3"><RefreshCcw size={16} style={{ color: '#ffffff' }} /><span className="text-sm font-bold">History</span></div>
-                    {activeMode === 'history' && <Check size={14} strokeWidth={3} style={{ color: '#ffffff' }} />}
+
+                  <button
+                    onClick={() => { setActiveMode('queue'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'queue' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'queue' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Music size={16} style={activeMode === 'queue' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">Queue</span>
+                    </div>
+                    {activeMode === 'queue' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                  </button>
+
+                  <button
+                    onClick={() => { setActiveMode('history'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'history' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'history' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <RefreshCcw size={16} style={activeMode === 'history' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">History</span>
+                    </div>
+                    {activeMode === 'history' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                  </button>
+
+                  <button
+                    onClick={() => { setActiveMode('vumeters'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'vumeters' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'vumeters' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Gauge size={16} style={activeMode === 'vumeters' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">VU Meters</span>
+                    </div>
+                    {activeMode === 'vumeters' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
                 </div>
               </div>
@@ -1094,12 +1502,15 @@ function App() {
 
               {/* Settings Trigger */}
               <div className="p-2">
-                <button onClick={() => setMenuView('settings')} className="w-full flex items-center justify-between px-3 py-3 rounded-lg hover:bg-white/5 text-themed-secondary transition-all">
+                <button
+                  onClick={() => setMenuView('settings')}
+                  className="w-full flex items-center justify-between px-3 py-3 rounded-lg transition-all hover:bg-white/10 text-white bg-black/40 border border-white/5"
+                >
                   <div className="flex items-center gap-3">
                     <Settings size={18} style={{ color: '#ffffff' }} />
-                    <span className="text-sm font-bold">Settings</span>
+                    <span className="text-sm font-black">Settings</span>
                   </div>
-                  <ChevronRight size={16} style={{ color: '#ffffff' }} />
+                  <ChevronRight size={16} style={{ color: '#ffffff', opacity: 0.6 }} />
                 </button>
               </div>
 
@@ -1107,14 +1518,17 @@ function App() {
 
               {/* Background Color Submenu Trigger */}
               <div className="p-2">
-                <button onClick={() => setMenuView('colors')} className="w-full flex items-center justify-between px-3 py-3 rounded-lg hover:bg-white/5 text-themed-secondary transition-all">
+                <button
+                  onClick={() => setMenuView('colors')}
+                  className="w-full flex items-center justify-between px-3 py-3 rounded-lg transition-all hover:bg-white/10 text-white bg-black/40 border border-white/5"
+                >
                   <div className="flex items-center gap-3">
-                    <div className="w-5 h-5 rounded-sm border border-white/40 shadow-lg" style={{ backgroundColor: BACKGROUND_COLORS.find(c => c.id === bgColor)?.color || '#000000' }} />
-                    <span className="text-sm font-bold">Background Color</span>
+                    <div className="w-5 h-5 rounded-sm border shadow-lg border-white/40" style={{ backgroundColor: BACKGROUND_COLORS.find(c => c.id === bgColor)?.color || '#000000' }} />
+                    <span className="text-sm font-black">Background Color</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-themed-muted font-black uppercase tracking-widest truncate max-w-[80px]">{BACKGROUND_COLORS.find(c => c.id === bgColor)?.name}</span>
-                    <ChevronRight size={16} style={{ color: '#ffffff' }} />
+                    <span className="text-[10px] font-black uppercase tracking-widest truncate max-w-[80px] text-white/40">{BACKGROUND_COLORS.find(c => c.id === bgColor)?.name}</span>
+                    <ChevronRight size={16} style={{ color: '#ffffff', opacity: 0.6 }} />
                   </div>
                 </button>
               </div>
@@ -1129,98 +1543,102 @@ function App() {
               </div>
             </>
           ) : menuView === 'settings' ? (
-            <>
-              {/* Settings Header */}
-              <div className="px-4 py-3 border-b border-themed-subtle flex items-center gap-2">
-                <button onClick={() => setMenuView('main')} className="p-2 hover:bg-white/5 rounded-lg transition-all text-themed-muted hover:text-themed-primary">
-                  <ChevronLeft size={18} />
-                </button>
-                <div className="text-sm font-black text-themed-primary header-text">Settings</div>
+            <div className="flex-1 flex flex-col min-h-0 bg-themed-panel relative overflow-hidden">
+              {/* Settings Header - ULTRA CONTRAST */}
+              <div className="flex-shrink-0 px-4 pt-4 pb-4 border-b border-themed-subtle shadow-xl z-30" style={{ backgroundColor: 'white' }}>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3" style={{ color: 'black' }}>
+                    <Settings size={18} strokeWidth={3} />
+                    <h2 className="text-sm font-black uppercase tracking-widest">Configuración</h2>
+                  </div>
+                  <button onClick={() => setMenuView('main')} className="p-1 hover:bg-black/10 rounded-lg transition-all" style={{ color: 'black' }}>
+                    <X size={20} strokeWidth={4} />
+                  </button>
+                </div>
+
+                <div className="flex p-1 bg-black rounded-xl border border-white/10 shadow-2xl">
+                  <button
+                    onClick={() => setSettingsHost('local')}
+                    style={settingsHost === 'local' ? { backgroundColor: 'white', color: 'black' } : { backgroundColor: 'transparent', color: 'rgba(255,255,255,0.4)' }}
+                    className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${settingsHost === 'local' ? 'shadow-lg scale-[1.02]' : 'hover:text-white/80 hover:bg-white/5'}`}
+                  >
+                    Mac Mini
+                  </button>
+                  <button
+                    onClick={() => setSettingsHost('raspi')}
+                    style={settingsHost === 'raspi' ? { backgroundColor: 'white', color: 'black' } : { backgroundColor: 'transparent', color: 'rgba(255,255,255,0.4)' }}
+                    className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${settingsHost === 'raspi' ? 'shadow-lg scale-[1.02]' : 'hover:text-white/80 hover:bg-white/5'}`}
+                  >
+                    Raspberry Pi
+                  </button>
+                </div>
               </div>
 
-              {/* Settings Content */}
-              <div className="p-4 space-y-4">
+              <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
+                {/* Connection Status */}
                 <div className="space-y-1.5">
-                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Sample Rate</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {[44100, 48000, 96000, 192000].map(sr => (
-                      <button
-                        key={sr}
-                        onClick={() => setSampleRate(sr)}
-                        className={`px-3 py-2 rounded-lg text-[11px] font-bold border transition-all ${sampleRate === sr ? 'bg-accent-primary/10 border-accent-primary/30 text-accent-primary' : 'bg-themed-deep border-themed-medium text-themed-muted hover:border-themed-secondary'}`}
-                      >
-                        {(sr / 1000).toFixed(1)} kHz
-                      </button>
-                    ))}
+                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Estado del Servidor</label>
+                  <div className="p-3 bg-themed-deep rounded-xl border border-themed-medium flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${settingsHost === 'local' || raspiOnline ? 'bg-accent-success shadow-[0_0_8px_var(--glow-green)]' : 'bg-accent-danger shadow-[0_0_8px_var(--glow-red)]'} ${settingsHost === 'raspi' && raspiOnline ? 'animate-pulse' : ''}`} />
+                      <span className="text-[11px] font-bold text-themed-primary uppercase">{settingsHost === 'local' ? 'Mac Mini (Local)' : 'Raspberry Pi (Remote)'}</span>
+                    </div>
+                    <span className="text-[9px] font-black text-themed-muted uppercase tracking-widest">
+                      {settingsHost === 'local' || raspiOnline ? 'Online' : 'Offline'}
+                    </span>
                   </div>
                 </div>
 
+                {/* WebSocket Config Section */}
                 <div className="space-y-1.5">
-                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Bit Depth</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {[16, 24, 32].map(bd => (
-                      <button
-                        key={bd}
-                        onClick={() => setBitDepth(bd as 16 | 24 | 32)}
-                        className={`px-3 py-2 rounded-lg text-[11px] font-bold border transition-all ${bitDepth === bd ? 'bg-accent-primary/10 border-accent-primary/30 text-accent-primary' : 'bg-themed-deep border-themed-medium text-themed-muted hover:border-themed-secondary'}`}
-                      >
-                        {bd} bit
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
-                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Backend URL Configuration</label>
-                  <p className="text-[9px] text-themed-muted px-1 pb-1">Override default WebSocket URLs (use IP if .local fails).</p>
-                  <div className="space-y-2">
-                    {availableBackends.map(b => (
-                      <div key={b.id} className="space-y-1 bg-themed-deep p-2 rounded-lg border border-themed-medium">
-                        <div className="flex items-center justify-between px-1">
-                          <span className="text-[11px] font-bold text-themed-primary">{b.name}</span>
-                          <span className="text-[9px] text-accent-primary font-mono">{getActiveWsUrl(b.id)}</span>
-                        </div>
-                        <input
-                          type="text"
-                          defaultValue={backendOverrides[b.id] || b.wsUrl}
-                          placeholder={b.wsUrl}
-                          onBlur={(e) => updateBackendOverride(b.id, e.target.value)}
-                          className="w-full bg-black/40 border border-themed-medium rounded px-2 py-1.5 text-[10px] text-themed-secondary focus:outline-none focus:border-accent-primary transition-colors"
-                        />
+                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">WebSocket Bridge</label>
+                  {availableBackends.filter(b => b.id === settingsHost).map(b => (
+                    <div key={b.id} className="space-y-2 bg-themed-deep p-3 rounded-xl border border-themed-medium">
+                      <div className="flex items-center justify-between px-1">
+                        <span className="text-[9px] font-bold text-themed-muted uppercase">Bridge URL</span>
+                        <span className="text-[9px] text-accent-primary font-mono">{getActiveWsUrl(b.id)}</span>
                       </div>
-                    ))}
-                  </div>
+                      <input
+                        type="text"
+                        defaultValue={backendOverrides[b.id] || b.wsUrl}
+                        placeholder={b.wsUrl}
+                        onBlur={(e) => updateBackendOverride(b.id, e.target.value)}
+                        className="w-full bg-black/60 border border-themed-subtle rounded-lg px-3 py-2 text-[11px] text-themed-secondary focus:outline-none focus:border-accent-primary transition-all font-mono"
+                      />
+                    </div>
+                  ))}
                 </div>
 
-                <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
-                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Zone Backend Configuration</label>
-                  <p className="text-[9px] text-themed-muted px-1 pb-1">Map Roon zones to specific CamillaDSP instances.</p>
+                {/* Roon Mapping Section */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Mapeo de Zonas Roon</label>
+                  <p className="text-[9px] text-themed-muted px-1 pb-1">Define qué zonas se procesan en este servidor.</p>
                   <div className="space-y-2">
-                    {roonZones.length === 0 ? <div className="text-[10px] text-themed-muted italic px-2">No Roon zones found</div> :
-                      roonZones.map(zone => (
-                        <div key={zone.id} className="space-y-1 bg-themed-deep p-2 rounded-lg border border-themed-medium">
+                    {mediaZones.filter(z => z.source === 'roon').length === 0 ? <div className="text-[10px] text-themed-muted italic px-2">No se detectan zonas...</div> :
+                      mediaZones.filter(z => z.source === 'roon').map(zone => (
+                        <div key={zone.id} className="space-y-2 bg-themed-deep p-3 rounded-xl border border-themed-medium">
                           <div className="flex items-center justify-between px-1">
                             <span className="text-[11px] font-bold text-themed-primary">{zone.name}</span>
-                            <div className="text-[9px] text-themed-muted font-black uppercase tracking-widest">
-                              {fullZoneConfig.zones[zone.name] || 'Default'}
+                            <div className={`text-[9px] font-black uppercase px-2 py-0.5 rounded ${fullZoneConfig?.zones?.[zone.name] === settingsHost ? 'bg-accent-primary/20 text-accent-primary' : (fullZoneConfig?.zones?.[zone.name] ? 'bg-themed-card-hover text-themed-muted' : (settingsHost === 'local' ? 'bg-accent-primary/20 text-accent-primary' : 'bg-themed-card-hover text-themed-muted'))}`}>
+                              {fullZoneConfig?.zones?.[zone.name] === settingsHost ? 'ACTIVO AQUÍ' : (fullZoneConfig?.zones?.[zone.name] || 'DEFAULT')}
                             </div>
                           </div>
-                          <div className="grid grid-cols-3 gap-1 mt-1">
+                          <div className="grid grid-cols-3 gap-1">
                             <button
                               onClick={() => updateZoneBackend(zone.name, null)}
-                              className={`py-1 rounded text-[9px] font-black uppercase tracking-tighter transition-all ${!fullZoneConfig.zones[zone.name] ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' : 'bg-black/40 text-themed-muted border border-themed-medium'}`}
+                              className={`py-1.5 rounded text-[8px] font-black uppercase tracking-tighter transition-all ${!fullZoneConfig?.zones?.[zone.name] ? 'bg-accent-primary text-white' : 'bg-black/40 text-themed-muted'}`}
                             >
                               Default
                             </button>
                             <button
                               onClick={() => updateZoneBackend(zone.name, 'local')}
-                              className={`py-1 rounded text-[9px] font-black uppercase tracking-tighter transition-all ${fullZoneConfig.zones[zone.name] === 'local' ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' : 'bg-black/40 text-themed-muted border border-themed-medium'}`}
+                              className={`py-1.5 rounded text-[8px] font-black uppercase tracking-tighter transition-all ${fullZoneConfig?.zones?.[zone.name] === 'local' ? 'bg-accent-primary text-white' : 'bg-black/40 text-themed-muted'}`}
                             >
                               Local
                             </button>
                             <button
                               onClick={() => updateZoneBackend(zone.name, 'raspi')}
-                              className={`py-1 rounded text-[9px] font-black uppercase tracking-tighter transition-all ${fullZoneConfig.zones[zone.name] === 'raspi' ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' : 'bg-black/40 text-themed-muted border border-themed-medium'}`}
+                              className={`py-1.5 rounded text-[8px] font-black uppercase tracking-tighter transition-all ${fullZoneConfig?.zones?.[zone.name] === 'raspi' ? 'bg-accent-primary text-white' : 'bg-black/40 text-themed-muted'}`}
                             >
                               Raspi
                             </button>
@@ -1231,8 +1649,53 @@ function App() {
                   </div>
                 </div>
 
+                {/* External Actions (Pi Context) */}
+                {settingsHost === 'raspi' && !window.location.hostname.includes('raspberrypi') && (
+                  <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
+                    <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Acciones Remotas</label>
+                    <button
+                      onClick={() => window.location.href = 'http://raspberrypi.local:3000'}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-accent-primary/10 border border-accent-primary/20 text-accent-primary hover:bg-accent-primary/20 transition-all text-[11px] font-black uppercase tracking-widest"
+                    >
+                      <ExternalLink size={14} />
+                      Abrir Dashboard en Pi
+                    </button>
+                  </div>
+                )}
+
+                {/* External Actions (Return to Local) */}
+                {settingsHost === 'local' && window.location.hostname.includes('raspberrypi') && (
+                  <div className="space-y-1.5 pt-2 border-t border-themed-subtle">
+                    <label className="text-[10px] text-themed-muted font-black uppercase tracking-widest px-1">Navegación</label>
+                    <button
+                      onClick={() => window.location.href = 'http://macmini.local:3000'}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-accent-success/10 border border-accent-success/20 text-accent-success hover:bg-accent-success/20 transition-all text-[11px] font-black uppercase tracking-widest"
+                    >
+                      <Monitor size={14} />
+                      Abrir Dashboard Local
+                    </button>
+                  </div>
+                )}
+
+                {/* System Actions */}
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-themed-deep border border-themed-subtle text-themed-primary hover:border-themed-primary transition-all text-[11px] font-black uppercase tracking-widest"
+                  >
+                    <RefreshCcw size={14} />
+                    Reset App
+                  </button>
+                  <button
+                    onClick={handleReboot}
+                    className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-accent-danger/10 border border-accent-danger/20 text-accent-danger hover:bg-accent-danger/20 transition-all text-[11px] font-black uppercase tracking-widest"
+                  >
+                    <Power size={14} />
+                    Reboot
+                  </button>
+                </div>
               </div>
-            </>
+            </div>
           ) : (
             <>
               {/* Colors Header */}
@@ -1307,63 +1770,91 @@ function App() {
             onMouseDown={() => setSourceActivity(Date.now())}
             className="flex items-end gap-3 animate-in fade-in zoom-in-95 slide-in-from-bottom-6 duration-300"
           >
-            {/* Main Source Selector */}
-            <div className="bg-black border border-themed-medium rounded-xl shadow-2xl p-2.5 w-52">
-              <div className="px-3 pt-2 pb-2 text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] border-b border-themed-subtle mb-1">Fuente de Audio</div>
-              <div className="space-y-1">
-                <button
-                  onClick={() => { setMediaSource('apple'); if (mediaSource === 'apple') setSourcePopoverOpen(false); }}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${mediaSource === 'apple' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}
-                >
-                  <div className={`p-1.5 rounded-lg ${mediaSource === 'apple' ? 'bg-accent-primary/20' : 'bg-white/5'}`}>
-                    <Music size={14} />
-                  </div>
-                  <span className="text-sm font-bold">Apple Music</span>
-                  {mediaSource === 'apple' && <Check size={14} strokeWidth={4} className="ml-auto" />}
-                </button>
-                <button
-                  onClick={() => { setMediaSource('roon'); }}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${mediaSource === 'roon' ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-secondary'}`}
-                >
-                  <div className={`p-1.5 rounded-lg ${mediaSource === 'roon' ? 'bg-accent-primary/20' : 'bg-white/5'}`}>
-                    <Zap size={14} />
-                  </div>
-                  <span className="text-sm font-bold">Roon</span>
-                  {mediaSource === 'roon' && <Check size={14} strokeWidth={4} className="ml-auto" />}
-                </button>
+            {/* Unified Player Selection */}
+            <div className="bg-black border border-themed-medium rounded-xl shadow-2xl p-2.5 w-64 min-w-[260px]">
+              <div className="px-3 pt-2 pb-2 text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] border-b border-themed-subtle mb-1 flex items-center justify-between">
+                <span>Selección de Reproductor</span>
+                {mediaZones.length > 0 && <div className="w-1.5 h-1.5 rounded-full bg-accent-success shadow-[0_0_8px_var(--accent-success)]" />}
               </div>
-            </div>
 
-            {/* Roon Zones Sub-menu (Show only if Roon is selected) */}
-            {mediaSource === 'roon' && (
-              <div className="bg-black border border-themed-medium rounded-xl shadow-2xl p-2.5 w-56">
-                <div className="px-3 pt-2 pb-2 text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] border-b border-themed-subtle mb-1 flex items-center justify-between">
-                  <span>Zonas Roon</span>
-                  {roonZones.length > 0 && <div className="w-1.5 h-1.5 rounded-full bg-accent-success shadow-[0_0_8px_var(--accent-success)]" />}
+              <div className="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar p-1">
+
+                {/* 1. Directo (Apple Music) */}
+                <div className="space-y-1">
+                  <div className="px-2 pb-1 text-[9px] text-[#404060] font-black uppercase tracking-widest">Directo</div>
+                  {mediaZones.filter(z => z.source === 'apple').map(zone => (
+                    <button
+                      key={zone.id}
+                      onClick={() => { selectZone(zone.id, zone.source); setSourcePopoverOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-3 rounded-xl transition-all ${zone.active && mediaSource === 'apple' ? 'bg-themed-muted/20 text-themed-primary border border-themed-muted/30' : 'hover:bg-white/5 text-themed-muted border border-transparent'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`p-1.5 rounded-lg ${zone.active && mediaSource === 'apple' ? 'bg-themed-muted/40' : 'bg-white/5'}`}>
+                          <Music size={14} />
+                        </div>
+                        <div className="flex flex-col items-start">
+                          <span className="text-xs font-bold leading-none mb-1">{zone.name}</span>
+                          <span className="text-[8px] font-black uppercase tracking-widest opacity-50">Local Mac</span>
+                        </div>
+                      </div>
+                      {zone.active && mediaSource === 'apple' && <Check size={14} strokeWidth={4} className="text-themed-primary" />}
+                    </button>
+                  ))}
                 </div>
-                <div className="space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
-                  {roonZones.length === 0 ? (
-                    <div className="px-4 py-6 text-center">
-                      <div className="text-[10px] text-[#404060] italic">Buscando zonas...</div>
-                    </div>
+
+                {/* 2. Streaming (ArtisNova Pi) */}
+                <div className="space-y-1">
+                  <div className="px-2 pb-1 text-[9px] text-accent-success/60 font-black uppercase tracking-widest">Streaming (Pi)</div>
+                  {mediaZones.filter(z => z.source === 'lms').map(zone => (
+                    <button
+                      key={zone.id}
+                      onClick={() => { selectZone(zone.id, zone.source); setSourcePopoverOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-3 rounded-xl transition-all ${zone.active && mediaSource === 'lms' ? 'bg-accent-success/10 text-accent-success border border-accent-success/20' : 'hover:bg-white/5 text-themed-muted border border-transparent'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`p-1.5 rounded-lg ${zone.active && mediaSource === 'lms' ? 'bg-accent-success/20' : 'bg-white/5'}`}>
+                          <Activity size={14} />
+                        </div>
+                        <div className="flex flex-col items-start text-left">
+                          <span className="text-xs font-bold leading-none mb-1">{zone.name}</span>
+                          <span className="text-[8px] font-black uppercase tracking-widest opacity-50">Spotify / Qobuz / AirPlay</span>
+                        </div>
+                      </div>
+                      {zone.active && mediaSource === 'lms' && <Check size={14} strokeWidth={4} />}
+                    </button>
+                  ))}
+                </div>
+
+                {/* 3. Roon Zones */}
+                <div className="space-y-1">
+                  <div className="px-2 pb-1 text-[9px] text-accent-primary/60 font-black uppercase tracking-widest">Zonas Roon</div>
+                  {mediaZones.filter(z => z.source === 'roon').length === 0 ? (
+                    <div className="px-4 py-2 text-[10px] text-[#404060] italic">No hay zonas Roon...</div>
                   ) : (
-                    roonZones.map(zone => (
+                    mediaZones.filter(z => z.source === 'roon').map(zone => (
                       <button
                         key={zone.id}
-                        onClick={() => { selectRoonZone(zone.id); setSourcePopoverOpen(false); }}
-                        className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${zone.active ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-white/5 text-themed-muted'}`}
+                        onClick={() => { selectZone(zone.id, zone.source); setSourcePopoverOpen(false); }}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${zone.active && mediaSource === 'roon' ? 'bg-accent-primary/10 text-accent-primary border border-accent-primary/20' : 'hover:bg-themed-card-hover/40 text-themed-muted border border-transparent'}`}
                       >
-                        <div className="flex flex-col items-start text-left">
-                          <span className="text-[11px] font-black uppercase tracking-widest">{zone.name}</span>
-                          <span className="text-[9px] opacity-70 font-mono capitalize">{zone.state}</span>
+                        <div className="flex flex-col items-start text-left flex-1 min-w-0 pr-2">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <Zap size={10} className={zone.active && mediaSource === 'roon' ? "text-accent-primary" : "text-themed-muted/40"} />
+                            <span className="text-[10px] font-black uppercase tracking-widest truncate">{zone.name}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[8px] font-black px-1 rounded ${zone.state === 'playing' ? 'bg-accent-success/20 text-accent-success' : 'bg-themed-card-hover text-themed-muted'}`}>
+                              {zone.state.toUpperCase()}
+                            </span>
+                          </div>
                         </div>
-                        {zone.active && <Check size={12} strokeWidth={4} />}
+                        {zone.active && mediaSource === 'roon' && <Check size={12} strokeWidth={4} className="shrink-0" />}
                       </button>
                     ))
                   )}
                 </div>
               </div>
-            )}
+            </div>
           </div>
         )}
       </div>

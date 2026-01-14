@@ -4,6 +4,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const yaml = require('js-yaml');
 
 // Node 22+ Roon API Workaround
 global.WebSocket = require('ws');
@@ -13,6 +14,8 @@ const https = require('https');
 const DSPManager = require('./dsp-manager');
 const RemoteDSPManager = require('./remote-dsp-manager');
 const FilterParser = require('./parser');
+const LMSController = require('./lms-controller');
+const { spawn } = require('child_process');
 const db = require('./database'); // History DB
 
 
@@ -30,13 +33,14 @@ app.use((req, res, next) => {
 
 // Roon Integration
 const roonController = require('./roon-controller');
-roonController.init();
+// Initialized with callback at bottom of file
 
 // CoreAudio Sample Rate Detection for BlackHole
 // Polls the system to detect when Roon changes the sample rate
 let lastDetectedSampleRate = null;
 
 function getBlackHoleSampleRate() {
+    if (process.platform !== 'darwin') return null;
     try {
         const output = require('child_process').execSync(
             'system_profiler SPAudioDataType 2>/dev/null | grep -A 10 "BlackHole 2ch"',
@@ -73,7 +77,23 @@ const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
 const PRESETS_DIR = path.join(CAMILLA_ROOT, 'presets');
 const ZONE_CONFIG_PATH = path.join(__dirname, 'zone-config.json');
 
-// LOCAL DSP Manager (Mac Mini)
+const getLocalIP = () => {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                return iface.address;
+            }
+        }
+    }
+    return 'localhost';
+};
+
+// detect if running on Raspberry Pi
+const isRunningOnPi = os.hostname().includes('raspberrypi') || process.platform === 'linux';
+const currentHost = getLocalIP();
+
+// LOCAL DSP Manager (Mac Mini or Pi itself)
 const dsp = new DSPManager(CAMILLA_ROOT);
 
 // REMOTE DSP Manager (Raspberry Pi)
@@ -84,14 +104,37 @@ const remoteDsp = new RemoteDSPManager({
 
 // Available backends registry
 const DSP_BACKENDS = {
-    local: { name: 'Local', manager: dsp, wsUrl: 'ws://localhost:5005' },
-    raspi: { name: 'Raspberry Pi', manager: remoteDsp, wsUrl: 'ws://raspberrypi.local:1234' }
+    local: {
+        name: isRunningOnPi ? 'Raspberry Pi (Local)' : 'Mac Mini (Local)',
+        manager: dsp,
+        wsUrl: `ws://${currentHost}:5005`
+    },
+    raspi: {
+        name: 'Remote Raspberry',
+        manager: remoteDsp,
+        wsUrl: `ws://raspberrypi.local:1234`
+    }
 };
 
+// LMS Controller (for Spotify/Qobuz via Lyrion on Pi)
+const lmsController = new LMSController({
+    host: isRunningOnPi ? 'localhost' : 'raspberrypi.local',
+    port: 9000
+});
+
+// If we are on the Pi, remoteDsp should probably be disabled or reconfigured, 
+// but for now we keep the logic to detect it.
+
+// If we are on the Pi, remove the raspi backend to avoid self-reference
+if (isRunningOnPi) {
+    delete DSP_BACKENDS.raspi;
+}
+
 // Zone configuration (loaded from file)
-let zoneConfig = { zones: {}, defaults: { dspBackend: 'local' }, backendSettings: {} };
+let zoneConfig = { zones: { Camilla: 'local' }, defaults: { dspBackend: 'local' }, backendSettings: {} };
 
 function loadRaspiCredentials() {
+    if (isRunningOnPi) return; // Don't need remote credentials if we are the Pi
     try {
         const raspiTxtPath = path.join(CAMILLA_ROOT, 'raspi.txt');
         if (fs.existsSync(raspiTxtPath)) {
@@ -109,6 +152,9 @@ function loadRaspiCredentials() {
                     user: creds.user,
                     password: creds.password
                 });
+
+                // Add as sync peer
+                addPeer(creds.host);
             }
         }
     } catch (err) {
@@ -159,6 +205,210 @@ function saveZoneConfig() {
     }
 }
 
+// ----------------------------------------------------------------------
+// Level Probe (Sonda) - For VU meters when DSP is stopped
+// ----------------------------------------------------------------------
+class LevelProbe {
+    constructor() {
+        this.process = null;
+        this.analyzer = null;
+        this.macWs = null;
+        this.macPollInterval = null;
+        this.subscribers = new Set();
+        this.lastLevels = [-100, -100];
+    }
+
+    start() {
+        if (this.process) return;
+
+        console.log('Probe: Starting Level Probe...');
+
+        try {
+            if (isRunningOnPi) {
+                // Linux: arecord -D plughw:Loopback,1 -f S32_LE -c 2 -r 44100 -t raw
+                console.log('Probe: Spawning arecord on plughw:Loopback,1...');
+                this.process = spawn('arecord', [
+                    '-D', 'plughw:Loopback,1',
+                    '-f', 'S32_LE',
+                    '-c', '2',
+                    '-r', '44100',
+                    '-t', 'raw',
+                    '-q'
+                ]);
+
+                this.analyzer = spawn('node', [path.join(__dirname, 'level-analyzer.js'), 'S32_LE']);
+                this.process.stdout.pipe(this.analyzer.stdin);
+
+                const readline = require('readline');
+                const rl = readline.createInterface({ input: this.analyzer.stdout });
+
+                rl.on('line', (line) => {
+                    try {
+                        const levels = JSON.parse(line);
+                        this.lastLevels = levels;
+                        this.broadcast(levels);
+                    } catch (e) { }
+                });
+
+                this.process.on('close', () => this.stop());
+                this.analyzer.on('close', () => this.stop());
+            } else {
+
+                // Mac: Use secondary camilladsp instance as a proxy
+                console.log('Probe: Spawning camilladsp probe on Mac (BlackHole) on port 5006...');
+                const probeConfigPath = path.join(CAMILLA_ROOT, 'probe-config.yml');
+                const probeConfig = {
+                    devices: {
+                        samplerate: 44100,
+                        chunksize: 1024,
+                        capture: {
+                            type: 'CoreAudio',
+                            channels: 2,
+                            device: 'BlackHole 2ch',
+                            format: 'FLOAT32LE'
+                        },
+                        playback: {
+                            type: 'Null',
+                            channels: 2,
+                            format: 'FLOAT32LE'
+                        }
+                    }
+                };
+                fs.writeFileSync(probeConfigPath, yaml.dump(probeConfig));
+
+                this.process = spawn(path.join(CAMILLA_ROOT, 'camilladsp'), [
+                    '-a', '0.0.0.0',
+                    '-p', '5006',
+                    probeConfigPath
+                ]);
+
+                this.process.on('close', () => this.stop());
+
+                // Wait 1s for camilladsp to start before connecting to its WS
+                setTimeout(() => this.startMacPolling(), 1000);
+            }
+        } catch (err) {
+            console.error('Probe: Failed to start:', err.message);
+            this.stop();
+        }
+    }
+
+    startMacPolling() {
+        if (!this.process || this.macWs) return;
+
+        console.log('Probe: Connecting to Mac CamillaDSP probe on WS 5006...');
+        this.macWs = new WebSocket('ws://localhost:5006');
+
+        this.macWs.on('open', () => {
+            console.log('Probe: Connected to Mac probe WebSocket');
+            this.macPollInterval = setInterval(() => {
+                if (this.macWs && this.macWs.readyState === WebSocket.OPEN) {
+                    this.macWs.send('"GetCaptureSignalPeak"');
+                }
+            }, 200);
+        });
+
+        this.macWs.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data);
+                if (msg.GetCaptureSignalPeak) {
+                    const levels = msg.GetCaptureSignalPeak.value;
+                    this.lastLevels = levels;
+                    this.broadcast(levels);
+                }
+            } catch (e) { }
+        });
+
+        this.macWs.on('close', () => {
+            if (this.macPollInterval) {
+                clearInterval(this.macPollInterval);
+                this.macPollInterval = null;
+            }
+            this.macWs = null;
+            // Reconnect if probe process still running
+            if (this.process) {
+                setTimeout(() => this.startMacPolling(), 1000);
+            }
+        });
+
+        this.macWs.on('error', () => {
+            if (this.macWs) this.macWs.close();
+        });
+    }
+
+    stop() {
+        console.log('Probe: Stopping...');
+        if (this.process) {
+            this.process.kill();
+            this.process = null;
+        }
+        if (this.analyzer) {
+            this.analyzer.kill();
+            this.analyzer = null;
+        }
+        if (this.macWs) {
+            this.macWs.close();
+            this.macWs = null;
+        }
+        if (this.macPollInterval) {
+            clearInterval(this.macPollInterval);
+            this.macPollInterval = null;
+        }
+    }
+
+    broadcast(levels) {
+        const message = JSON.stringify(levels);
+        this.subscribers.forEach(ws => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+            }
+        });
+    }
+
+    addSubscriber(ws) {
+        this.subscribers.add(ws);
+        if (this.subscribers.size === 1) {
+            this.start();
+        }
+    }
+
+    removeSubscriber(ws) {
+        this.subscribers.delete(ws);
+        if (this.subscribers.size === 0) {
+            this.stop();
+        }
+    }
+}
+
+const levelProbe = new LevelProbe();
+
+// ----------------------------------------------------------------------
+// Synchronization Logic
+// ----------------------------------------------------------------------
+const PEERS = new Set();
+
+function addPeer(host) {
+    // Normalize host (remove protocol/port if present for simplicity, though we assume hostnames/IPs)
+    PEERS.add(host);
+    console.log(`Sync: Added peer ${host}`);
+}
+
+async function broadcastZoneChange(zoneId, zoneName) {
+    const payload = { zoneId, zoneName, timestamp: Date.now() };
+    console.log(`Sync: Broadcasting zone change to ${PEERS.size} peers:`, payload);
+
+    for (const host of PEERS) {
+        try {
+            // Assume peer runs on same PORT 3000
+            const url = `http://${host}:${PORT}/api/sync/zone`;
+            await axios.post(url, payload, { timeout: 2000 });
+            console.log(`Sync: Sent update to ${host}`);
+        } catch (err) {
+            console.error(`Sync: Failed to send to ${host}:`, err.message);
+        }
+    }
+}
+
 // Load credentials and config on startup
 loadRaspiCredentials();
 loadZoneConfig();
@@ -172,7 +422,7 @@ function getDspForZone(zoneName) {
     // 1. Try by provided zone name
     let backendId = zoneConfig.zones[zoneName];
 
-    // 2. If not found, try using keywords in the zone name (robustness)
+    // No fallback implicit to 'local' if it's not in config and doesn't match keywords
     if (!backendId && zoneName) {
         const lowerName = zoneName.toLowerCase();
         if (lowerName.includes('raspberry') || lowerName.includes('pi')) {
@@ -181,8 +431,6 @@ function getDspForZone(zoneName) {
             backendId = 'local';
         }
     }
-
-    backendId = backendId || zoneConfig.defaults.dspBackend || 'local';
 
     const backend = DSP_BACKENDS[backendId];
     if (backend) {
@@ -198,7 +446,16 @@ function getDspForZone(zoneName) {
  * Get backend ID for a zone
  */
 function getBackendIdForZone(zoneName) {
-    return zoneConfig.zones[zoneName] || zoneConfig.defaults.dspBackend || 'local';
+    const id = zoneConfig.zones[zoneName];
+    if (id) return id;
+
+    if (zoneName) {
+        const lower = zoneName.toLowerCase();
+        if (lower.includes('raspberry') || lower.includes('pi')) return 'raspi';
+        if (lower.includes('camilla') || lower.includes('local')) return 'local';
+    }
+
+    return null; // Explicitly null if not a DSP zone
 }
 
 /**
@@ -240,17 +497,15 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
     }
     const zoneName = checkZone ? checkZone.display_name : null;
 
-    // Get the appropriate DSP manager for this zone
-    const activeDsp = getDspForZone(zoneName);
-
     // Skip zones that don't have managed DSP. 
-    // If the backendId for this zone is 'local' or 'raspi', we process it.
     const backendId = getBackendIdForZone(zoneName);
     if (!backendId) {
         console.log(`Server: [${source}] Zone "${zoneName}" doesn't use managed DSP. Ignoring.`);
         isProcessingSampleRateChange = false;
         return;
     }
+
+    const activeDsp = getDspForZone(zoneName);
 
     // Ensure DSP is running before checking rate (if not running, currentDSPRate might be stale)
     const isActuallyRunning = activeDsp.isRunning();
@@ -276,9 +531,13 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
     try {
         // ============ PHASE 1: MUTE ============
         console.log(`Server: [Transition] Phase 1: Muting output...`);
-        await roonController.control('mute');
-        await new Promise(r => setTimeout(r, 200));
-        console.log(`Server: [Transition] Output muted (Roon still streaming)`);
+        try {
+            await roonController.control('mute');
+            await new Promise(r => setTimeout(r, 200));
+            console.log(`Server: [Transition] Output muted (Roon still streaming)`);
+        } catch (muteErr) {
+            console.warn('Server: [Transition] Mute failed, continuing without mute:', muteErr.message || muteErr);
+        }
 
         // ============ PHASE 2: RESTART DSP ============
         console.log(`Server: [Transition] Phase 2: Restarting DSP at ${newRate}Hz (${zoneName === 'Raspberry' ? 'Remote' : 'Local'})...`);
@@ -357,7 +616,11 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
 
         // ============ PHASE 5: UNMUTE ============
         console.log(`Server: [Transition] Phase 5: Unmuting - Enjoy!`);
-        await roonController.control('unmute');
+        try {
+            await roonController.control('unmute');
+        } catch (unmuteErr) {
+            console.warn('Server: [Transition] Unmute failed:', unmuteErr.message || unmuteErr);
+        }
 
     } catch (e) {
         console.error('Server: [Transition] Error during transition:', e);
@@ -503,6 +766,15 @@ setInterval(async () => {
         handleSampleRateChange(rate, 'CrashRecovery', zoneName);
     }
 
+    // Stop inactive managers (to avoid multiple instances/conflicts)
+    for (const id in DSP_BACKENDS) {
+        const mgr = DSP_BACKENDS[id].manager;
+        if (mgr !== activeDsp && mgr.shouldBeRunning) {
+            console.log(`Server: [Poll] Stopping inactive DSP backend: ${DSP_BACKENDS[id].name}`);
+            mgr.stop().catch(e => { });
+        }
+    }
+
     // HISTORY CHECK
     const now = Date.now();
     const roonState = roonController.getNowPlaying();
@@ -560,12 +832,21 @@ setInterval(async () => {
         historyState.startTime = now;
         historyState.accumulatedTime = 0;
         historyState.isPlaying = isPlaying;
-        historyState.metadata = { genre: null, artworkUrl: null };
 
-        // Fetch Metadata (Genre)
+        // Initial metadata might already have Roon artwork
+        historyState.metadata = {
+            genre: null,
+            artworkUrl: (source === 'roon' && roonState) ? roonState.artworkUrl : null
+        };
+
+        // Fetch Metadata (Genre / Fallback Artwork)
         getMetadataFromiTunes(currentTrack, currentArtist, currentAlbum).then(meta => {
             if (historyState.currentTrack === currentTrack) { // Ensure still same track
-                historyState.metadata = meta;
+                // Keep Roon artwork if we have it, otherwise use iTunes
+                historyState.metadata.genre = meta.genre;
+                if (!historyState.metadata.artworkUrl && meta.artworkUrl) {
+                    historyState.metadata.artworkUrl = meta.artworkUrl;
+                }
                 if (meta.genre) console.log(`History: Found genre for "${currentTrack}": ${meta.genre}`);
             }
         });
@@ -732,7 +1013,18 @@ app.post('/api/bypass', async (req, res) => {
 });
 
 // 6. Status (includes current sample rate for dynamic UI updates)
+// Cache status for 300ms to prevent repeated expensive calls
+let cachedStatus = { data: null, timestamp: 0 };
+const STATUS_CACHE_MS = 300;  // Cache for 300ms
+
 app.get('/api/status', (req, res) => {
+    const now = Date.now();
+
+    // Return cached status if recent enough
+    if (cachedStatus.data && now - cachedStatus.timestamp < STATUS_CACHE_MS) {
+        return res.json(cachedStatus.data);
+    }
+
     // Determine which DSP to query based on active zone
     const zoneName = getActiveZoneName();
     const backendId = getBackendIdForZone(zoneName);
@@ -760,7 +1052,7 @@ app.get('/api/status', (req, res) => {
         // This would come from signal_path if available
     }
 
-    res.json({
+    const status = {
         running: activeDsp.isRunning(),
         bypass: activeDsp.currentState.bypass || false,
         sampleRate: currentSampleRate,
@@ -773,8 +1065,81 @@ app.get('/api/status', (req, res) => {
         roonSampleRate: lastDetectedSampleRate,
         // Zone and backend info for frontend sync
         backend: backendId,
+        isDspManaged: !!backendId,
         zone: zoneName || null,
         isAutoSelected: !!zoneName // Signal to frontend that this was a zone-based selection
+    };
+
+    // Cache the result
+    cachedStatus = { data: status, timestamp: now };
+
+    res.json(status);
+});
+
+// 6a. Health Status (comprehensive watchdog report)
+app.get('/api/health', (req, res) => {
+    const zoneName = getActiveZoneName();
+    const activeDsp = getDspForZone(zoneName);
+
+    // Check if dsp-manager has the getHealthReport method
+    if (typeof activeDsp.getHealthReport === 'function') {
+        res.json(activeDsp.getHealthReport());
+    } else {
+        // Fallback for remote DSP or older versions
+        res.json({
+            dsp: {
+                running: activeDsp.isRunning(),
+                uptime: 0,
+                restartCount: 0,
+                bypass: activeDsp.currentState?.bypass || false
+            },
+            devices: {
+                capture: { name: 'unknown', status: 'unknown' },
+                playback: { name: activeDsp.currentState?.device || 'unknown', status: 'unknown' }
+            },
+            signal: {
+                present: false,
+                levels: { left: -1000, right: -1000 },
+                silenceDuration: 0
+            },
+            lastError: null,
+            lastCheck: null
+        });
+    }
+});
+
+// 6b. Sync Endpoint (Receive updates from peers)
+app.post('/api/sync/zone', (req, res) => {
+    const { zoneId, zoneName } = req.body;
+    console.log(`Sync: Received zone update: "${zoneName}" (${zoneId})`);
+
+    if (zoneId && zoneId !== roonController.activeZoneId) {
+        roonController.activeZoneId = zoneId;
+        zoneConfig.lastActiveZoneId = zoneId;
+        zoneConfig.lastActiveZoneName = zoneName;
+        saveZoneConfig();
+
+        // If the new zone is remote/local specific, we might need to connect/ensure running
+        const activeDsp = getDspForZone(zoneName);
+        activeDsp.ensureRunning().catch(e => console.error('Sync: Failed to ensure DSP running:', e));
+    }
+
+    res.json({ success: true });
+});
+
+// 6c. Reboot Endpoint
+app.post('/api/system/reboot', (req, res) => {
+    console.log('System: Reboot requested via API');
+
+    // Check if running on Pi (linux + specific user or hostname?)
+    // Or just try sudo reboot
+
+    exec('sudo reboot', (error, stdout, stderr) => {
+        if (error) {
+            console.error('Reboot failed:', stderr || error.message);
+            return res.status(500).json({ error: 'Reboot failed' });
+        }
+        res.json({ success: true, message: 'Rebooting...' });
     });
 });
 
@@ -792,52 +1157,312 @@ const runMediaCommand = (action, args = []) => {
                 reject(error);
             } else {
                 console.log('Media key:', stdout.trim());
+                // Broadcast for reactive UI if it's a control command (not info/queue)
+                if (['play', 'pause', 'next', 'prev', 'stop', 'play_queue_item'].includes(action)) {
+                    broadcast('metadata_update', { source: 'apple', action });
+                }
                 resolve(stdout.trim());
             }
         });
     });
 };
 
-const getMetadataFromiTunes = (track, artist, album) => {
-    return new Promise((resolve) => {
-        if (!artist && !track && !album) return resolve({ artworkUrl: null, genre: null });
+async function getArtworkFromiTunes(track, artist, album) {
+    if (!artist && !track && !album) return { artworkUrl: null, genre: null };
 
-        const searches = [];
-        if (album && artist) searches.push({ term: `${album} ${artist}`, entity: 'album' });
-        if (track && artist) searches.push({ term: `${track} ${artist}`, entity: 'song' });
-        if (artist) searches.push({ term: artist, entity: 'album' });
+    const query = encodeURIComponent(`${track || ''} ${artist || ''} ${album || ''}`.trim());
+    const url = `https://itunes.apple.com/search?term=${query}&entity=song&limit=1&country=ES`;
+    console.log(`iTunes: Searching for artwork: ${url}`);
 
-        const trySearch = (index) => {
-            if (index >= searches.length) return resolve({ artworkUrl: null, genre: null });
+    try {
+        const response = await axios.get(url, { timeout: 4000 });
+        if (response.data.results && response.data.results[0]) {
+            const result = response.data.results[0];
+            let artworkUrl = result.artworkUrl100 || null;
+            if (artworkUrl) {
+                artworkUrl = artworkUrl.replace('100x100bb.jpg', '600x600bb.jpg');
+            }
+            const genre = result.primaryGenreName;
+            console.log(`iTunes: SUCCESS for "${track}". Artwork: ${artworkUrl}`);
+            return { artworkUrl, genre };
+        }
+        console.log(`iTunes: No results for "${track}" by "${artist}"`);
+    } catch (e) {
+        console.error(`iTunes Search ERROR for "${track}":`, e.message);
+    }
+    return { artworkUrl: null, genre: null };
+}
 
-            const item = searches[index];
-            const query = encodeURIComponent(item.term);
-            const url = `https://itunes.apple.com/search?term=${query}&entity=${item.entity}&limit=1&country=ES`;
+async function getMetadataFromiTunes(track, artist, album) {
+    return getArtworkFromiTunes(track, artist, album);
+}
 
-            https.get(url, (res) => {
-                let data = '';
-                res.on('data', (chunk) => data += chunk);
-                res.on('end', () => {
-                    try {
-                        const json = JSON.parse(data);
-                        if (json.results && json.results.length > 0) {
-                            const result = json.results[0];
-                            const artworkUrl = result.artworkUrl100 || null;
-                            const genre = result.primaryGenreName;
-                            resolve({ artworkUrl, genre });
-                        } else {
-                            trySearch(index + 1);
-                        }
-                    } catch (e) {
-                        trySearch(index + 1);
+async function getArtistInfo(artist, album) {
+    if (!artist) return { bio: null, albumInfo: null };
+
+    const cleanArtist = artist
+        .split(/[,&/]/)[0]
+        .replace(/\s*\(feat\..*?\)/gi, '')
+        .replace(/\s*\(ft\..*?\)/gi, '')
+        .replace(/\s*feat\..*?$/gi, '')
+        .trim();
+
+    const cleanAlbum = album ? album
+        .replace(/\s*\(.*?\)/g, '')
+        .replace(/\s*\[.*?\]/g, '')
+        .trim() : null;
+
+    const headers = {
+        'User-Agent': 'ArtisNovaDSP/1.2.6 (https://github.com/ecemcod/artisnovaDSP)',
+        'Accept': 'application/json'
+    };
+
+    console.log(`MusicBrainz: Searching for Artist: "${cleanArtist}" and Album: "${cleanAlbum}"`);
+
+    try {
+        // 1. Search Artist in MusicBrainz
+        const artistSearchUrl = `https://musicbrainz.org/ws/2/artist/?query=artist:${encodeURIComponent(cleanArtist)}&fmt=json`;
+        const artistRes = await axios.get(artistSearchUrl, { headers, timeout: 5000 });
+
+        const mbArtist = artistRes.data.artists?.[0];
+        if (!mbArtist) {
+            console.log(`MusicBrainz: No artist found for "${cleanArtist}"`);
+            return { bio: "No se encontró información en MusicBrainz.", source: 'MusicBrainz' };
+        }
+
+        const mbid = mbArtist.id;
+        const country = mbArtist.country || mbArtist.area?.name || 'Unknown';
+        const type = mbArtist.type || 'Individual';
+        const lifeSpan = mbArtist['life-span'] || {};
+        const activeYears = lifeSpan.begin ? `${lifeSpan.begin}${lifeSpan.end ? ' - ' + lifeSpan.end : ' - Present'}` : 'Unknown';
+        const tags = mbArtist.tags ? mbArtist.tags.slice(0, 5).map(t => t.name).join(', ') : 'Music';
+
+        // 2. Search Release (Album) in MusicBrainz - SURGICAL SEARCH WITH ALIASES
+        let mbRelease = null;
+        if (cleanAlbum) {
+            // Try multiple title variations for better matching
+            const titleVariations = [cleanAlbum];
+
+            // Known album title variations (some albums have symbol names)
+            if (cleanAlbum.toLowerCase() === 'blackstar') {
+                titleVariations.push('★'); // David Bowie's album
+            }
+
+            let allCandidates = [];
+
+            for (const variation of titleVariations) {
+                const albumQuery = `release:"${variation}" AND arid:${mbid}`;
+                const releaseSearchUrl = `https://musicbrainz.org/ws/2/release/?query=${encodeURIComponent(albumQuery)}&fmt=json`;
+                try {
+                    const releaseRes = await axios.get(releaseSearchUrl, { headers, timeout: 5000 });
+                    allCandidates = allCandidates.concat(releaseRes.data.releases || []);
+                } catch (e) {
+                    console.warn(`MusicBrainz search failed for variation "${variation}":`, e.message);
+                }
+            }
+
+            // Deduplicate by release ID
+            const uniqueCandidates = allCandidates.filter((r, i, arr) =>
+                arr.findIndex(x => x.id === r.id) === i
+            );
+
+            // Priority logic: 
+            // 1. Prefer releases with release-group type "Album" over "Single", "EP", etc.
+            // 2. Among same type, prefer higher track count (more complete release)
+            // 3. Exact title match gets bonus priority
+            const scored = uniqueCandidates.map(r => {
+                let score = 0;
+                const rgType = r['release-group']?.['primary-type'] || '';
+
+                if (rgType === 'Album') score += 100;
+                else if (rgType === 'EP') score += 50;
+                else if (rgType === 'Single') score += 10;
+
+                // Track count scoring: prefer standard album length (7-15 tracks)
+                // Penalize releases with unusually high track counts (deluxe/compilations may have duplicates)
+                const trackCountNum = r['track-count'] || 0;
+                if (trackCountNum >= 7 && trackCountNum <= 15) {
+                    score += 30; // Sweet spot for standard albums
+                } else if (trackCountNum > 0) {
+                    score += Math.min(trackCountNum, 20); // Less bonus for unusual track counts
+                }
+
+                // Exact title match bonus (check against all variations)
+                const titleLower = (r.title || '').toLowerCase();
+                if (titleVariations.some(v => v.toLowerCase() === titleLower)) {
+                    score += 200;
+                }
+
+                return { release: r, score };
+            });
+
+            // Sort by score descending
+            scored.sort((a, b) => b.score - a.score);
+
+            mbRelease = scored[0]?.release || null;
+            console.log(`MusicBrainz: Selected release "${mbRelease?.title}" (type: ${mbRelease?.['release-group']?.['primary-type']}, tracks: ${mbRelease?.['track-count']})`);
+        }
+
+        // 3. Get Wikipedia Bio via MB Relations
+        const artistDetailsUrl = `https://musicbrainz.org/ws/2/artist/${mbid}?inc=url-rels&fmt=json`;
+        const detailsRes = await axios.get(artistDetailsUrl, { headers, timeout: 5000 });
+
+        let wikiTitle = null;
+        let richBio = null;
+        let wikiUrl = null;
+
+        // Try direct Wikipedia relation first
+        const wikiRel = detailsRes.data.relations?.find(r => r.type === 'wikipedia');
+        if (wikiRel && wikiRel.url?.resource) {
+            wikiTitle = wikiRel.url.resource.split('/').pop();
+        } else {
+            // Fallback: Try Wikidata bridge
+            const wdRel = detailsRes.data.relations?.find(r => r.type === 'wikidata');
+            if (wdRel && wdRel.url?.resource) {
+                const wdId = wdRel.url.resource.split('/').pop();
+                try {
+                    const wdUrl = `https://www.wikidata.org/wiki/Special:EntityData/${wdId}.json`;
+                    const wdRes = await axios.get(wdUrl, { headers, timeout: 3000 });
+                    const enWiki = wdRes.data.entities[wdId].sitelinks?.enwiki;
+                    if (enWiki) {
+                        wikiTitle = enWiki.title.replace(/ /g, '_');
                     }
-                });
-            }).on('error', () => trySearch(index + 1));
+                } catch (e) {
+                    console.warn(`Wikidata bridge failed for ${wdId}`);
+                }
+            }
+        }
+
+        if (wikiTitle) {
+            try {
+                const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles=${wikiTitle}&format=json&origin=*`;
+                const extractRes = await axios.get(extractUrl, { headers, timeout: 3000 });
+                const pages = extractRes.data.query.pages;
+                const pageId = Object.keys(pages)[0];
+                richBio = pages[pageId].extract;
+                wikiUrl = `https://en.wikipedia.org/wiki/${wikiTitle}`;
+            } catch (e) {
+                console.warn('Wikipedia extractor failed for', wikiTitle);
+            }
+        }
+
+        const bio = richBio || `${mbArtist.name} is a ${type.toLowerCase()} from ${country}, active during ${activeYears}. Genre tags: ${tags}.`;
+
+        // 4. ENRICHED ALBUM DATA: Fetch tracklist and credits
+        let albumData = null;
+        if (mbRelease) {
+            const releaseId = mbRelease.id;
+            const releaseDate = mbRelease.date || 'Unknown';
+            const label = mbRelease['label-info']?.[0]?.label?.name || 'Independent';
+            const trackCount = mbRelease['track-count'] || 0;
+            const releaseType = mbRelease['release-group']?.['primary-type'] || 'Album';
+
+            // Fetch detailed release info with recordings and artist relations
+            let tracklist = [];
+            let credits = [];
+
+            try {
+                const detailUrl = `https://musicbrainz.org/ws/2/release/${releaseId}?inc=recordings+artist-rels+label-rels&fmt=json`;
+                const detailRes = await axios.get(detailUrl, { headers, timeout: 6000 });
+
+                // Extract tracklist from media and collect recording IDs
+                const recordingIds = [];
+                if (detailRes.data.media) {
+                    detailRes.data.media.forEach((medium, discIndex) => {
+                        if (medium.tracks) {
+                            medium.tracks.forEach(track => {
+                                const durationMs = track.length || track.recording?.length || 0;
+                                const mins = Math.floor(durationMs / 60000);
+                                const secs = Math.floor((durationMs % 60000) / 1000);
+                                tracklist.push({
+                                    disc: discIndex + 1,
+                                    number: track.position,
+                                    title: track.title || track.recording?.title || 'Unknown',
+                                    duration: durationMs > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : '',
+                                    recordingId: track.recording?.id
+                                });
+                                if (track.recording?.id) {
+                                    recordingIds.push(track.recording.id);
+                                }
+                            });
+                        }
+                    });
+                }
+
+                // Extract credits from release-level relations first
+                if (detailRes.data.relations) {
+                    detailRes.data.relations.forEach(rel => {
+                        if (rel.artist) {
+                            // Use specific instrument attributes if available, otherwise fall back to type
+                            let role = rel.type?.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'Contributor';
+                            if (rel.attributes && rel.attributes.length > 0) {
+                                role = rel.attributes.join(', ').replace(/\b\w/g, c => c.toUpperCase());
+                            }
+                            credits.push({ name: rel.artist.name, role });
+                        }
+                    });
+                }
+
+                // If no release-level credits, fetch from FIRST recording only (for speed)
+                if (credits.length === 0 && recordingIds.length > 0) {
+                    try {
+                        const recUrl = `https://musicbrainz.org/ws/2/recording/${recordingIds[0]}?inc=artist-rels&fmt=json`;
+                        const recRes = await axios.get(recUrl, { headers, timeout: 5000 });
+                        if (recRes.data.relations) {
+                            recRes.data.relations.forEach(rel => {
+                                if (rel.artist) {
+                                    // Use specific instrument attributes if available
+                                    let role = rel.type?.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'Contributor';
+                                    if (rel.attributes && rel.attributes.length > 0) {
+                                        role = rel.attributes.join(', ').replace(/\b\w/g, c => c.toUpperCase());
+                                    }
+
+                                    // Deduplicate by NAME only (same person may have multiple roles, show once)
+                                    if (!credits.some(c => c.name === rel.artist.name)) {
+                                        credits.push({ name: rel.artist.name, role });
+                                    }
+                                }
+                            });
+                        }
+                        console.log(`MusicBrainz: Extracted ${credits.length} credits from recording for ${mbRelease.title}`);
+                    } catch (e) {
+                        console.warn(`Failed to fetch credits for recording:`, e.message);
+                    }
+                }
+            } catch (e) {
+                console.warn('MusicBrainz release details fetch failed:', e.message);
+            }
+
+            albumData = {
+                title: mbRelease.title,
+                date: releaseDate,
+                label: label,
+                type: releaseType,
+                trackCount: trackCount,
+                tracklist: tracklist.slice(0, 100), // Limit to 100 tracks for performance
+                credits: credits,
+                albumUrl: `https://musicbrainz.org/release/${releaseId}`
+            };
+        }
+
+        return {
+            artist: {
+                name: mbArtist.name,
+                bio: bio,
+                artistUrl: wikiUrl || `https://musicbrainz.org/artist/${mbid}`,
+                country: country,
+                activeYears: activeYears,
+                tags: tags
+            },
+            album: albumData,
+            source: richBio ? 'MusicBrainz + Wikipedia' : 'MusicBrainz'
         };
 
-        trySearch(0);
-    });
-};
+    } catch (e) {
+        console.error('MusicBrainz API Error:', e.message);
+        return { artist: { bio: "Error al conectar con MusicBrainz." }, album: null, source: 'MusicBrainz' };
+    }
+}
 
 const getLyricsFromLrcLib = async (track, artist) => {
     if (!artist || !track) return null;
@@ -858,25 +1483,19 @@ const getLyricsFromLrcLib = async (track, artist) => {
         .trim();
 
     const fetchLyrics = async (url, params = {}) => {
-        const MAX_RETRIES = 2;
+        const MAX_RETRIES = 1;  // Reduced from 2 for faster response
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 const response = await axios.get(url, {
                     params,
-                    timeout: 10000,
+                    timeout: 1500,  // Drastically reduced for fast failure
                     headers: { 'User-Agent': 'ArtisNovaDSP/1.2.6 (https://github.com/ecemcod/artisnovaDSP)' }
                 });
                 return response.data;
             } catch (e) {
-                const isRetryable = e.code === 'ECONNABORTED' || e.code === 'ECONNRESET' || !e.response;
-                if (isRetryable && attempt < MAX_RETRIES) {
-                    console.log(`Lyrics API Attempt ${attempt} failed, retrying... (${e.message})`);
-                    await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-                    continue;
-                }
                 if (e.response && e.response.status === 404) return { status: 404 };
-                console.error(`Lyrics API Error [${url}] after ${attempt} attempts:`, e.message);
-                return null;
+                console.error(`Lyrics API Error [${url}]:`, e.message);
+                return null;  // Fail fast, no retries
             }
         }
     };
@@ -918,63 +1537,8 @@ const getLyricsFromLrcLib = async (track, artist) => {
     }
     console.log(`Lyrics: Strategy B Failed`);
 
-    // Strategy C: Original Raw Search (No Cleaning)
-    console.log(`Lyrics: Strategy C (Raw Search) for "${artist} ${track}"`);
-    let rawData = await fetchLyrics('https://lrclib.net/api/search', {
-        q: `${artist} ${track}`
-    });
-    if (Array.isArray(rawData) && rawData.length > 0) {
-        const match = rawData[0];
-        if (isValid(match)) {
-            console.log(`Lyrics: Strategy C Success`);
-            return { plain: match.plainLyrics, synced: match.syncedLyrics, instrumental: match.instrumental };
-        }
-    }
-    console.log(`Lyrics: Strategy C Failed`);
-
-    // Strategy D: Fuzzy Word Search
-    const trackWords = cleanTrack.split(/\s+/);
-    if (trackWords.length > 1) {
-        const fuzzyTrack = trackWords[0]; // Just the first word if it's failing
-        console.log(`Lyrics: Strategy D (Fuzzy Word Search) for "${cleanArtist} ${fuzzyTrack}"`);
-        let fuzzyData = await fetchLyrics('https://lrclib.net/api/search', {
-            q: `${cleanArtist} ${fuzzyTrack}`
-        });
-        if (Array.isArray(fuzzyData) && fuzzyData.length > 0) {
-            // Find a match that actually contains our original name
-            const match = fuzzyData.find(item =>
-                item.trackName.toLowerCase().includes(trackWords[0].toLowerCase())
-            );
-            if (isValid(match)) {
-                console.log(`Lyrics: Strategy D Success`);
-                return { plain: match.plainLyrics, synced: match.syncedLyrics, instrumental: match.instrumental };
-            }
-        }
-    }
-
-    console.log(`Lyrics: Strategy D Failed`);
-
-    // Strategy E: Aggressive Clean (Remove ALL content in parentheses/brackets)
-    // Use this only as last resort to handle "Song Name (20th Anniversary Deluxe)" where keywords might be missed
-    const aggressivelyCleanTrack = cleanTrack.replace(/\s*\(.*?\)/g, '').replace(/\s*\[.*?\]/g, '').trim();
-    if (aggressivelyCleanTrack !== cleanTrack && aggressivelyCleanTrack.length > 2) {
-        console.log(`Lyrics: Strategy E (Aggressive Strip) for "${cleanArtist} ${aggressivelyCleanTrack}"`);
-        let aggressiveData = await fetchLyrics('https://lrclib.net/api/search', {
-            q: `${cleanArtist} ${aggressivelyCleanTrack}`
-        });
-
-        if (Array.isArray(aggressiveData) && aggressiveData.length > 0) {
-            const match = aggressiveData.find(item =>
-                item.trackName.toLowerCase().includes(aggressivelyCleanTrack.toLowerCase())
-            );
-            if (isValid(match)) {
-                console.log(`Lyrics: Strategy E Success`);
-                return { plain: match.plainLyrics, synced: match.syncedLyrics, instrumental: match.instrumental };
-            }
-        }
-    }
-
-    console.log(`Lyrics: All strategies failed for "${artist}" - "${track}"`);
+    // Strategies C, D, E disabled for performance - max 3s for lyrics
+    console.log(`Lyrics: Giving up after A+B for "${artist}" - "${track}"`);
     return null;
 };
 
@@ -982,19 +1546,23 @@ app.post('/api/media/playpause', async (req, res) => {
     const source = req.query.source || req.body.source;
     console.log(`Server: Received playpause request. Source=${source}`);
     try {
-        // Ensure DSP is running before any playback action
         const zoneName = getActiveZoneName();
         const activeDsp = getDspForZone(zoneName);
-        console.log(`Server: Ensuring ${zoneName || 'Local'} DSP is running...`);
-        await activeDsp.ensureRunning();
 
         if (source === 'roon' && roonController.activeZoneId) {
             console.log(`Server: Sending 'playpause' to Roon Zone ${roonController.activeZoneId}`);
             await roonController.control('playpause');
+        } else if (source === 'lms') {
+            console.log('Server: Sending playpause to LMS');
+            await lmsController.control('playpause');
         } else {
             console.log('Server: Sending media key play command');
             await runMediaCommand('play');
         }
+
+        // Ensure DSP is running in the background for responsiveness
+        activeDsp.ensureRunning().catch(e => console.error('Background ensureRunning failed:', e));
+
         res.json({ success: true, action: 'playpause' });
     } catch (e) {
         console.error('Play/pause CRITICAL ERROR:', e);
@@ -1005,11 +1573,18 @@ app.post('/api/media/playpause', async (req, res) => {
 app.post('/api/media/next', async (req, res) => {
     const source = req.query.source || req.body.source;
     try {
+        const zoneName = getActiveZoneName();
+        const activeDsp = getDspForZone(zoneName);
+
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('next');
+        } else if (source === 'lms') {
+            await lmsController.control('next');
         } else {
             await runMediaCommand('next');
         }
+
+        activeDsp.ensureRunning().catch(e => console.error('Background ensureRunning failed:', e));
         res.json({ success: true, action: 'next' });
     } catch (e) {
         console.error('Next track error:', e);
@@ -1022,6 +1597,8 @@ app.post('/api/media/stop', async (req, res) => {
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('playpause');
+        } else if (source === 'lms') {
+            await lmsController.control('stop');
         } else {
             await runMediaCommand('stop');
         }
@@ -1035,11 +1612,18 @@ app.post('/api/media/stop', async (req, res) => {
 app.post('/api/media/prev', async (req, res) => {
     const source = req.query.source || req.body.source;
     try {
+        const zoneName = getActiveZoneName();
+        const activeDsp = getDspForZone(zoneName);
+
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('prev');
+        } else if (source === 'lms') {
+            await lmsController.control('previous');
         } else {
             await runMediaCommand('prev');
         }
+
+        activeDsp.ensureRunning().catch(e => console.error('Background ensureRunning failed:', e));
         res.json({ success: true, action: 'prev' });
     } catch (e) {
         console.error('Prev track error:', e);
@@ -1052,6 +1636,8 @@ app.post('/api/media/seek', async (req, res) => {
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('seek', position);
+        } else if (source === 'lms') {
+            await lmsController.seek(position);
         } else {
             await runMediaCommand(`seek ${position}`);
         }
@@ -1168,6 +1754,7 @@ app.get('/api/media/info', async (req, res) => {
             } else {
                 // Fallback if no detailed signal path available
                 const zoneName = info.device;
+                const backendId = getBackendIdForZone(zoneName);
                 const activeDsp = getDspForZone(zoneName);
 
                 // Use detected sample rate if available
@@ -1180,7 +1767,7 @@ app.get('/api/media/info', async (req, res) => {
                     {
                         type: 'source',
                         description: isHiRes ? 'High Resolution Audio' : 'Standard Resolution',
-                        details: `${rateStr} • PCM • (Fallback)`,
+                        details: `${rateStr} • PCM • ${backendId ? '(Processing)' : '(Direct)'}`,
                         status: pathQuality
                     }
                 ];
@@ -1203,7 +1790,7 @@ app.get('/api/media/info', async (req, res) => {
                     },
                     {
                         type: 'output',
-                        description: isRemote ? 'Raspberry Pi DAC' : 'D50 III',
+                        description: isRemote ? 'Raspberry Pi DAC' : (activeDsp.currentState.device || 'D50 III'),
                         details: `${activeDsp.currentState.sampleRate / 1000}kHz Output`,
                         status: 'enhanced'
                     }
@@ -1216,11 +1803,63 @@ app.get('/api/media/info', async (req, res) => {
             };
 
             return res.json(info);
+        } else if (source === 'lms') {
+            const data = await lmsController.getStatus();
+            const info = { ...data };
+            info.device = 'Raspberry Pi (Streaming)';
+
+            // Add Signal Path for LMS
+            info.signalPath = {
+                quality: 'lossless',
+                nodes: [
+                    {
+                        type: 'source',
+                        description: 'Lyrion Music Server',
+                        details: `${info.format || 'PCM'} • ${info.bitrate || ''}`,
+                        status: 'lossless'
+                    },
+                    {
+                        type: 'dsp',
+                        description: 'CamillaDSP (Remote)',
+                        details: '64-bit Processing',
+                        status: 'enhanced'
+                    },
+                    {
+                        type: 'output',
+                        description: 'Raspberry Pi DAC',
+                        details: 'Hardware Output',
+                        status: 'enhanced'
+                    }
+                ]
+            };
+            if (info.artworkUrl) {
+                const trackId = info.artworkUrl.split('/music/')[1]?.split('/')[0];
+                if (trackId) info.artworkUrl = `/api/media/lms/artwork/${trackId}?id=${trackId}`;
+            }
+            return res.json(info);
         }
 
+        // Default: Apple Music / System
+        if (isRunningOnPi) {
+            // On Pi, we don't have Apple Music local control
+            return res.json({
+                state: 'stopped',
+                track: '',
+                artist: '',
+                album: '',
+                artworkUrl: null,
+                position: 0,
+                duration: 0,
+                device: 'Apple Music (Remote)',
+                signalPath: { quality: 'lossless', nodes: [] }
+            });
+        }
+
+
+        const zoneName = source === 'apple' ? 'Camilla' : getActiveZoneName();
+        const activeDsp = getDspForZone(zoneName);
         const output = await runMediaCommand('info');
         const info = JSON.parse(output);
-
         info.device = 'Local / Mac';
         if (info.track === historyState.currentTrack) {
             info.style = historyState.metadata.genre;
@@ -1228,64 +1867,116 @@ app.get('/api/media/info', async (req, res) => {
 
         // Try iTunes if local artwork failed or is missing
         if (!info.artwork && (info.track || info.album) && info.artist) {
-            info.artworkUrl = await getArtworkFromiTunes(info.track, info.artist, info.album);
+            const meta = await getArtworkFromiTunes(info.track, info.artist, info.album);
+            info.artworkUrl = meta.artworkUrl;
         } else if (info.artwork) {
-            info.artworkUrl = '/api/media/artwork?' + Date.now();
+            // Use a stable hash based on track/artist to provide a stable URL and avoid flickering
+            const crypto = require('crypto');
+            const trackHash = crypto.createHash('md5').update(`${info.track}-${info.artist}`).digest('hex').substring(0, 8);
+            info.artworkUrl = `/api/media/artwork?h=${trackHash}`;
         }
 
         // Add Signal Path for local source (Apple Music / System)
-        if (info && !info.signalPath) {
-            info.signalPath = {
-                quality: 'lossless',
-                nodes: [
-                    {
-                        type: 'source',
-                        description: 'Apple Music / System',
-                        details: 'CoreAudio Local Stream (Lossless)',
-                        status: 'lossless'
-                    },
-                    {
-                        type: 'output',
-                        description: 'BlackHole Bridge',
-                        details: 'System Output Loopback',
-                        status: 'lossless'
-                    }
-                ]
-            };
+        // CRITICAL: We use a fixed zoneName 'Camilla' and avoid any dependency on Roon active zone
+        // to prevent "flapping" UI when Roon is playing in the background.
+        const staticZone = 'Camilla';
+        const staticDsp = getDspForZone(staticZone);
 
-            // For non-Roon sources (Apple Music / Airplay), we check the active zone (usually 'Camilla' local)
-            const zoneName = getActiveZoneName();
-            const activeDsp = getDspForZone(zoneName);
-            const isRemote = getBackendIdForZone(zoneName) === 'raspi';
+        info.signalPath = {
+            quality: 'lossless',
+            nodes: [
+                {
+                    type: 'source',
+                    description: 'Apple Music / System',
+                    details: 'CoreAudio Local Stream (Lossless)',
+                    status: 'lossless'
+                },
+                {
+                    type: 'dsp',
+                    description: 'CamillaDSP (Local)',
+                    details: staticDsp.currentState?.presetName ? `64-bit • ${staticDsp.currentState.presetName}` : '64-bit Processing',
+                    status: 'enhanced'
+                },
+                {
+                    type: 'output',
+                    description: staticDsp.currentState?.device || 'D50 III',
+                    details: staticDsp.currentState?.sampleRate ? `${staticDsp.currentState.sampleRate / 1000}kHz Output` : 'High Res Output',
+                    status: 'enhanced'
+                }
+            ]
+        };
 
-            if (activeDsp.isRunning()) {
-                info.signalPath.nodes.push(
-                    {
-                        type: 'dsp',
-                        description: isRemote ? 'CamillaDSP (Remote)' : 'CamillaDSP',
-                        details: `64-bit Processing • ${activeDsp.currentState.presetName || 'Custom'} (${activeDsp.currentState.filtersCount || 0} filters) • Gain: ${activeDsp.currentState.preamp || 0}dB`,
-                        status: 'enhanced'
-                    },
-                    {
-                        type: 'output',
-                        description: isRemote ? 'Raspberry Pi DAC' : 'D50 III',
-                        details: `${activeDsp.currentState.sampleRate / 1000}kHz • ${activeDsp.currentState.bitDepth}-bit Hardware Output`,
-                        status: 'enhanced'
-                    }
-                );
-            }
-        }
-
-        res.json(info);
+        return res.json(info);
     } catch (e) {
-        console.error('Media info error:', e);
-        res.json({ state: 'unknown', track: '', artist: '', album: '', artwork: '' });
+        console.error('Media Info Error:', e);
+        res.status(500).json({ error: e.message });
     }
 });
 
-// Roon helper routes
+// Get Artist Bio / Info
+app.get('/api/media/artist-info', async (req, res) => {
+    const { artist, album } = req.query;
+    try {
+        const info = await getArtistInfo(artist, album);
+        res.json(info);
+    } catch (e) {
+        console.error('Artist Info API Error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Remote Dashboard Config
+app.get('/api/config/remote', (req, res) => {
+    res.json({
+        remoteUrl: isRunningOnPi ? null : 'http://raspberrypi.local:3000'
+    });
+});
+
+// Unified Zones (Apple Music + Roon + LMS)
+app.get('/api/media/zones', async (req, res) => {
+    const list = [];
+
+    // 1. Add Apple Music / System - ONLY ON MAC
+    if (!isRunningOnPi) {
+        list.push({
+            id: 'apple',
+            name: 'Apple Music / System',
+            state: 'ready',
+            active: true,
+            source: 'apple'
+        });
+    }
+
+    // 2. Add Roon Zones
+    const roonZones = roonController.getZones();
+    roonZones.forEach(z => list.push({ ...z, source: 'roon' }));
+
+    // 3. Add LMS Players - FILTERED TO ONLY SHOW THE PI
+    try {
+        const lmsPlayers = await lmsController.getPlayers();
+        // Only show the player that matches our configured playerId (the Pi itself)
+        const localPiPlayer = lmsPlayers.find(p => p.id === lmsController.playerId);
+        if (localPiPlayer) {
+            list.push(localPiPlayer);
+        }
+    } catch (e) {
+        console.error('Failed to fetch LMS players for zones list:', e);
+    }
+
+    res.json(list);
+});
+
+// Legacy/Specific routes
 app.get('/api/media/roon/zones', (req, res) => {
     res.json(roonController.getZones());
+});
+
+app.post('/api/media/lms/select', (req, res) => {
+    const { playerId } = req.body;
+    if (!playerId) return res.status(400).json({ error: 'Missing playerId' });
+
+    lmsController.playerId = playerId;
+    res.json({ success: true, playerId });
 });
 
 app.post('/api/media/roon/select', (req, res) => {
@@ -1305,21 +1996,50 @@ app.post('/api/media/roon/select', (req, res) => {
 
     saveZoneConfig();
 
+    // Broadcast change to peers
+    if (zone) {
+        broadcastZoneChange(zoneId, zone.display_name).catch(e => console.error('Sync: Broadcast failed', e.message));
+    }
+
     res.json({ success: true, activeZoneId: zoneId });
 });
 
 app.get('/api/media/roon/image/:imageKey', (req, res) => {
-    roonController.getImage(req.params.imageKey, res);
+    const key = req.params.imageKey;
+    console.log(`Server: Artwork request for key: ${key}`);
+    roonController.getImage(key, res);
 });
 
 
 // Serve artwork from fixed location
-app.get('/api/media/artwork', (req, res) => {
+// Media Artwork Proxy (L LMS)
+app.get('/api/media/lms/artwork/:trackId', async (req, res) => {
+    try {
+        const { trackId } = req.params;
+        // Internal communication with LMS (usually localhost on Pi)
+        const lmsUrl = `http://${lmsController.host}:${lmsController.port}/music/${trackId}/cover.jpg`;
+        const response = await axios.get(lmsUrl, { responseType: 'stream' });
+        response.data.pipe(res);
+    } catch (e) {
+        res.status(404).end();
+    }
+});
+
+app.get('/api/media/artwork', async (req, res) => {
     const artworkPath = '/tmp/artisnova_artwork.jpg';
+
+    // Wait for file if missing (up to 2 seconds)
+    let checks = 0;
+    while (!fs.existsSync(artworkPath) && checks < 10) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        checks++;
+    }
+
     if (fs.existsSync(artworkPath)) {
-        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
         res.sendFile(artworkPath);
     } else {
+        console.warn('API: Artwork request failed - /tmp/artisnova_artwork.jpg not found after wait');
         res.status(404).send('No artwork');
     }
 });
@@ -1352,14 +2072,24 @@ app.get('/api/media/lyrics', async (req, res) => {
     }
 });
 
-// Volume Control
+// Volume Control - with caching to prevent osascript bottleneck
+let cachedVolume = { value: 50, timestamp: 0 };
+const VOLUME_CACHE_MS = 2000;  // Cache for 2 seconds
+
 app.get('/api/volume', (req, res) => {
-    exec('osascript -e "output volume of (get volume settings)"', (error, stdout, stderr) => {
+    const now = Date.now();
+    // Return cached value if recent
+    if (now - cachedVolume.timestamp < VOLUME_CACHE_MS) {
+        return res.json({ volume: cachedVolume.value });
+    }
+
+    exec('osascript -e "output volume of (get volume settings)"', { timeout: 2000 }, (error, stdout, stderr) => {
         if (error) {
             console.error('Get volume error:', stderr);
-            return res.status(500).json({ error: 'Failed to get volume' });
+            return res.json({ volume: cachedVolume.value || 50 });  // Return cached or default
         }
-        res.json({ volume: parseInt(stdout.trim()) });
+        cachedVolume = { value: parseInt(stdout.trim()), timestamp: now };
+        res.json({ volume: cachedVolume.value });
     });
 });
 
@@ -1491,20 +2221,53 @@ if (fs.existsSync(FRONTEND_DIST)) {
 
 
 
-const getLocalIP = () => {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-        for (const iface of interfaces[name]) {
-            if (iface.family === 'IPv4' && !iface.internal) {
-                return iface.address;
-            }
-        }
-    }
-    return 'localhost';
-};
-
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+
+// Main WebSocket server for metadata and state
+const wss = new WebSocket.Server({ noServer: true });
+// Specialized WebSocket for real-time levels
+const levelWss = new WebSocket.Server({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+    const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+
+    if (pathname === '/ws/levels') {
+        levelWss.handleUpgrade(request, socket, head, (ws) => {
+            levelWss.emit('connection', ws, request);
+        });
+    } else {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            wss.emit('connection', ws, request);
+        });
+    }
+});
+
+levelWss.on('connection', (ws) => {
+    console.log('WS: Level subscriber connected');
+    levelProbe.addSubscriber(ws);
+    ws.on('close', () => {
+        console.log('WS: Level subscriber disconnected');
+        levelProbe.removeSubscriber(ws);
+    });
+});
+
+function broadcast(type, data) {
+    const message = JSON.stringify({ type, data });
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
+}
+
+// Global broadcast for Roon changes
+roonController.init((info) => {
+    // We can't easily calculate the full UI info (signalPath etc) here without 
+    // duplicating logic from /api/media/info. For now, we'll signal a REFRESH
+    // or send the raw info so the frontend can choose to fetch full details or use raw.
+    // Better yet: send a 'metadata_update' type.
+    broadcast('metadata_update', { source: 'roon', info });
+});
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);

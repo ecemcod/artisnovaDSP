@@ -74,7 +74,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
                                 >
                                     {item.artworkUrl ? (
                                         <img
-                                            src={item.artworkUrl.startsWith('http') ? item.artworkUrl : `${API_URL}${item.artworkUrl}`}
+                                            src={item.artworkUrl.startsWith('http') ? item.artworkUrl : `${PROTOCOL}//${API_HOST}:3000${item.artworkUrl.startsWith('/') ? '' : '/'}${item.artworkUrl}`}
                                             alt=""
                                             className="w-full h-full object-cover"
                                         />

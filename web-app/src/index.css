@@ -406,3 +406,32 @@ select:focus {
   opacity: 0.5;
   box-shadow: 0 0 10px var(--glow-cyan);
 }
+
+/* Compact layout for short screens (e.g., 1024x600 kiosk) */
+@media (max-height: 700px) {
+  .now-playing-artwork {
+    max-width: 280px !important;
+    margin-bottom: 0.5rem !important;
+  }
+
+  .now-playing-header {
+    padding-top: 0.5rem !important;
+  }
+
+  .now-playing-info {
+    margin-bottom: 0.5rem !important;
+  }
+
+  .now-playing-controls {
+    margin-bottom: 0.5rem !important;
+  }
+
+  .now-playing-progress {
+    margin-bottom: 0.5rem !important;
+  }
+
+  .now-playing-badge {
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+  }
+}
