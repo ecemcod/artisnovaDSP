@@ -105,6 +105,7 @@ function App() {
   const [preamp, setPreamp] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [isBypass, setIsBypass] = useState(false);
+  const [isAutoMuted, setIsAutoMuted] = useState(false); // New: Tracks auto-mute status
   const [sampleRate, setSampleRate] = useState<number | null>(96000);
   const [bitDepth, setBitDepth] = useState(24);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -722,6 +723,16 @@ function App() {
         } catch (e) {
           console.log('Auto-start failed, will retry when user interacts');
         }
+      }
+
+      // Sync Auto-Mute Status
+      if (res.data.isAutoMuted !== undefined) {
+        setIsAutoMuted(res.data.isAutoMuted);
+      }
+
+      // Sync Auto-Mute Status
+      if (res.data.isAutoMuted !== undefined) {
+        setIsAutoMuted(res.data.isAutoMuted);
       }
     } catch { }
   };
@@ -1411,6 +1422,15 @@ function App() {
                   <div className="text-sm font-black text-themed-primary header-text">Artis Nova</div>
                   <div className="text-[10px] text-themed-muted uppercase tracking-widest font-black">DSP Processor</div>
                 </div>
+                {/* Auto Mute Badge */}
+                {/* Auto Mute Badge Removed */}{/*
+                {isAutoMuted && (
+                  <div className="ml-auto px-2 py-1 bg-red-500/20 border border-red-500/50 rounded flex items-center gap-1.5 animate-pulse">
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    <span className="text-[9px] font-black text-red-500 uppercase tracking-widest">Muted (Group)</span>
+                  </div>
+                )}
+                */}
               </div>
 
               {/* Backend Section */}
@@ -1560,10 +1580,17 @@ function App() {
 
               {/* Status Footer */}
               <div className="px-5 py-3 bg-themed-deep border-t border-themed-subtle flex items-center justify-between">
-                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 border border-themed-subtle">
-                  <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-accent-primary shadow-[0_0_8px_var(--glow-cyan)]' : 'bg-accent-danger'}`} />
-                  <span className="text-[10px] font-black text-themed-muted uppercase tracking-widest">{isRunning ? 'DSP ON' : 'DSP OFF'}</span>
-                </div>
+                {isAutoMuted ? (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 border border-red-500/50 animate-pulse">
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">DSP MUTED</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 border border-themed-subtle">
+                    <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-accent-primary shadow-[0_0_8px_var(--glow-cyan)]' : 'bg-accent-danger'}`} />
+                    <span className="text-[10px] font-black text-themed-muted uppercase tracking-widest">{isRunning ? 'DSP ON' : 'DSP OFF'}</span>
+                  </div>
+                )}
                 <span className="text-[9px] text-accent-primary font-black tracking-widest">{isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)}K / ${bitDepth}B` : '--') : 'DIRECT'}</span>
               </div>
             </>
@@ -1887,7 +1914,31 @@ function App() {
       <SignalPathPopover
         isOpen={signalPathOpen}
         onClose={() => setSignalPathOpen(false)}
-        nodes={nowPlaying.signalPath?.nodes || []}
+        nodes={(() => {
+          let nodes = nowPlaying.signalPath?.nodes ? [...nowPlaying.signalPath.nodes] : [];
+          if (isAutoMuted) {
+            // @ts-ignore
+            nodes = nodes.map(n => ({ ...n }));
+            // @ts-ignore
+            const dspNode: any = nodes.find(n => n.description.includes('Camilla') || n.description.includes('Probe'));
+            if (dspNode) {
+              dspNode.warning = true;
+              dspNode.comment = "Muted (Hybrid Group)";
+              dspNode.status = undefined;
+            } else {
+              // @ts-ignore
+              nodes.push({
+                type: 'dsp',
+                description: 'Auto-Mute Active',
+                details: 'DSP output muted to prevent double audio',
+                warning: true,
+                comment: 'Hybrid Group Detected'
+              } as any);
+            }
+          }
+          // @ts-ignore
+          return nodes;
+        })()}
         quality={nowPlaying.signalPath?.quality}
         anchorRect={signalAnchorRect}
         nowPlayingRect={nowPlayingContainerRef.current?.getBoundingClientRect()}

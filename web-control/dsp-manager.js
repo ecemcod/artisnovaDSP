@@ -671,6 +671,48 @@ class DSPManager {
             }
         });
     }
+
+    async setMute(muted) {
+        if (!this.isRunning()) return;
+
+        console.log(`DSPManager: Setting mute to ${muted}`);
+        this.currentState.mute = muted;
+
+        try {
+            const WebSocket = require('ws');
+            const ws = new WebSocket('ws://localhost:5005');
+
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    ws.terminate();
+                    reject(new Error('WebSocket timeout'));
+                }, 1000);
+
+                ws.on('open', () => {
+                    // CamillaDSP protocol: "SetMute": boolean
+                    ws.send(JSON.stringify({ "SetMute": muted }));
+                });
+
+                ws.on('message', (data) => {
+                    // Wait for ack? usually returns {"SetMute": {"result": "Ok"}}
+                    const msg = JSON.parse(data);
+                    if (msg.SetMute) {
+                        clearTimeout(timeout);
+                        ws.close();
+                        resolve();
+                    }
+                });
+
+                ws.on('error', (err) => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+            });
+            console.log('DSPManager: Mute command sent successfully');
+        } catch (e) {
+            console.error('DSPManager: Failed to send mute command', e);
+        }
+    }
 }
 
 module.exports = DSPManager;

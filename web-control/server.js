@@ -1177,7 +1177,9 @@ app.get('/api/status', (req, res) => {
         isDspManaged: !!backendId,
         zone: zoneName || null,
         activeZoneId: roonController.activeZoneId || null,
-        isAutoSelected: !!zoneName // Signal to frontend that this was a zone-based selection
+        isAutoSelected: !!zoneName, // Signal to frontend that this was a zone-based selection
+        mute: activeDsp.currentState.mute || false,
+        isAutoMuted: isAutoMuted || false
     };
 
     // Cache the result

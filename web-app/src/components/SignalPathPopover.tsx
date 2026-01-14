@@ -6,6 +6,8 @@ interface SignalNode {
     description: string;
     details?: string;
     status?: string;
+    warning?: boolean;
+    comment?: string;
 }
 
 interface SignalPathPopoverProps {
@@ -112,13 +114,18 @@ const SignalPathPopover: React.FC<SignalPathPopoverProps> = ({ isOpen, onClose, 
                 ) : nodes.map((node, index) => (
                     <React.Fragment key={index}>
                         <div className="w-full flex items-center gap-2 group">
-                            <div className="p-1 bg-themed-deep rounded border border-themed-medium group-hover:border-accent-primary/30 transition-colors">
+                            <div className={`p-1 bg-themed-deep rounded border transition-colors ${node.warning ? 'border-red-500/50 bg-red-500/10' : 'border-themed-medium group-hover:border-accent-primary/30'}`}>
                                 {getNodeIcon(node.type, node.description)}
                             </div>
                             <div className="flex-1 min-w-0">
-                                <h4 className="text-[10px] font-bold text-themed-primary leading-none">{node.description}</h4>
+                                <h4 className={`text-[10px] font-bold leading-none ${node.warning ? 'text-red-400' : 'text-themed-primary'}`}>{node.description}</h4>
                                 {node.details && (
                                     <p className="text-[8px] text-themed-muted font-medium leading-tight">{node.details}</p>
+                                )}
+                                {node.comment && (
+                                    <p className={`text-[8px] font-bold mt-0.5 ${node.warning ? 'text-red-500' : 'text-accent-primary'}`}>
+                                        {node.comment}
+                                    </p>
                                 )}
                             </div>
                             {node.status && (

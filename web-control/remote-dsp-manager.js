@@ -583,6 +583,16 @@ class RemoteDSPManager {
             lastCheck: this.healthState.lastCheck
         };
     }
+    async setMute(muted) {
+        console.log(`RemoteDSP: Setting mute to ${muted}`);
+        this.currentState.mute = muted;
+        try {
+            await this._sendCommand('SetMute', muted);
+            console.log('RemoteDSP: Mute command sent successfully');
+        } catch (e) {
+            console.error('RemoteDSP: Failed to send mute command', e);
+        }
+    }
 }
 
 module.exports = RemoteDSPManager;
