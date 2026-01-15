@@ -55,36 +55,51 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
     const lastFetchedRef = useRef<{ artist: string; album: string }>({ artist: '', album: '' });
 
     useEffect(() => {
+        let isMounted = true;
+
         const fetchInfo = async () => {
             if (!artist) return;
 
-            // STABILITY FIX: Only refetch if artist OR album actually changed
-            if (lastFetchedRef.current.artist === artist && lastFetchedRef.current.album === album) {
-                console.log('ArtistInfo: Skipping fetch, same artist/album');
+            // STABILITY FIX: Normalice strings and check if they really changed
+            const normalizedArtist = artist.trim().toLowerCase();
+            const normalizedAlbum = album.trim().toLowerCase();
+
+            if (lastFetchedRef.current.artist === normalizedArtist &&
+                lastFetchedRef.current.album === normalizedAlbum) {
                 return;
             }
 
-            lastFetchedRef.current = { artist, album };
+            lastFetchedRef.current = { artist: normalizedArtist, album: normalizedAlbum };
             setLoading(true);
 
             try {
                 const res = await axios.get(`/api/media/artist-info`, {
                     params: { artist, album }
                 });
-                setInfo(res.data);
-                // Scroll to top on new data
-                if (scrollRef.current) {
-                    scrollRef.current.scrollTop = 0;
+
+                if (isMounted) {
+                    setInfo(res.data);
+                    if (scrollRef.current) scrollRef.current.scrollTop = 0;
                 }
             } catch (err) {
-                console.error('Error fetching artist info:', err);
-                setInfo({ artist: { name: artist, bio: "Error al cargar la información.", artistUrl: null, country: '', activeYears: '', tags: '' }, album: null, source: 'MusicBrainz' });
+                if (isMounted) {
+                    console.error('Error fetching artist info:', err);
+                    setInfo({
+                        artist: { name: artist, bio: "No se pudo cargar la información.", artistUrl: null, country: '', activeYears: '', tags: '' },
+                        album: null,
+                        source: 'Local Fallback'
+                    });
+                }
             } finally {
-                setLoading(false);
+                if (isMounted) setLoading(false);
             }
         };
 
-        fetchInfo();
+        const timeoutId = setTimeout(fetchInfo, 300); // Debounce fetch
+        return () => {
+            isMounted = false;
+            clearTimeout(timeoutId);
+        };
     }, [artist, album]);
 
     const renderArtistTab = () => {
@@ -232,7 +247,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
     return (
         <div className="flex-1 min-w-0 min-h-0 bg-themed-panel border border-themed-medium rounded-xl overflow-hidden shadow-2xl flex flex-col h-full animate-in slide-in-from-right duration-500">
             {/* Header with Tabs */}
-            <div className="p-4 bg-white/5 border-b border-themed-subtle">
+            <div className="p-4 bg-white/5 border-b border-themed-subtle" style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}>
                 <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                         <BookOpen size={14} className="text-accent-primary" />
@@ -274,7 +289,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                 ref={scrollRef}
                 className="flex-1 overflow-y-auto py-10 custom-scrollbar relative scroll-smooth"
             >
-                <div className="px-8 md:px-24 lg:px-32 max-w-6xl mx-auto">
+                <div className="px-8 md:px-24 lg:px-32 max-w-6xl mx-auto" style={{ paddingLeft: 'calc(var(--mobile-sidebar-gap) - 2rem)' }}>
                     {loading ? (
                         <div className="h-full flex items-center justify-center">
                             <div className="flex flex-col items-center gap-4 animate-pulse">

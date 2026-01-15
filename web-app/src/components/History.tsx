@@ -146,7 +146,7 @@ const History = () => {
     };
 
     return (
-        <div className="flex-1 flex flex-col h-full bg-themed-deep overflow-hidden p-6 md:p-8 pt-14 md:pt-20">
+        <div className="flex-1 flex flex-col h-full bg-themed-deep overflow-hidden p-6 pt-14 md:pt-20" style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}>
             {/* Header & Controls */}
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-8 gap-4 shrink-0">
                 <div>

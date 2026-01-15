@@ -1,6 +1,7 @@
 # Credentials and local config
 raspi.txt
 server.key
+server.cert
 .env
 .DS_Store
 

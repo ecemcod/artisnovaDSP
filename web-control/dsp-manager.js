@@ -220,6 +220,16 @@ class DSPManager {
 
                 console.log('Starting CamillaDSP with config:', configPath);
 
+                // Cleanup any orphaned processes on port 5005 before starting (Mac)
+                if (process.platform === 'darwin') {
+                    try {
+                        const { execSync } = require('child_process');
+                        console.log('DSPManager: Cleaning up orphaned 5005 processes...');
+                        execSync('lsof -ti:5005 | xargs kill -9 2>/dev/null || true');
+                        execSync('sleep 0.5'); // Give CoreAudio a moment to breathe
+                    } catch (e) { }
+                }
+
                 const dspArgs = ['-a', '0.0.0.0', '-p', '5005', configPath];
                 console.log('Spawning:', this.dspPath, dspArgs.join(' '));
 
@@ -320,10 +330,10 @@ class DSPManager {
             this.checkDeviceHealth();
         }, 10000);
 
-        // Signal presence check - every 2 seconds
+        // Signal presence check - less frequent for health, avoid constant WS toggling
         this.signalCheckInterval = setInterval(() => {
             this.checkSignalPresence();
-        }, 2000);
+        }, 15000); // 15 seconds is enough for a health check
 
         // Initial checks
         this.checkDeviceHealth();

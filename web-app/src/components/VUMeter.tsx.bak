@@ -21,25 +21,9 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
     // Check if we're in "no signal" state (connected but silence for 5+ seconds)
     const isNoSignal = status === 'connected' && silenceDuration >= 5;
 
-    // Use refs for reactive values to prevent useEffect closure staleness or redundant re-runs
-    const isRunningRef = useRef(isRunning);
-    const wsUrlRef = useRef(wsUrl);
-    const onLevelsChangeRef = useRef(onLevelsChange);
-
     useEffect(() => {
-        isRunningRef.current = isRunning;
-        wsUrlRef.current = wsUrl;
-        onLevelsChangeRef.current = onLevelsChange;
-    }, [isRunning, wsUrl, onLevelsChange]);
-
-    useEffect(() => {
-        let pollInterval: any = null;
-        let isCleaningUp = false;
-
         const cleanup = () => {
             if (wsRef.current) {
-                wsRef.current.onclose = null;
-                wsRef.current.onerror = null;
                 wsRef.current.close();
                 wsRef.current = null;
             }
@@ -47,12 +31,11 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                 clearTimeout(reconnectTimeoutRef.current);
                 reconnectTimeoutRef.current = null;
             }
+            setStatus('disconnected');
         };
 
         const connect = (overrideUrl?: string) => {
-            if (isCleaningUp) return;
-            // Prevent multiple concurrent connection attempts
-            if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+            if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
                 return;
             }
 
@@ -62,79 +45,53 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
             // Determine which URL to use
             let currentUrl = overrideUrl;
             if (!currentUrl) {
-                const hostname = window.location.hostname;
-                if (isRunningRef.current) {
-                    // For main DSP, we need port 5005
-                    currentUrl = `ws://${hostname}:5005`;
+                if (isRunning) {
+                    currentUrl = wsUrl;
                 } else {
-                    // For probe, we use the server port (3000)
-                    currentUrl = `ws://${window.location.host}/ws/levels`;
+                    // Force using the current hostname for the probe to ensure accessibility
+                    currentUrl = `ws://${window.location.hostname}:3000/ws/levels`;
                 }
             }
 
-            console.warn(`VUMeter: ATTEMPTING CONNECTION to ${currentUrl} (isRunning: ${isRunningRef.current})`);
+            console.log('VUMeter: Connecting to', currentUrl);
 
             try {
                 const ws = new WebSocket(currentUrl);
                 wsRef.current = ws;
 
                 ws.onopen = () => {
-                    if (isCleaningUp) return;
-                    console.warn(`VUMeter: CONNECTED to ${currentUrl}`);
+                    console.log('VUMeter: Connected to', currentUrl);
                     setStatus('connected');
                 };
 
                 ws.onmessage = (event) => {
-                    if (isCleaningUp) return;
                     try {
                         const data = JSON.parse(event.data);
-
-                        // Standard CamillaDSP response is an array of peak values [L, R]
-                        // OR if it's our server probe, it's also an array [L, R]
+                        // Handle both CamillaDSP format and Server Probe format (simple array)
                         const value = data.GetCaptureSignalPeak ? data.GetCaptureSignalPeak.value : (Array.isArray(data) ? data : null);
 
-                        if (value && Array.isArray(value) && value.length >= 2) {
+                        if (value && Array.isArray(value)) {
                             const [left, right] = value;
-
-                            // Ensure we have numbers
-                            const leftNum = typeof left === 'number' ? left : (typeof left === 'string' ? parseFloat(left) : -60);
-                            const rightNum = typeof right === 'number' ? right : (typeof right === 'string' ? parseFloat(right) : -60);
-
-                            if (isNaN(leftNum) || isNaN(rightNum)) return;
-
                             const newLevels = {
-                                left: Math.max(-60, leftNum),
-                                right: Math.max(-60, rightNum)
+                                left: Math.max(-60, left),
+                                right: Math.max(-60, right)
                             };
-
                             setLevels(newLevels);
-                            onLevelsChangeRef.current?.(newLevels.left, newLevels.right);
+                            onLevelsChange?.(newLevels.left, newLevels.right);
 
-                            if (newLevels.left > -60 || newLevels.right > -60) {
+                            // Track silence duration
+                            if (left > -60 || right > -60) {
                                 lastSignalTimeRef.current = Date.now();
                                 setSilenceDuration(0);
                             } else {
                                 const silenceSeconds = Math.floor((Date.now() - lastSignalTimeRef.current) / 1000);
                                 setSilenceDuration(silenceSeconds);
                             }
-                        } else if (value && Array.isArray(value) && value.length === 0) {
-                            // CamillaDSP sometimes sends [] if just starting
-                            return;
-                        } else {
-                            // Only log once every few seconds for unexpected format
-                            const win = window as any;
-                            if (!win._lastVuErr || Date.now() - win._lastVuErr > 5000) {
-                                console.warn('VUMeter: Unexpected data format:', data);
-                                win._lastVuErr = Date.now();
-                            }
                         }
-                    } catch (e) {
-                        console.error('VUMeter: Parse error', e);
-                    }
+                    } catch (e) { }
                 };
 
                 ws.onclose = () => {
-                    if (isCleaningUp) return;
                     console.log('VUMeter: Closed');
                     wsRef.current = null;
                     setStatus('disconnected');
@@ -143,46 +100,44 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                     const isProbe = currentUrl.includes('/ws/levels');
                     let nextUrl = currentUrl;
 
-                    if (!isProbe && !isRunningRef.current) {
+                    if (!isProbe && !isRunning) {
+                        // If we were trying DSP but it's not running, try probe
                         nextUrl = `ws://${window.location.hostname}:3000/ws/levels`;
-                    } else if (isProbe && isRunningRef.current) {
-                        nextUrl = wsUrlRef.current;
+                    } else if (isProbe && isRunning) {
+                        // If we were on probe but DSP is back, try DSP
+                        nextUrl = wsUrl;
                     }
 
-                    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+                    console.log(`VUMeter: Reconnecting to ${nextUrl} in 2s...`);
                     reconnectTimeoutRef.current = setTimeout(() => {
                         connect(nextUrl);
                     }, 2000);
                 };
 
                 ws.onerror = (err) => {
-                    if (isCleaningUp) return;
                     console.error('VUMeter: WS Error', err);
                     ws.close();
                 };
             } catch (e) {
-                if (isCleaningUp) return;
                 console.error('VUMeter: Error', e);
                 setStatus('disconnected');
-                if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-                reconnectTimeoutRef.current = setTimeout(() => connect(), 3000);
+                reconnectTimeoutRef.current = setTimeout(() => connect(), 2000);
             }
         };
 
-        pollInterval = setInterval(() => {
+        const pollInterval = setInterval(() => {
             if (wsRef.current?.readyState === WebSocket.OPEN && wsRef.current.url.includes(':5005')) {
                 wsRef.current.send('"GetCaptureSignalPeak"');
             }
-        }, 50);
+        }, 100);
 
         connect();
 
         return () => {
-            isCleaningUp = true;
             clearInterval(pollInterval);
             cleanup();
         };
-    }, [isRunning, wsUrl]); // Re-run when source or run state changes
+    }, [isRunning, wsUrl, onLevelsChange]);
 
     // Determine status badge
     const getStatusBadge = () => {
@@ -195,15 +150,15 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
     const statusBadge = getStatusBadge();
 
     return (
-        <div className={`w-full h-full flex flex-col relative overflow-hidden group vumeter-main-wrapper ${className}`}>
+        <div className={\`w-full h-full flex flex-col relative overflow-hidden group vumeter-main-wrapper \${className}\`}>
             {/* Header / Brand Plate */}
-            <div className={`flex justify-between items-center z-10 shrink-0 ${isMobile ? 'mb-1' : 'mb-1 md:mb-10'}`}>
+            <div className={\`flex justify-between items-center z-10 shrink-0 \${isMobile ? 'mb-1' : 'mb-1 md:mb-10'}\`}>
                 <div className="flex flex-col">
                     <div className="text-[10px] text-themed-muted uppercase font-black tracking-[0.3em] header-text">
                         Analog Monitoring
                     </div>
                 </div>
-                <div className={`px-2 py-0.5 rounded-lg text-[10px] font-black tracking-widest ${statusBadge.className}`}>
+                <div className={\`px-2 py-0.5 rounded-lg text-[10px] font-black tracking-widest \${statusBadge.className}\`}>
                     {statusBadge.text}
                 </div>
             </div>

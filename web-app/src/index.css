@@ -37,6 +37,9 @@
   --radius-full: 9999px;
 
   --motion-standard: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Layout variables */
+  --mobile-sidebar-gap: 72px;
 }
 
 /* Light Theme */

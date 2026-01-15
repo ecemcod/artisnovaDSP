@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import axios from 'axios';
 import FilterGraph from './components/FilterGraph';
 import PEQEditor from './components/PEQEditor';
@@ -169,14 +169,14 @@ function App() {
     return saved ? JSON.parse(saved) : {};
   });
 
-  const getActiveWsUrl = (backendId: string) => {
+  const getActiveWsUrl = useCallback((backendId: string) => {
     if (backendOverrides[backendId]) return backendOverrides[backendId];
     const backend = availableBackends.find(b => b.id === backendId);
     if (backend) return backend.wsUrl;
     // Fallback to constants
     const fallback = (BACKENDS as any)[backendId];
     return fallback ? fallback.wsUrl : `ws://${window.location.hostname}:5005`;
-  };
+  }, [backendOverrides, availableBackends, BACKENDS]);
 
   const updateBackendOverride = async (backendId: string, url: string) => {
     const next = { ...backendOverrides, [backendId]: url };
@@ -499,10 +499,11 @@ function App() {
     };
   }, []);
 
-  // Poll for now playing info - reduced frequency if WS is active, 
-  // but keeping it for compatibility and background sync.
+  const isFetchingRef = useRef(false);
   const fetchNowPlaying = async () => {
+    if (isFetchingRef.current) return;
     try {
+      isFetchingRef.current = true;
       const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`, { timeout: 5000 });
       if (res.data && !res.data.error) {
         // TRACK CHANGE: Full update
@@ -546,6 +547,8 @@ function App() {
       }
     } catch (err: any) {
       console.warn('App: Fetch NowPlaying failed:', err.message);
+    } finally {
+      isFetchingRef.current = false;
     }
   };
 
@@ -1245,6 +1248,7 @@ function App() {
     );
   };
 
+
   // Render VU Meters fullscreen view (for Raspberry Pi)
   const renderVUMetersView = () => {
     return (
@@ -1343,6 +1347,7 @@ function App() {
         case 'playback': return renderNowPlaying();
         case 'processing': return renderProcessingTools();
         case 'lyrics': return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
+        case 'info': return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
         case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
         case 'history': return <History />;
         case 'vumeters': return renderVUMetersView();

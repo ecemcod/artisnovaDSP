@@ -38,7 +38,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
     return (
         <div className="flex-1 w-full h-full bg-themed-panel border border-themed-medium rounded-xl flex flex-col shadow-2xl overflow-hidden group">
             {/* Header */}
-            <div className="p-4 bg-white/5 border-b border-themed-subtle flex items-center justify-between">
+            <div className="p-4 bg-white/5 border-b border-themed-subtle flex items-center justify-between" style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}>
                 <div className="flex items-center gap-3">
                     <div className="p-2 bg-accent-primary/10 rounded-lg text-accent-primary">
                         <ListMusic size={16} style={{ color: '#ffffff' }} />
@@ -51,7 +51,7 @@ const PlayQueue: React.FC<Props> = ({ queue, mediaSource }) => {
             </div>
 
             {/* Queue List */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-2 relative z-10 pointer-events-auto">
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-2 relative z-10 pointer-events-auto" style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}>
                 {queue.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-themed-muted/30 gap-2">
                         <Music2 size={32} strokeWidth={1} style={{ color: '#ffffff' }} />

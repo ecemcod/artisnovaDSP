@@ -546,23 +546,30 @@ class RoonController {
     }
 
     // NEW: Scan all zones to find the active sample rate
-    // Prioritizes "Camilla" zone if playing, otherwise takes any playing zone
+    // Prioritizes explicitly selected zone, then "Camilla", then any playing zone
     _scanForActiveSampleRate() {
         let bestCandidate = null;
         console.log('RoonController: Scanning zones for active rate...');
 
-        for (const zone of this.zones.values()) {
-            if (zone.state === 'playing') {
-                // DEBUG: Verbose logging disabled for performance
-                // console.log(`RoonController: Found playing zone: "${zone.display_name}"`);
+        const activeZone = this.activeZoneId ? this.zones.get(this.activeZoneId) : null;
 
-                if (zone.display_name === 'Camilla') {
-                    // Critical priority
-                    bestCandidate = zone;
-                    break;
-                } else if (!bestCandidate) {
-                    // Fallback
-                    bestCandidate = zone;
+        // Priority 1: Explicitly selected active zone if playing
+        if (activeZone && activeZone.state === 'playing') {
+            console.log(`RoonController: Priority 1 (Selected) - Using "${activeZone.display_name}"`);
+            bestCandidate = activeZone;
+        } else {
+            // Scan others
+            for (const zone of this.zones.values()) {
+                if (zone.state === 'playing') {
+                    if (zone.display_name === 'Camilla') {
+                        // Priority 2: "Camilla" (Virtual Device)
+                        console.log(`RoonController: Priority 2 (Camilla) - Used "${zone.display_name}"`);
+                        bestCandidate = zone;
+                        break;
+                    } else if (!bestCandidate) {
+                        // Priority 3: First other playing zone
+                        bestCandidate = zone;
+                    }
                 }
             }
         }

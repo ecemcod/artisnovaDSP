@@ -2,14 +2,16 @@
  * Remote DSP Manager for Raspberry Pi
  * Communicates with CamillaDSP running on Raspberry Pi via WebSocket
  */
+const EventEmitter = require('events');
 const WebSocket = require('ws');
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const yaml = require('js-yaml');
 
-class RemoteDSPManager {
+class RemoteDSPManager extends EventEmitter {
     constructor(options = {}) {
+        super();
         this.host = options.host || 'raspberrypi.local';
         this.port = options.port || 1234;
         this.user = options.user || 'manuelcouceiro';
@@ -23,6 +25,7 @@ class RemoteDSPManager {
         this.shouldBeRunning = false;  // Track if DSP should be running (for parity with local DSPManager)
         this.lastFilterData = null;
         this.lastOptions = null;
+        this.levelPollInterval = null;
 
         this.currentState = {
             running: false,
@@ -74,6 +77,7 @@ class RemoteDSPManager {
                 this.ws.onclose = () => {
                     this.connected = false;
                     console.log('RemoteDSP: Connection closed');
+                    this.stopLevelPolling();
                 };
 
                 this.ws.onerror = (err) => {
@@ -98,8 +102,22 @@ class RemoteDSPManager {
 
     _handleMessage(data) {
         try {
-            console.log(`RemoteDSP: <- Recv: ${data.substring(0, 150)}${data.length > 150 ? '...' : ''}`);
+            // console.log(`RemoteDSP: <- Recv: ${data.substring(0, 150)}${data.length > 150 ? '...' : ''}`);
             const msg = JSON.parse(data);
+
+            // SPECIAL CASE: Level Data (GetCaptureSignalPeak)
+            if (msg.GetCaptureSignalPeak) {
+                const result = msg.GetCaptureSignalPeak;
+                if (result.result === 'Ok' && Array.isArray(result.value)) {
+                    // Convert to dB
+                    const levels = result.value.map(v => v > 0 ? 20 * Math.log10(v) : -100);
+                    this.emit('levels', levels);
+                    // Update health state
+                    this.healthState.signalLevels = { left: levels[0], right: levels[1] };
+                    this.healthState.signalPresent = levels[0] > -60 || levels[1] > -60;
+                }
+                return;
+            }
 
             // CamillaDSP responses have the command name as the top-level key
             // e.g. {"GetState": {"result": "Ok", "value": "Running"}}
@@ -279,6 +297,22 @@ class RemoteDSPManager {
             }
         } catch (err) {
             // Ignore errors for peak requests
+        }
+    }
+
+    startLevelPolling() {
+        if (this.levelPollInterval) clearInterval(this.levelPollInterval);
+        console.log('RemoteDSP: Starting level polling...');
+        this.levelPollInterval = setInterval(() => {
+            this.getCapturePeak();
+        }, 50); // 20 updates per second
+    }
+
+    stopLevelPolling() {
+        if (this.levelPollInterval) {
+            clearInterval(this.levelPollInterval);
+            this.levelPollInterval = null;
+            console.log('RemoteDSP: Stopped level polling');
         }
     }
 

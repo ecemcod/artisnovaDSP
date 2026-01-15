@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 
 interface Props {
     level: number; // dB value, typically -60 to 0
@@ -6,66 +6,73 @@ interface Props {
 }
 
 const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
-    const [needleAngle, setNeedleAngle] = useState(-45); // Start at -45° (left side)
+    const needleRef = useRef<SVGGElement>(null);
+    const dbTextRef = useRef<HTMLDivElement>(null);
+    const lastLevelRef = useRef(level);
+    const currentAngleRef = useRef(-45);
     const velocityRef = useRef(0);
-    const targetAngleRef = useRef(-45);
-    const animationRef = useRef<number>(0);
 
     // Convert dB to angle (-60dB = -45°, 0dB = +45°)
     const dbToAngle = (db: number) => {
         const clampedDb = Math.max(-60, Math.min(3, db));
-        // Map -60 to 3 dB → -45° to +50°
         return ((clampedDb + 60) / 63) * 95 - 45;
     };
 
-    // Physics-based needle animation
-    useEffect(() => {
-        targetAngleRef.current = dbToAngle(level);
-
-        const animate = () => {
-            const target = targetAngleRef.current;
-            const current = needleAngle;
-            const diff = target - current;
-
-            // Spring physics
-            const springForce = diff * 0.15; // Spring constant
-            const damping = 0.75; // Damping factor
-
-            velocityRef.current = (velocityRef.current + springForce) * damping;
-
-            const newAngle = current + velocityRef.current;
-
-            if (Math.abs(diff) > 0.01 || Math.abs(velocityRef.current) > 0.01) {
-                setNeedleAngle(newAngle);
-                animationRef.current = requestAnimationFrame(animate);
-            }
-        };
-
-        animationRef.current = requestAnimationFrame(animate);
-
-        return () => cancelAnimationFrame(animationRef.current);
-    }, [level, needleAngle]);
-
-    // Scale markings for VU meter
-    const scaleMarks = [
-        { db: -20, label: '-20' },
-        { db: -15, label: '' },
-        { db: -10, label: '-10' },
-        { db: -7, label: '' },
-        { db: -5, label: '' },
-        { db: -3, label: '' },
-        { db: -1, label: '' },
-        { db: 0, label: '0' },
-        { db: 1, label: '' },
-        { db: 2, label: '' },
-        { db: 3, label: '' },
-    ];
-
     const width = 280;
     const height = 180;
-    const centerX = width / 2;
-    const centerY = height - 20;
+    const centerX = 140;
+    const centerY = 160;
     const radius = 120;
+
+    // Update level ref whenever prop changes
+    useEffect(() => {
+        lastLevelRef.current = level;
+    }, [level]);
+
+    // Persistent Animation Loop
+    useEffect(() => {
+        let animationFrameId: number;
+
+        const animate = () => {
+            const target = dbToAngle(lastLevelRef.current);
+
+            // Physics-based movement (Spring + Damping)
+            const diff = target - currentAngleRef.current;
+            const springForce = diff * 0.2;
+            const damping = 0.7;
+
+            velocityRef.current = (velocityRef.current + springForce) * damping;
+            currentAngleRef.current += velocityRef.current;
+
+            // Direct DOM Manipulation for Needle
+            if (needleRef.current) {
+                // Ensure we use the exact rotation point
+                needleRef.current.setAttribute('transform', `rotate(${currentAngleRef.current}, ${centerX}, ${centerY})`);
+            }
+
+            // Direct DOM Manipulation for Text
+            if (dbTextRef.current) {
+                const currentLevel = lastLevelRef.current;
+                const displayLevel = currentLevel > -60 ? currentLevel.toFixed(1) : '-∞';
+                dbTextRef.current.textContent = `${displayLevel} dB`;
+                dbTextRef.current.style.color = currentLevel > -3 ? 'var(--accent-danger)' : 'var(--accent-success)';
+            }
+
+            animationFrameId = requestAnimationFrame(animate);
+        };
+
+        animationFrameId = requestAnimationFrame(animate);
+        return () => cancelAnimationFrame(animationFrameId);
+    }, []); // Run once on mount, loop is persistent
+
+    // Scale markings for labels
+    const scaleMarks = [
+        { db: -20, label: '-20' },
+        { db: -10, label: '-10' },
+        { db: -5, label: '-5' },
+        { db: 0, label: '0' },
+        { db: 3, label: '+3' },
+    ];
 
     return (
         <div className="flex flex-col items-center w-full">
@@ -101,19 +108,15 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                             <stop offset="60%" stopColor="#c0c0d0" />
                             <stop offset="100%" stopColor="#a0a0b0" />
                         </radialGradient>
-                        <filter id="dialShadow">
-                            <feDropShadow dx="0" dy="2" stdDeviation="2" floodOpacity="0.3" />
-                        </filter>
                     </defs>
 
                     {/* Dial arc background */}
                     <path
                         d={`M ${centerX - radius} ${centerY} A ${radius} ${radius} 0 0 1 ${centerX + radius} ${centerY}`}
                         fill={`url(#dialGradient-${channel})`}
-                        filter="url(#dialShadow)"
                     />
 
-                    {/* Red zone (0 to +3 dB) - using var(--accent-danger) */}
+                    {/* Red zone */}
                     <path
                         d={describeArc(centerX, centerY, radius - 5, dbToAngle(0) - 90, dbToAngle(3) - 90)}
                         fill="none"
@@ -122,9 +125,8 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                         opacity="0.6"
                     />
 
-                    {/* Scale marks */}
-                    {/* Main Scale Marks */}
-                    {[-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3].map((db) => {
+                    {/* All Tick Marks */}
+                    {[-20, -15, -10, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3].map((db) => {
                         const angle = dbToAngle(db);
                         const isMajor = db % 5 === 0 || db === 0 || db === 3;
                         const len = isMajor ? 12 : 6;
@@ -136,42 +138,38 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                         return (
                             <line
                                 key={db}
-                                x1={x1}
-                                y1={y1}
-                                x2={x2}
-                                y2={y2}
+                                x1={x1} y1={y1} x2={x2} y2={y2}
                                 stroke={db >= 0 ? "#cc3333" : "#1a1a2e"}
                                 strokeWidth={isMajor ? "2" : "1"}
                             />
                         );
                     })}
-                    {scaleMarks.map((mark, i) => {
+
+                    {/* Scale Labels */}
+                    {scaleMarks.map((mark) => {
                         const angle = dbToAngle(mark.db);
                         const rad = (angle - 90) * Math.PI / 180;
-                        const textR = radius - 40;
-
+                        const textR = radius - 35;
                         const textX = centerX + Math.cos(rad) * textR;
                         const textY = centerY + Math.sin(rad) * textR;
-
                         return (
-                            <g key={i}>
-                                <text
-                                    x={textX}
-                                    y={textY}
-                                    textAnchor="middle"
-                                    dominantBaseline="middle"
-                                    fontSize="9"
-                                    fill={mark.db >= 0 ? '#cc3333' : '#1a1a2e'}
-                                    fontWeight={mark.db === 0 ? '900' : '500'}
-                                    style={{ fontFamily: 'Inter, sans-serif' }}
-                                >
-                                    {mark.label}
-                                </text>
-                            </g>
+                            <text
+                                key={mark.db}
+                                x={textX}
+                                y={textY}
+                                textAnchor="middle"
+                                dominantBaseline="middle"
+                                fontSize="10"
+                                fill={mark.db >= 0 ? '#cc3333' : '#1a1a2e'}
+                                fontWeight="bold"
+                                style={{ fontFamily: 'Inter, sans-serif' }}
+                            >
+                                {mark.label}
+                            </text>
                         );
                     })}
 
-                    {/* VU label */}
+                    {/* VU and Channel Label */}
                     <text
                         x={centerX}
                         y={centerY - radius / 2}
@@ -184,14 +182,12 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                     >
                         VU
                     </text>
-
-                    {/* Channel Label */}
                     <text
                         x={centerX}
-                        y={centerY - 30}
+                        y={centerY - 35}
                         textAnchor="middle"
                         fill="#4a4a6a"
-                        fontSize="10"
+                        fontSize="9"
                         fontWeight="900"
                         style={{ letterSpacing: '0.1em' }}
                     >
@@ -202,29 +198,24 @@ const AnalogVUMeter: React.FC<Props> = ({ level, channel }) => {
                     <circle cx={centerX} cy={centerY} r="10" fill="var(--bg-deep)" stroke="var(--border-medium)" strokeWidth="1" />
                     <circle cx={centerX} cy={centerY} r="4" fill="var(--accent-primary)" />
 
-                    {/* Needle */}
-                    <g transform={`rotate(${needleAngle}, ${centerX}, ${centerY})`}>
+                    {/* Needle - Manipulated directly via Ref */}
+                    <g ref={needleRef}>
                         <line
                             x1={centerX}
                             y1={centerY}
                             x2={centerX}
                             y2={centerY - radius + 15}
                             stroke="var(--accent-primary)"
-                            strokeWidth="2"
+                            strokeWidth="2.5"
                             strokeLinecap="round"
-                            opacity="0.9"
                         />
-                        {/* Needle tip */}
-                        <circle
-                            cx={centerX}
-                            cy={centerY - radius + 15}
-                            r="2"
-                            fill="var(--accent-primary)"
-                        />
+                        <circle cx={centerX} cy={centerY - radius + 15} r="2.5" fill="var(--accent-primary)" />
                     </g>
                 </svg>
 
+                {/* Digital Readout - Manipulated directly via Ref */}
                 <div
+                    ref={dbTextRef}
                     className="absolute bottom-3 left-1/2 transform -translate-x-1/2 font-mono text-[10px] px-2 py-0.5 rounded-lg border border-white/5 font-black uppercase tracking-widest"
                     style={{
                         background: 'rgba(0,0,0,0.5)',

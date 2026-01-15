@@ -1,13 +1,33 @@
+
 devices:
   samplerate: 96000
   chunksize: 1024
   capture:
     type: CoreAudio
     channels: 2
-    device: BlackHole 2ch
+    device: "BlackHole 2ch"
     format: FLOAT32LE
   playback:
     type: File
-    filename: /dev/null
+    filename: "/dev/null"
     channels: 2
     format: FLOAT32LE
+mixers:
+  dummy:
+    channels:
+      in: 2
+      out: 2
+    mapping:
+      - dest: 0
+        sources:
+          - channel: 0
+            gain: 0
+            inverted: false
+      - dest: 1
+        sources:
+          - channel: 1
+            gain: 0
+            inverted: false
+pipeline:
+  - type: Mixer
+    name: dummy

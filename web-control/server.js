@@ -38,9 +38,16 @@ const roonController = require('./roon-controller');
 // CoreAudio Sample Rate Detection for BlackHole
 // Polls the system to detect when Roon changes the sample rate
 let lastDetectedSampleRate = null;
-
+let blackHoleRateCache = { rate: null, timestamp: 0 };
 function getBlackHoleSampleRate() {
     if (process.platform !== 'darwin') return null;
+
+    // Cache for 2 seconds to avoid blocking the event loop with system_profiler
+    const now = Date.now();
+    if (now - blackHoleRateCache.timestamp < 2000) {
+        return blackHoleRateCache.rate;
+    }
+
     try {
         const output = require('child_process').execSync(
             'system_profiler SPAudioDataType 2>/dev/null | grep -A 10 "BlackHole 2ch"',
@@ -48,7 +55,10 @@ function getBlackHoleSampleRate() {
         );
         const match = output.match(/Current SampleRate:\s*(\d+)/);
         if (match) {
-            return parseInt(match[1], 10);
+            const rate = parseInt(match[1], 10);
+            blackHoleRateCache = { rate, timestamp: now };
+            lastDetectedSampleRate = rate; // Keep legacy variable updated
+            return rate;
         }
     } catch (e) {
         // Ignore errors
@@ -100,6 +110,18 @@ const dsp = new DSPManager(CAMILLA_ROOT);
 const remoteDsp = new RemoteDSPManager({
     host: 'raspberrypi.local',
     port: 1234
+});
+
+// Forward Remote DSP Levels to Frontend
+remoteDsp.on('levels', (levels) => {
+    // Only broadcast if the active zone is using the Raspberry Pi backend
+    // or if we are investigating why we assumed it wasn't.
+    // For now, let's just broadcast if we have data because LevelProbe (local) 
+    // will likely be silent if we are playing on Remote.
+    if (typeof levelProbe !== 'undefined') {
+        // Optimization: Check if we should prioritize this
+        levelProbe.broadcast(levels);
+    }
 });
 
 // Available backends registry
@@ -216,22 +238,33 @@ class LevelProbe {
         this.macPollInterval = null;
         this.subscribers = new Set();
         this.lastLevels = [-100, -100];
+        this.probeState = 'OFFLINE';
 
         // Watchdog state
         this.shouldBeRunning = false;
+        this.isRestarting = false;
         this.restartTimeout = null;
         this.healthCheckInterval = null;
     }
 
-    start() {
+    async start() {
         this.shouldBeRunning = true; // Intent: User wants it running
         if (this.process) return;
+
+        // Cleanup any orphaned processes on port 5006 first (Mac)
+        if (process.platform === 'darwin') {
+            const { exec } = require('child_process');
+            exec('lsof -ti:5006 | xargs kill -9 2>/dev/null || true', (err) => {
+                if (err) console.log('Probe: Cleanup info:', err.message);
+            });
+        }
 
         // Start health check interval
         if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
         this.healthCheckInterval = setInterval(() => this.checkHealth(), 5000);
 
         console.log('Probe: Starting Level Probe...');
+        this.startTime = Date.now();
 
         try {
             if (isRunningOnPi) {
@@ -274,25 +307,41 @@ class LevelProbe {
                 const currentRate = getBlackHoleSampleRate() || 44100;
                 console.log(`Probe: Spawning camilladsp probe on Mac (BlackHole) on port 5006 using ${currentRate}Hz...`);
                 const probeConfigPath = path.join(CAMILLA_ROOT, 'probe-config.yml');
-                const probeConfig = {
-                    devices: {
-                        samplerate: currentRate,
-                        chunksize: 1024,
-                        capture: {
-                            type: 'CoreAudio',
-                            channels: 2,
-                            device: 'BlackHole 2ch',
-                            format: 'FLOAT32LE'
-                        },
-                        playback: {
-                            type: 'File',
-                            filename: '/dev/null',
-                            channels: 2,
-                            format: 'FLOAT32LE'
-                        }
-                    }
-                };
-                fs.writeFileSync(probeConfigPath, yaml.dump(probeConfig));
+                const probeYaml = `
+devices:
+  samplerate: ${currentRate}
+  chunksize: 1024
+  capture:
+    type: CoreAudio
+    channels: 2
+    device: "BlackHole 2ch"
+    format: FLOAT32LE
+  playback:
+    type: File
+    filename: "/dev/null"
+    channels: 2
+    format: FLOAT32LE
+mixers:
+  dummy:
+    channels:
+      in: 2
+      out: 2
+    mapping:
+      - dest: 0
+        sources:
+          - channel: 0
+            gain: 0
+            inverted: false
+      - dest: 1
+        sources:
+          - channel: 1
+            gain: 0
+            inverted: false
+pipeline:
+  - type: Mixer
+    name: dummy
+`;
+                fs.writeFileSync(probeConfigPath, probeYaml);
 
                 this.process = spawn(path.join(CAMILLA_ROOT, 'camilladsp'), [
                     '-a', '0.0.0.0',
@@ -300,15 +349,19 @@ class LevelProbe {
                     probeConfigPath
                 ]);
 
+                this.isRestarting = false;
+
                 // Capture child instance to avoid race conditions with restarts
                 const child = this.process;
-                child.on('close', (code) => {
-                    console.log(`Probe: Process exited with code ${code}`);
+                child.on('close', (code, signal) => {
+                    console.log(`Probe: Process exited with code ${code}, signal: ${signal}`);
                     if (this.process === child) {
                         this.process = null;
                         this.handleProcessExit();
                     }
                 });
+
+                child.stderr.on('data', (data) => console.error(`Probe err: ${data}`));
 
                 // Wait 1s for camilladsp to start before connecting to its WS
                 setTimeout(() => this.startMacPolling(), 1000);
@@ -330,8 +383,9 @@ class LevelProbe {
             this.macPollInterval = setInterval(() => {
                 if (this.macWs && this.macWs.readyState === WebSocket.OPEN) {
                     this.macWs.send('"GetCaptureSignalPeak"');
+                    this.macWs.send('"GetState"');
                 }
-            }, 200);
+            }, 50);
         });
 
         this.macWs.on('message', (data) => {
@@ -341,6 +395,9 @@ class LevelProbe {
                     const levels = msg.GetCaptureSignalPeak.value;
                     this.lastLevels = levels;
                     this.broadcast(levels);
+                }
+                if (msg.GetState) {
+                    this.probeState = msg.GetState.value;
                 }
             } catch (e) { }
         });
@@ -403,6 +460,15 @@ class LevelProbe {
             clearInterval(this.healthCheckInterval);
             this.healthCheckInterval = null;
         }
+
+        // Close all subscriber WebSockets to force them to reconnect and re-evaluate isRunning
+        console.log(`Probe: Closing ${this.subscribers.size} subscriber connections`);
+        this.subscribers.forEach(ws => {
+            try {
+                ws.close();
+            } catch (e) { }
+        });
+        this.subscribers.clear();
     }
 
     checkHealth() {
@@ -429,11 +495,14 @@ class LevelProbe {
             console.log('Probe: Process died unexpectedly (Crash or Rate Change). Restarting in 2s...');
 
             // Clean up any lingering resources effectively
-            if (this.macWs) { this.macWs.close(); this.macWs = null; }
+            if (this.macWs) { try { this.macWs.close(); } catch (e) { } this.macWs = null; }
             if (this.macPollInterval) { clearInterval(this.macPollInterval); this.macPollInterval = null; }
 
+            if (this.restartTimeout) clearTimeout(this.restartTimeout);
+            this.isRestarting = true;
             this.restartTimeout = setTimeout(() => {
                 console.log('Probe: Executing restart now...');
+                this.isRestarting = false;
                 this.start();
             }, 2000);
         } else {
@@ -446,6 +515,13 @@ class LevelProbe {
 
     broadcast(levels) {
         const message = JSON.stringify(levels);
+
+        // Throttled logging (once every 2 seconds)
+        if (!this.lastLogTime || Date.now() - this.lastLogTime > 2000) {
+            console.log(`Probe: Broadcasting levels: ${message} to ${this.subscribers.size} subscribers`);
+            this.lastLogTime = Date.now();
+        }
+
         this.subscribers.forEach(ws => {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(message);
@@ -455,18 +531,18 @@ class LevelProbe {
 
     addSubscriber(ws) {
         this.subscribers.add(ws);
+        console.log(`Probe: NEW subscriber connected. Size: ${this.subscribers.size}, Running: ${this.isRunning()}`);
 
         // If there was a pending stop, cancel it
         if (this.stopTimeout) {
-            console.log('Probe: New subscriber joined, cancelling pending stop.');
+            console.log('Probe: Cancelling pending stop.');
             clearTimeout(this.stopTimeout);
             this.stopTimeout = null;
         }
 
-        if (this.subscribers.size === 1 && !this.isRunning() && !this.shouldBeRunning) {
-            this.start();
-        } else if (this.shouldBeRunning && !this.process) {
-            // Edge case: Should be running but isn't? 
+        // Force ensure running if we have subscribers
+        if (!this.isRunning()) {
+            console.log(`Probe: Ensuring probe is running for ${this.subscribers.size} subscribers...`);
             this.start();
         }
     }
@@ -481,15 +557,23 @@ class LevelProbe {
                 this.stop();
                 this.stopTimeout = null;
             }, 5000);
+        } else {
+            console.log(`Probe: Subscriber removed. Remaining: ${this.subscribers.size}`);
         }
     }
 
     isRunning() {
-        return !!this.process;
+        return (!!this.process && !this.process.killed) || this.isRestarting;
     }
 }
 
 const levelProbe = new LevelProbe();
+
+// Initial level probe start (Mac)
+if (!isRunningOnPi) {
+    console.log('Server: Initial probe startup for Mac...');
+    levelProbe.start();
+}
 
 // ----------------------------------------------------------------------
 // Synchronization Logic
@@ -536,18 +620,14 @@ function getDspForZone(zoneName) {
         const lowerName = zoneName.toLowerCase();
         if (lowerName.includes('raspberry') || lowerName.includes('pi')) {
             backendId = 'raspi';
-        } else if (lowerName.includes('camilla') || lowerName.includes('local')) {
+        } else if (lowerName.includes('camilla') || lowerName.includes('local') || lowerName.includes('probe') || lowerName.includes('analyzer')) {
             backendId = 'local';
         }
     }
 
     const backend = DSP_BACKENDS[backendId];
-    if (backend) {
-        console.log(`Server: Using ${backend.name} DSPManager (Zone: "${zoneName || 'active'}", Backend: ${backendId})`);
-        return backend.manager;
-    }
+    if (backend) return backend.manager;
 
-    console.log(`Server: Using local DSPManager (fallback)`);
     return dsp;
 }
 
@@ -561,7 +641,7 @@ function getBackendIdForZone(zoneName) {
     if (zoneName) {
         const lower = zoneName.toLowerCase();
         if (lower.includes('raspberry') || lower.includes('pi')) return 'raspi';
-        if (lower.includes('camilla') || lower.includes('local')) return 'local';
+        if (lower.includes('camilla') || lower.includes('local') || lower.includes('probe') || lower.includes('analyzer')) return 'local';
     }
 
     return null; // Explicitly null if not a DSP zone
@@ -598,6 +678,7 @@ const MIN_RESTART_INTERVAL = 5000;  // Minimum 5 seconds between restarts
 // ----------------------------------------------------------------------
 async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
     isProcessingSampleRateChange = true;
+    lastDetectedSampleRate = newRate; // Update global state
 
     // Determine which zone we're dealing with
     let checkZone = zone;
@@ -650,6 +731,12 @@ async function handleSampleRateChange(newRate, source = 'Auto', zone = null) {
 
         // ============ PHASE 2: RESTART DSP ============
         console.log(`Server: [Transition] Phase 2: Restarting DSP at ${newRate}Hz (${zoneName === 'Raspberry' ? 'Remote' : 'Local'})...`);
+
+        // Stop Level Probe if running to avoid resource conflict
+        if (levelProbe.isRunning()) {
+            console.log('Server: [Transition] Stopping Level Probe for main DSP startup...');
+            levelProbe.stop();
+        }
 
         // Record restart time for debounce
         lastRestartTime = Date.now();
@@ -796,16 +883,42 @@ roonController.onSampleRateChange = async (newRate, zone) => {
             return;
         }
 
+        // Rate change check logic
+        const now = Date.now();
+        if (this.lastActiveProbeTime && now - this.lastActiveProbeTime < 10000) {
+            return;
+        }
+        this.lastActiveProbeTime = now;
+
         // First, check hardware rate WITHOUT stopping DSP
         const hwRate = getBlackHoleSampleRate();
-        console.log(`Server: [ActiveProbe] Pre-check - Hardware: ${hwRate}Hz, DSP: ${activeDsp.currentState.sampleRate}Hz`);
 
-        if (hwRate && hwRate !== activeDsp.currentState.sampleRate) {
-            console.log(`Server: [ActiveProbe] Rate mismatch. Unlocking device...`);
+        // Use lastDetectedSampleRate (Probe rate) as reference if DSP is not running
+        const currentEffectiveRate = activeDsp.isRunning() ? activeDsp.currentState.sampleRate : lastDetectedSampleRate;
+        const isProbeRunning = levelProbe.isRunning();
+
+        // 5s cooldown for ActiveProbe to avoid fighting with startup
+        const timeSinceProbeStart = Date.now() - (levelProbe.startTime || 0);
+        const probeRecentlyStarted = timeSinceProbeStart < 5000;
+
+        console.log(`Server: [ActiveProbe] Pre-check - Hardware: ${hwRate}Hz, Effective: ${currentEffectiveRate}Hz (DSP: ${activeDsp.currentState.sampleRate}Hz, Probe: ${lastDetectedSampleRate}Hz, State: ${levelProbe.probeState}), Running: ${isProbeRunning}, Restarting: ${levelProbe.isRestarting}`);
+
+        if (hwRate && hwRate !== currentEffectiveRate && !probeRecentlyStarted) {
+            console.log(`Server: [ActiveProbe] Rate mismatch (HW: ${hwRate}Hz != Eff: ${currentEffectiveRate}Hz). Restarting...`);
+            levelProbe.stop(); // Ensure probe is down
             if (activeDsp.isRunning()) await activeDsp.stop();
             await new Promise(r => setTimeout(r, 1500));
             const detected = getBlackHoleSampleRate();
             if (detected) handleSampleRateChange(detected, 'ActiveProbe', zoneName);
+        } else if (activeDsp.isRunning()) {
+            // If DSP is running, Level Probe MUST be OFF
+            if (isProbeRunning && !levelProbe.isRestarting) {
+                console.log('Server: [ActiveProbe] DSP is running, stopping Level Probe to prevent conflict.');
+                levelProbe.stop();
+            }
+        } else if (!isProbeRunning && levelProbe.shouldBeRunning) {
+            console.log(`Server: [ActiveProbe] Probe is down but should be running. Restarting probe...`);
+            levelProbe.start();
         }
 
     } else if (newRate && newRate !== activeDsp.currentState.sampleRate) {
@@ -1171,6 +1284,7 @@ app.get('/api/status', (req, res) => {
         preamp: activeDsp.currentState.preamp || 0,
         // Diagnostic: rate mismatch detection
         rateMismatch: hardwareRate && dspRate && hardwareRate !== dspRate,
+        levelSubscribers: levelProbe.subscribers.size,
         roonSampleRate: lastDetectedSampleRate,
         // Zone and backend info for frontend sync
         backend: backendId,
@@ -1576,8 +1690,19 @@ async function getArtistInfo(artist, album) {
     }
 }
 
+// Lyrics Cache to prevent redundant API calls and event loop stalls
+const lyricsCache = new Map();
+const LYRICS_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
+
 const getLyricsFromLrcLib = async (track, artist) => {
     if (!artist || !track) return null;
+
+    const cacheKey = `${artist.toLowerCase()}:${track.toLowerCase()}`;
+    const cached = lyricsCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < LYRICS_CACHE_MAX_AGE)) {
+        console.log(`Lyrics: [Cache Hit] for "${artist}" - "${track}"`);
+        return cached.data;
+    }
 
     // 1. Less aggressive cleaning
     let cleanTrack = track
@@ -1624,7 +1749,9 @@ const getLyricsFromLrcLib = async (track, artist) => {
 
     if (isValid(data)) {
         console.log(`Lyrics: Strategy A Success`);
-        return { plain: data.plainLyrics, synced: data.syncedLyrics, instrumental: data.instrumental };
+        const result = { plain: data.plainLyrics, synced: data.syncedLyrics, instrumental: data.instrumental };
+        lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        return result;
     }
     console.log(`Lyrics: Strategy A Failed`);
 
@@ -1644,13 +1771,19 @@ const getLyricsFromLrcLib = async (track, artist) => {
 
         if (isValid(bestMatch)) {
             console.log(`Lyrics: Strategy B Success (Best Match: ${bestMatch.artistName} - ${bestMatch.trackName})`);
-            return { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
+            const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
+            lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
+            return result;
         }
     }
     console.log(`Lyrics: Strategy B Failed`);
 
     // Strategies C, D, E disabled for performance - max 3s for lyrics
     console.log(`Lyrics: Giving up after A+B for "${artist}" - "${track}"`);
+
+    // Cache the failure (as null) to prevent redundant attempts
+    lyricsCache.set(cacheKey, { data: null, timestamp: Date.now() });
+
     return null;
 };
 
@@ -2421,16 +2554,24 @@ function checkHybridGroupMute() {
     }
 }
 
-// Global broadcast for Roon changes
+// Global broadcast for Roon changes - debounced to prevent frontend storms
+let roonUpdateTimeout = null;
 roonController.init((info) => {
-    // Check for hybrid group conditions on every update
-    checkHybridGroupMute();
+    if (roonUpdateTimeout) clearTimeout(roonUpdateTimeout);
+    roonUpdateTimeout = setTimeout(() => {
+        // Check for hybrid group conditions on every update
+        checkHybridGroupMute();
+        broadcast('metadata_update', { source: 'roon', info });
+        roonUpdateTimeout = null;
+    }, 100); // 100ms debounce
+});
 
-    // We can't easily calculate the full UI info (signalPath etc) here without 
-    // duplicating logic from /api/media/info. For now, we'll signal a REFRESH
-    // or send the raw info so the frontend can choose to fetch full details or use raw.
-    // Better yet: send a 'metadata_update' type.
-    broadcast('metadata_update', { source: 'roon', info });
+process.on('uncaughtException', (err) => {
+    console.error('CRITICAL: Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('CRITICAL: Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
