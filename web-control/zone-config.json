@@ -6,6 +6,7 @@
     "defaults": {
         "dspBackend": "local"
     },
-    "lastActiveZoneId": "1601d9cd5ed1c6d91443bb75c3b21d6d46d9",
-    "lastActiveZoneName": "D50 III with Probe + 1"
+    "lastActiveZoneId": "160115cdc9cc61834de96e3541165fa8a833",
+    "lastActiveZoneName": "artis nova",
+    "autoMuteEnabled": false
 }

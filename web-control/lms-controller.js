@@ -26,7 +26,7 @@ class LMSController {
                 id: 1,
                 method: 'slim.request',
                 params: [this.playerId, params]
-            }, { timeout: 2000 });
+            }, { timeout: 1000 });
             return response.data;
         } catch (err) {
             console.error('LMS Error:', err.message);
@@ -40,7 +40,7 @@ class LMSController {
                 id: 1,
                 method: 'slim.request',
                 params: ["", ["players", 0, 100]]
-            }, { timeout: 2000 });
+            }, { timeout: 1000 });
 
             if (!response.data || !response.data.result || !response.data.result.players_loop) {
                 return [];

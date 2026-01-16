@@ -1,5 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import AnalogVUMeter from './AnalogVUMeter';
+import { RefreshCw } from 'lucide-react';
+import axios from 'axios';
 
 interface Props {
     isRunning: boolean;
@@ -14,6 +16,7 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
     const [levels, setLevels] = useState({ left: -60, right: -60 });
     const [status, setStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
     const [silenceDuration, setSilenceDuration] = useState(0);
+    const [isReconnecting, setIsReconnecting] = useState(false);
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastSignalTimeRef = useRef<number>(Date.now());
@@ -32,157 +35,139 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
         onLevelsChangeRef.current = onLevelsChange;
     }, [isRunning, wsUrl, onLevelsChange]);
 
-    useEffect(() => {
-        let pollInterval: any = null;
-        let isCleaningUp = false;
+    const cleanup = () => {
+        if (wsRef.current) {
+            wsRef.current.onclose = null;
+            wsRef.current.onerror = null;
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+    };
 
-        const cleanup = () => {
-            if (wsRef.current) {
-                wsRef.current.onclose = null;
-                wsRef.current.onerror = null;
-                wsRef.current.close();
+    const connect = (isCleaningUp: { current: boolean }) => {
+        if (isCleaningUp.current) return;
+        if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+
+        cleanup();
+        setStatus('connecting');
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const currentUrl = `${protocol}//${window.location.host}/ws/levels`;
+
+        console.log(`VUMeter: Connecting to unified proxy: ${currentUrl}`);
+
+        try {
+            const ws = new WebSocket(currentUrl);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                if (isCleaningUp.current) return;
+                console.log(`VUMeter: CONNECTED to proxy`);
+                setStatus('connected');
+            };
+
+            ws.onmessage = (event) => {
+                if (isCleaningUp.current) return;
+                try {
+                    const data = JSON.parse(event.data);
+
+                    // Proxy format is usually just the level array [L, R]
+                    // but we handle standard Camilla format too for resilience
+                    const value = Array.isArray(data) ? data : (data.GetCaptureSignalPeak ? data.GetCaptureSignalPeak.value : null);
+
+                    if (value && Array.isArray(value) && value.length >= 2) {
+                        const [left, right] = value;
+                        const leftNum = typeof left === 'number' ? left : parseFloat(left);
+                        const rightNum = typeof right === 'number' ? right : parseFloat(right);
+
+                        if (isNaN(leftNum) || isNaN(rightNum)) return;
+
+                        const newLevels = {
+                            left: Math.max(-100, leftNum),
+                            right: Math.max(-100, rightNum)
+                        };
+
+                        setLevels(newLevels);
+                        onLevelsChangeRef.current?.(newLevels.left, newLevels.right);
+
+                        if (newLevels.left > -100 || newLevels.right > -100) {
+                            lastSignalTimeRef.current = Date.now();
+                            setSilenceDuration(0);
+                        } else {
+                            const silenceSeconds = Math.floor((Date.now() - lastSignalTimeRef.current) / 1000);
+                            setSilenceDuration(silenceSeconds);
+                        }
+                    }
+                } catch (e) {
+                    console.error('VUMeter: Parse error', e);
+                }
+            };
+
+            ws.onclose = () => {
+                if (isCleaningUp.current) return;
                 wsRef.current = null;
-            }
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-                reconnectTimeoutRef.current = null;
-            }
+                setStatus('disconnected');
+                if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = setTimeout(() => connect(isCleaningUp), 2000);
+            };
+
+            ws.onerror = (err) => {
+                if (isCleaningUp.current) return;
+                console.error('VUMeter: WS Error', err);
+                ws.close();
+            };
+        } catch (e) {
+            if (isCleaningUp.current) return;
+            console.error('VUMeter: Connection error', e);
+            setStatus('disconnected');
+            if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = setTimeout(() => connect(isCleaningUp), 3000);
+        }
+    };
+
+    useEffect(() => {
+        const isCleaningUp = { current: false };
+        connect(isCleaningUp);
+
+        return () => {
+            isCleaningUp.current = true;
+            cleanup();
         };
+    }, []);
 
-        const connect = (overrideUrl?: string) => {
-            if (isCleaningUp) return;
-            // Prevent multiple concurrent connection attempts
-            if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
-                return;
-            }
+    // Manual reconnect handler
+    const handleReconnect = async () => {
+        if (isReconnecting) return;
 
+        setIsReconnecting(true);
+        console.log('VUMeter: Manual reconnect triggered');
+
+        try {
+            // Call backend to restart probe
+            await axios.post('/api/probe/restart');
+
+            // Close current WS and reconnect
             cleanup();
             setStatus('connecting');
 
-            // Determine which URL to use
-            let currentUrl = overrideUrl;
-            if (!currentUrl) {
-                const hostname = window.location.hostname;
-                if (isRunningRef.current) {
-                    // For main DSP, we need port 5005
-                    currentUrl = `ws://${hostname}:5005`;
-                } else {
-                    // For probe, we use the server port (3000)
-                    currentUrl = `ws://${window.location.host}/ws/levels`;
-                }
-            }
+            // Wait a moment for backend to restart
+            await new Promise(r => setTimeout(r, 1000));
 
-            console.warn(`VUMeter: ATTEMPTING CONNECTION to ${currentUrl} (isRunning: ${isRunningRef.current})`);
-
-            try {
-                const ws = new WebSocket(currentUrl);
-                wsRef.current = ws;
-
-                ws.onopen = () => {
-                    if (isCleaningUp) return;
-                    console.warn(`VUMeter: CONNECTED to ${currentUrl}`);
-                    setStatus('connected');
-                };
-
-                ws.onmessage = (event) => {
-                    if (isCleaningUp) return;
-                    try {
-                        const data = JSON.parse(event.data);
-
-                        // Standard CamillaDSP response is an array of peak values [L, R]
-                        // OR if it's our server probe, it's also an array [L, R]
-                        const value = data.GetCaptureSignalPeak ? data.GetCaptureSignalPeak.value : (Array.isArray(data) ? data : null);
-
-                        if (value && Array.isArray(value) && value.length >= 2) {
-                            const [left, right] = value;
-
-                            // Ensure we have numbers
-                            const leftNum = typeof left === 'number' ? left : (typeof left === 'string' ? parseFloat(left) : -60);
-                            const rightNum = typeof right === 'number' ? right : (typeof right === 'string' ? parseFloat(right) : -60);
-
-                            if (isNaN(leftNum) || isNaN(rightNum)) return;
-
-                            const newLevels = {
-                                left: Math.max(-60, leftNum),
-                                right: Math.max(-60, rightNum)
-                            };
-
-                            setLevels(newLevels);
-                            onLevelsChangeRef.current?.(newLevels.left, newLevels.right);
-
-                            if (newLevels.left > -60 || newLevels.right > -60) {
-                                lastSignalTimeRef.current = Date.now();
-                                setSilenceDuration(0);
-                            } else {
-                                const silenceSeconds = Math.floor((Date.now() - lastSignalTimeRef.current) / 1000);
-                                setSilenceDuration(silenceSeconds);
-                            }
-                        } else if (value && Array.isArray(value) && value.length === 0) {
-                            // CamillaDSP sometimes sends [] if just starting
-                            return;
-                        } else {
-                            // Only log once every few seconds for unexpected format
-                            const win = window as any;
-                            if (!win._lastVuErr || Date.now() - win._lastVuErr > 5000) {
-                                console.warn('VUMeter: Unexpected data format:', data);
-                                win._lastVuErr = Date.now();
-                            }
-                        }
-                    } catch (e) {
-                        console.error('VUMeter: Parse error', e);
-                    }
-                };
-
-                ws.onclose = () => {
-                    if (isCleaningUp) return;
-                    console.log('VUMeter: Closed');
-                    wsRef.current = null;
-                    setStatus('disconnected');
-
-                    // Retry logic: toggle between DSP and Probe if needed
-                    const isProbe = currentUrl.includes('/ws/levels');
-                    let nextUrl = currentUrl;
-
-                    if (!isProbe && !isRunningRef.current) {
-                        nextUrl = `ws://${window.location.hostname}:3000/ws/levels`;
-                    } else if (isProbe && isRunningRef.current) {
-                        nextUrl = wsUrlRef.current;
-                    }
-
-                    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-                    reconnectTimeoutRef.current = setTimeout(() => {
-                        connect(nextUrl);
-                    }, 2000);
-                };
-
-                ws.onerror = (err) => {
-                    if (isCleaningUp) return;
-                    console.error('VUMeter: WS Error', err);
-                    ws.close();
-                };
-            } catch (e) {
-                if (isCleaningUp) return;
-                console.error('VUMeter: Error', e);
-                setStatus('disconnected');
-                if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-                reconnectTimeoutRef.current = setTimeout(() => connect(), 3000);
-            }
-        };
-
-        pollInterval = setInterval(() => {
-            if (wsRef.current?.readyState === WebSocket.OPEN && wsRef.current.url.includes(':5005')) {
-                wsRef.current.send('"GetCaptureSignalPeak"');
-            }
-        }, 50);
-
-        connect();
-
-        return () => {
-            isCleaningUp = true;
-            clearInterval(pollInterval);
-            cleanup();
-        };
-    }, [isRunning, wsUrl]); // Re-run when source or run state changes
+            // Reconnect WebSocket
+            const isCleaningUp = { current: false };
+            connect(isCleaningUp);
+        } catch (err) {
+            console.error('VUMeter: Reconnect failed', err);
+        } finally {
+            setIsReconnecting(false);
+        }
+    };
 
     // Determine status badge
     const getStatusBadge = () => {
@@ -203,8 +188,23 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                         Analog Monitoring
                     </div>
                 </div>
-                <div className={`px-2 py-0.5 rounded-lg text-[10px] font-black tracking-widest ${statusBadge.className}`}>
-                    {statusBadge.text}
+                <div className="flex items-center gap-2">
+                    {/* Reconnect Button */}
+                    <button
+                        onClick={handleReconnect}
+                        disabled={isReconnecting}
+                        className={`p-1.5 rounded-lg border transition-all duration-200 ${isReconnecting
+                                ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 cursor-wait'
+                                : 'bg-white/5 text-themed-muted border-white/10 hover:bg-white/10 hover:text-themed-primary hover:border-white/20'
+                            }`}
+                        title="Reconnect VU Meters"
+                    >
+                        <RefreshCw size={12} className={isReconnecting ? 'animate-spin' : ''} />
+                    </button>
+                    {/* Status Badge */}
+                    <div className={`px-2 py-0.5 rounded-lg text-[10px] font-black tracking-widest ${statusBadge.className}`}>
+                        {statusBadge.text}
+                    </div>
                 </div>
             </div>
 

@@ -135,6 +135,7 @@ class DSPManager {
 
     generateConfig(filterData, options = {}) {
         const sampleRate = options.sampleRate || 96000;
+        const isBypass = options.bypass || false;
         // bitDepth is now informational only - CoreAudio auto-selects format
 
         const config = {
@@ -149,17 +150,19 @@ class DSPManager {
                 } : {
                     type: 'CoreAudio',
                     device: 'BlackHole 2ch',
-                    channels: 2
+                    channels: 2,
+                    format: 'FLOAT32LE'
                 },
                 playback: this.isLinux ? {
                     type: 'Alsa',
                     device: `hw:${this.findBestOutputDevice()}`,
                     channels: 2,
-                    format: 'S32LE'
+                    format: options.format || 'S32LE'
                 } : {
                     type: 'CoreAudio',
                     device: this.findBestOutputDevice(),
-                    channels: 2
+                    channels: 2,
+                    format: options.format || 'FLOAT32LE'
                 }
             },
             filters: {},
@@ -177,19 +180,44 @@ class DSPManager {
         }
 
         // Add Filters
-        filterData.filters.forEach((f, i) => {
-            const name = `filter${i + 1}`;
-            config.filters[name] = {
-                type: 'Biquad',
-                parameters: {
-                    type: f.type,
-                    freq: f.freq,
-                    gain: f.gain,
-                    q: f.q
+        if (filterData && filterData.filters) {
+            filterData.filters.forEach((f, i) => {
+                const name = `filter${i + 1}`;
+                config.filters[name] = {
+                    type: 'Biquad',
+                    parameters: {
+                        type: f.type,
+                        freq: f.freq,
+                        gain: f.gain,
+                        q: f.q
+                    }
+                };
+                pipelineNames.push(name);
+            });
+        }
+
+        // BYPASS MODE / Empty Pipeline Protection
+        // CamillaDSP fails if there's no filters at all.
+        // If we're in bypass or have no filters, add a dummy 0dB gain filter.
+        if (isBypass || pipelineNames.length === 0) {
+            if (!config.filters['volume']) {
+                config.filters['volume'] = {
+                    type: 'Gain',
+                    parameters: { gain: 0.0 }
+                };
+                // In pure bypass, we only want the volume filter
+                if (isBypass) {
+                    // Clear any other filters that might have been added
+                    config.pipeline = [{
+                        type: 'Filter',
+                        channels: [0, 1],
+                        names: ['volume']
+                    }];
+                    return yaml.dump(config);
                 }
-            };
-            pipelineNames.push(name);
-        });
+                pipelineNames.push('volume');
+            }
+        }
 
         // Pipeline
         // Apply to both channels [0, 1]? 
@@ -204,15 +232,29 @@ class DSPManager {
     }
 
     async start(filterData, options = {}) {
+        if (this.isStarting && !options.isFallback) {
+            console.log('DSPManager: Start ignored - already starting');
+            return Promise.resolve(false);
+        }
+        this.isStarting = true;
+
         // ALWAYS stop and wait before starting to ensure audio devices are released
-        await this.stop();
+        // Check if we are already doing a fallback restart - if so, don't full stop if possible, 
+        // but we likely need to to be safe. 
+        if (!options.isFallback) {
+            await this.stop();
+        } else {
+            // If fallback, we might have just crashed, so process is null. 
+            // Just ensure cleanup logic runs if needed.
+            if (this.process) await this.stop();
+        }
 
         // Store filter data for potential sample rate restarts
         this.lastFilterData = filterData;
         this.lastOptions = { ...options };
         this.shouldBeRunning = true; // Mark as intended to be running
 
-        return new Promise((resolve, reject) => {
+        const startPromise = new Promise((resolve, reject) => {
             try {
                 const configYaml = this.generateConfig(filterData, options);
                 const configPath = path.join(this.baseDir, 'temp_config.yml');
@@ -240,17 +282,24 @@ class DSPManager {
 
                 this.currentState = {
                     running: true,
-                    bypass: false,
+                    bypass: options.bypass || false,
                     sampleRate: options.sampleRate,
-                    bitDepth: options.bitDepth,
-                    presetName: options.presetName || 'Manual',
-                    filtersCount: filterData.filters?.length || 0,
-                    preamp: filterData.preamp || 0,
+                    bitDepth: options.bitDepth || 24,
+                    presetName: options.presetName || (options.bypass ? 'BYPASS' : 'Manual'),
+                    filtersCount: filterData?.filters?.length || 0,
+                    preamp: filterData?.preamp || 0,
                     device: options.device || (this.isLinux ? 'D50 III' : this.findBestOutputDevice())
                 };
 
                 this.process.stdout.on('data', (data) => console.log(`DSP out: ${data}`));
-                this.process.stderr.on('data', (data) => console.error(`DSP err: ${data}`));
+                this.process.stderr.on('data', (data) => {
+                    const errStr = data.toString();
+                    console.error(`DSP err: ${errStr}`);
+                    this.healthState.lastError = errStr;
+                    if (errStr.includes('Failed to find matching physical playback format')) {
+                        this.healthState.formatError = true;
+                    }
+                });
 
                 this.process.on('close', (code) => {
                     console.log(`DSP exited with code ${code}`);
@@ -265,18 +314,43 @@ class DSPManager {
                 // Start Watchdog to ensure persistence
                 this.startWatchdog();
 
-                this.saveState({ running: true, bypass: false, presetName: options.presetName });
+                this.saveState({
+                    running: true,
+                    bypass: options.bypass || false,
+                    presetName: this.currentState.presetName
+                });
 
                 // Give it a moment to verify it hasn't crashed immediately
-                setTimeout(() => {
-                    if (this.isRunning()) resolve(true);
-                    else reject(new Error('Process exited immediately'));
+                setTimeout(async () => {
+                    if (this.isRunning()) {
+                        resolve(true);
+                    } else {
+                        // Check if we can try a fallback format on Mac
+                        if (!this.isLinux && this.healthState.formatError && !options.isFallback) {
+                            console.log('DSPManager: Detected format error. Trying S32LE fallback...');
+                            try {
+                                const fallbackOptions = { ...options, format: 'S32LE', isFallback: true };
+                                await this.start(filterData, fallbackOptions);
+                                resolve(true);
+                            } catch (e) {
+                                reject(e);
+                            }
+                        } else {
+                            reject(new Error('Process exited immediately'));
+                        }
+                    }
                 }, 1000);
 
             } catch (err) {
                 reject(err);
             }
         });
+
+        startPromise.finally(() => {
+            this.isStarting = false;
+        });
+
+        return startPromise;
     }
 
     startWatchdog() {
@@ -296,7 +370,8 @@ class DSPManager {
                 // Circuit breaker: max 5 restarts in 5 minutes
                 if (this.healthState.restartCount >= 5) {
                     console.log('Watchdog: Circuit breaker triggered - too many restarts. Manual intervention required.');
-                    this.healthState.lastError = 'Circuit breaker: too many restart attempts';
+                    this.healthState.lastError = 'Circuit breaker: too many restart attempts. ' + (this.healthState.formatError ? 'Format mismatch detected.' : '');
+                    this.shouldBeRunning = false; // Stop trying automatically
                     return;
                 }
 
@@ -387,7 +462,7 @@ class DSPManager {
 
         try {
             const WebSocket = require('ws');
-            const ws = new WebSocket('ws://localhost:5005');
+            const ws = new WebSocket('ws://127.0.0.1:5005');
 
             const timeout = setTimeout(() => {
                 ws.terminate();
@@ -497,6 +572,7 @@ class DSPManager {
     }
 
     async stop() {
+        console.log('DSPManager: Stop called from:', new Error().stack);
         this.shouldBeRunning = false; // Mark as explicitly stopped by user/system
         this.saveState({ running: false });
 
@@ -508,11 +584,24 @@ class DSPManager {
             this.process = null;
         }
         this.currentState.running = false;
-        // Force kill any other instances that might be lingering
+        // Force kill any other instances that might be lingering on port 5005
         const { execSync } = require('child_process');
         try {
-            execSync('pkill -9 camilladsp');
-            console.log('All camilladsp processes force-killed.');
+            console.log('DSPManager: Cleaning up port 5005...');
+            if (process.platform === 'darwin') {
+                // Use pkill instead of lsof to avoid hanging on network mounts
+                // pkill -f matches full argument list. 
+                try {
+                    execSync('pkill -9 -f "camilladsp.*5005" || true');
+                    console.log('Main DSP cleanup (pkill) complete.');
+                } catch (e) {
+                    // pkill returns non-zero if no process found, which is fine
+                }
+            } else {
+                // On Linux we might still need pkill if not using multiple instances,
+                // but let's be safer and check for 5005 there too if netstat/ss available
+                execSync('pkill -9 camilladsp');
+            }
         } catch (e) {
             // No process found, it's fine
         }
@@ -588,97 +677,11 @@ class DSPManager {
 
     // Start in bypass mode (no filters, just pass-through)
     async startBypass(sampleRate) {
-        // Stop any running instance first
-        // Note: stop() sets running=false in state, so we must set it back to true after
-        await this.stop();
-
-        this.shouldBeRunning = true;
-        this.saveState({ running: true, bypass: true }); // Persist BYPASS intent
-
-        return new Promise((resolve, reject) => {
-            try {
-                // Read and modify bypass config with current sample rate
-                // For Linux, we override the whole devices section to ensure ALSA
-                const config = {
-                    devices: {
-                        samplerate: sampleRate || 96000,
-                        chunksize: 4096,
-                        capture: this.isLinux ? {
-                            type: 'Alsa',
-                            device: 'hw:Loopback,1',
-                            channels: 2,
-                            format: 'S32LE'
-                        } : {
-                            type: 'CoreAudio',
-                            device: 'BlackHole 2ch',
-                            channels: 2
-                        },
-                        playback: this.isLinux ? {
-                            type: 'Alsa',
-                            device: 'hw:III',
-                            channels: 2,
-                            format: 'S32LE'
-                        } : {
-                            type: 'CoreAudio',
-                            device: this.findBestOutputDevice(),
-                            channels: 2
-                        }
-                    },
-                    filters: {
-                        volume: {
-                            type: 'Gain',
-                            parameters: { gain: 0.0 }
-                        }
-                    },
-                    pipeline: [{
-                        type: 'Filter',
-                        channels: [0, 1],
-                        names: ['volume']
-                    }]
-                };
-
-                const configPath = path.join(this.baseDir, 'temp_config.yml');
-                fs.writeFileSync(configPath, yaml.dump(config));
-
-                console.log(`Starting CamillaDSP in BYPASS mode at ${config.devices.samplerate}Hz (${this.isLinux ? 'ALSA' : 'CoreAudio'})`);
-
-                const dspArgs = ['-a', '0.0.0.0', '-p', '5005', configPath];
-                this.process = spawn(this.dspPath, dspArgs, {
-                    cwd: this.baseDir
-                });
-
-                this.currentState = {
-                    running: true,
-                    bypass: true,
-                    sampleRate: config.devices.samplerate,
-                    bitDepth: 24,
-                    presetName: 'BYPASS',
-                    filtersCount: 0,
-                    preamp: 0,
-                    device: config.devices.playback.device
-                };
-
-                this.process.stdout.on('data', (data) => console.log(`DSP out: ${data}`));
-                this.process.stderr.on('data', (data) => console.error(`DSP err: ${data}`));
-
-                this.process.on('close', (code) => {
-                    console.log(`DSP exited with code ${code}`);
-                    this.process = null;
-                });
-
-                this.process.on('error', (err) => {
-                    console.error('Failed to start DSP:', err);
-                    reject(err);
-                });
-
-                setTimeout(() => {
-                    if (this.isRunning()) resolve(true);
-                    else reject(new Error('Process exited immediately'));
-                }, 1000);
-
-            } catch (err) {
-                reject(err);
-            }
+        console.log(`DSPManager: startBypass requested at ${sampleRate}Hz`);
+        return this.start({ filters: [], preamp: 0 }, {
+            sampleRate,
+            bypass: true,
+            presetName: 'BYPASS'
         });
     }
 

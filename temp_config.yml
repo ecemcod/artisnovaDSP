@@ -5,14 +5,21 @@ devices:
     type: CoreAudio
     device: BlackHole 2ch
     channels: 2
+    format: FLOAT32LE
   playback:
     type: CoreAudio
     device: D50 III
     channels: 2
-filters: {}
+    format: S32LE
+filters:
+  volume:
+    type: Gain
+    parameters:
+      gain: 0
 pipeline:
   - type: Filter
     channels:
       - 0
       - 1
-    names: []
+    names:
+      - volume

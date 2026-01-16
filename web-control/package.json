@@ -18,5 +18,8 @@
     "node-roon-api-transport": "github:roonlabs/node-roon-api-transport",
     "sqlite3": "^5.1.7",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "pm2": "^6.0.14"
   }
 }

@@ -473,6 +473,9 @@ function App() {
             if (message.data?.source === mediaSource || !message.data?.source) {
               console.log('App: Relevant metadata update received via WS');
               fetchNowPlaying();
+              if (message.data?.source === 'roon') {
+                fetchMediaZones(); // Refresh zones when Roon update happens
+              }
             } else {
               console.log(`App: Ignoring background metadata update from ${message.data?.source}`);
             }
@@ -500,17 +503,17 @@ function App() {
   }, []);
 
   const isFetchingRef = useRef(false);
-  const fetchNowPlaying = async () => {
+  const fetchNowPlaying = useCallback(async () => {
     if (isFetchingRef.current) return;
     try {
       isFetchingRef.current = true;
-      const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`, { timeout: 5000 });
+      const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`, { timeout: 3000 });
       if (res.data && !res.data.error) {
         // TRACK CHANGE: Full update
         if (res.data.track !== nowPlaying.track) {
           console.log(`App: Track changed to "${res.data.track}". Full state update.`);
-          setNowPlaying({
-            ...nowPlaying,
+          setNowPlaying(prev => ({
+            ...prev,
             ...res.data,
             state: res.data.state || 'unknown',
             track: res.data.track || '',
@@ -518,17 +521,19 @@ function App() {
             album: res.data.album || '',
             position: res.data.position || 0,
             duration: res.data.duration || 0
-          });
+          }));
           setArtworkRetryKey(0); // Reset retry on track change
           fetchLyrics(res.data.track, res.data.artist, res.data.device);
         } else {
           // SAME TRACK: Only update dynamic fields (position, state, signalPath)
-          // STABILITY FIX: Do NOT overwrite artist/album unless they actually changed
           setNowPlaying(prev => {
-            // Preserve existing artist/album if the incoming data is the same
-            const newArtist = res.data.artist !== prev.artist ? res.data.artist : prev.artist;
-            const newAlbum = res.data.album !== prev.album ? res.data.album : prev.album;
-            const newArtworkUrl = res.data.artworkUrl !== prev.artworkUrl ? res.data.artworkUrl : prev.artworkUrl;
+            // Stability checks - only update if actually different to minimize renders
+            const stateChanged = res.data.state !== prev.state;
+            const posChanged = Math.abs((res.data.position || 0) - prev.position) > 1;
+            const pathChanged = JSON.stringify(res.data.signalPath) !== JSON.stringify(prev.signalPath);
+            const artworkChanged = res.data.artworkUrl !== prev.artworkUrl;
+
+            if (!stateChanged && !posChanged && !pathChanged && !artworkChanged) return prev;
 
             return {
               ...prev,
@@ -536,30 +541,27 @@ function App() {
               position: res.data.position || 0,
               duration: res.data.duration || 0,
               signalPath: res.data.signalPath,
-              artist: newArtist,
-              album: newAlbum,
-              artworkUrl: newArtworkUrl,
-              style: res.data.style,
-              device: res.data.device
+              artist: res.data.artist || prev.artist,
+              album: res.data.album || prev.album,
+              artworkUrl: res.data.artworkUrl || prev.artworkUrl,
+              style: res.data.style || prev.style,
+              device: res.data.device || prev.device
             };
           });
         }
       }
     } catch (err: any) {
-      console.warn('App: Fetch NowPlaying failed:', err.message);
+      // console.warn('App: Fetch NowPlaying failed:', err.message);
     } finally {
       isFetchingRef.current = false;
     }
-  };
+  }, [mediaSource, nowPlaying.track]); // Dependencies for track change detection
 
   useEffect(() => {
-    // Initial fetch
     fetchNowPlaying();
-
-    // Polling as safety backup (3 seconds instead of 1 if we have WS, but let's keep 2s for now)
     const interval = setInterval(fetchNowPlaying, 2000);
     return () => clearInterval(interval);
-  }, [mediaSource]); // Only re-run when source changes
+  }, [fetchNowPlaying]); // Stability: depends only on the memoized callback
 
   const fetchLyrics = async (track: string, artist: string, device?: string) => {
     if (!track || !artist) {
@@ -644,101 +646,98 @@ function App() {
     } catch { }
   };
 
-  useEffect(() => {
-    loadPresets();
-    checkStatus();
-    fetchQueue();
-    const statusInterval = setInterval(checkStatus, 1000);
-    const queueInterval = setInterval(fetchQueue, 5000);
-    return () => { clearInterval(statusInterval); clearInterval(queueInterval); };
-  }, [mediaSource, nowPlaying.track]);
+
 
   const loadPresets = async () => { try { const res = await axios.get(`${API_URL}/presets`); setPresets(res.data || []); } catch { } };
 
   // Track if we've already attempted auto-start to avoid repeated attempts
   const hasAutoStartedRef = useRef(false);
 
-  const checkStatus = async () => {
+  const checkStatus = useCallback(async () => {
     try {
       const res = await axios.get(`${API_URL}/status`);
-      setIsRunning(res.data.running);
+
+      // Update basic states only if they changed to minimize renders
+      setIsRunning(prev => prev !== res.data.running ? res.data.running : prev);
 
       // Update sample rate and bit depth from server (dynamic update)
       if (res.data.running) {
-        // Prefer explicit Roon rate if available (even if null), otherwise fallback to DSP rate
         if (res.data.roonSampleRate !== undefined) {
-          setSampleRate(res.data.roonSampleRate);
+          setSampleRate(prev => prev !== res.data.roonSampleRate ? res.data.roonSampleRate : prev);
         } else {
-          setSampleRate(res.data.sampleRate > 0 ? res.data.sampleRate : null);
+          const newSR = res.data.sampleRate > 0 ? res.data.sampleRate : null;
+          setSampleRate(prev => prev !== newSR ? newSR : prev);
         }
-
-        setBitDepth(res.data.bitDepth);
-        setIsBypass(res.data.bypass || false);
+        setBitDepth(prev => prev !== res.data.bitDepth ? res.data.bitDepth : prev);
+        setIsBypass(prev => prev !== (res.data.bypass || false) ? (res.data.bypass || false) : prev);
       }
 
-      setIsDspManaged(res.data.isDspManaged || false);
+      setIsDspManaged(prev => prev !== (res.data.isDspManaged || false) ? (res.data.isDspManaged || false) : prev);
 
-      // Auto-sync backend with server's zone-based selection
-      // Only switch if the server explicitly found a matching zone (isAutoSelected)
+      // Auto-sync backend
       if (res.data.isAutoSelected && res.data.backend && res.data.backend !== backend) {
-        console.log(`App: Auto-switching backend to "${res.data.backend}" based on zone "${res.data.zone}"`);
+        console.log(`App: Auto-switching backend to "${res.data.backend}"`);
         setBackend(res.data.backend as 'local' | 'raspi');
       }
 
-      // AUTO-SOURCE TOGGLE: If Roon is playing but we are on Apple source, switch to Roon
-      // This is critical on the Pi where Apple Music doesn't work.
+      // AUTO-SOURCE TOGGLE
       if (res.data.zone && mediaSource !== 'roon') {
-        // Double check if Roon is actually the active player
         axios.get(`${API_URL}/media/info?source=roon`).then(r => {
           if (r.data.state === 'playing') {
-            console.log(`App: Auto-switching media source to ROON (detected playback in zone: ${res.data.zone})`);
+            console.log(`App: Auto-switching media source to ROON`);
             setMediaSource('roon');
           }
         }).catch(() => { });
       }
 
-      // SYNC ACTIVE ZONE: If server says we are on Zone X, update UI to reflect it
-      // This ensures that on reload, we pick up the correct persistent zone from the server
+      // SYNC ACTIVE ZONE
       if (res.data.activeZoneId && mediaSource === 'roon') {
-        // Check if our local UI state matches the server
-        const activeZone = mediaZones.find(z => z.active);
-        if (!activeZone || activeZone.id !== res.data.activeZoneId) {
-          console.log(`App: Syncing active zone from server: ${res.data.zone} (${res.data.activeZoneId})`);
-          // We update the local state without calling API (prevent loop)
-          setMediaZones(prev => prev.map(z => ({
-            ...z,
-            active: z.id === res.data.activeZoneId && z.source === 'roon'
-          })));
-        }
+        setMediaZones(prev => {
+          const activeZone = prev.find(z => z.active);
+          if (!activeZone || activeZone.id !== res.data.activeZoneId) {
+            return prev.map(z => ({
+              ...z,
+              active: z.id === res.data.activeZoneId && z.source === 'roon'
+            }));
+          }
+          return prev;
+        });
       }
 
-      // Auto-start CamillaDSP if not running (only on first load)
+      // Auto-start logic...
       if (!res.data.running && !hasAutoStartedRef.current) {
         hasAutoStartedRef.current = true;
         try {
           if (savedBypassRef.current) {
-            console.log('Auto-starting CamillaDSP in BYPASS mode (saved preference)...');
-            await axios.post(`${API_URL}/bypass`);
+            // await axios.post(`${API_URL}/bypass`);
+            console.log('App: Auto-bypass disabled to prevent conflict loop');
           } else {
-            console.log('Auto-starting CamillaDSP...');
             await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth });
           }
-        } catch (e) {
-          console.log('Auto-start failed, will retry when user interacts');
-        }
+        } catch (e) { }
       }
 
-      // Sync Auto-Mute Status
       if (res.data.isAutoMuted !== undefined) {
-        setIsAutoMuted(res.data.isAutoMuted);
-      }
-
-      // Sync Auto-Mute Status
-      if (res.data.isAutoMuted !== undefined) {
-        setIsAutoMuted(res.data.isAutoMuted);
+        setIsAutoMuted(prev => prev !== res.data.isAutoMuted ? res.data.isAutoMuted : prev);
       }
     } catch { }
-  };
+  }, [backend, mediaSource, sampleRate, bitDepth, filters, preamp]);
+
+  // Main polling effect - must be after checkStatus is defined
+  useEffect(() => {
+    loadPresets();
+    checkStatus();
+    fetchQueue();
+    fetchMediaZones();
+    const statusInterval = setInterval(checkStatus, 3000); // 3s for status is enough
+    const queueInterval = setInterval(fetchQueue, 10000); // 10s for queue
+    const zoneInterval = setInterval(fetchMediaZones, 15000); // 15s for zones pool as backup
+    return () => {
+      clearInterval(statusInterval);
+      clearInterval(queueInterval);
+      clearInterval(zoneInterval);
+    };
+  }, [checkStatus, mediaSource]);
 
   const selectPreset = async (name: string) => {
     if (!name) return;
@@ -866,10 +865,7 @@ function App() {
     catch (err: any) { alert("Control Failed: " + (err.response?.data?.error || err.message)); }
   };
 
-  const handleStop = async () => {
-    try { await axios.post(`${API_URL}/stop`); setIsBypass(false); await checkStatus(); }
-    catch (err: any) { alert("Stop Failed: " + (err.response?.data?.error || err.message)); }
-  };
+
 
   const handleBypass = async () => {
     try {
@@ -1169,10 +1165,7 @@ function App() {
                       <button onClick={handleStart} className="w-18 md:w-24 py-2 bg-accent-primary text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">START</button>
                     ) : (
                       <div className="flex items-center gap-2">
-                        {!isBypass && (
-                          <button onClick={handleStart} className="bg-white/10 hover:bg-white/20 text-accent-success p-2 rounded-lg transition-colors border border-themed-subtle shrink-0" title="Reload Settings"><RefreshCcw size={14} /></button>
-                        )}
-                        <button onClick={handleStop} className="w-18 md:w-24 py-2 bg-accent-danger text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">STOP</button>
+                        <button onClick={handleStart} className="w-18 md:w-24 py-2 bg-accent-warning text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all" title="Restart DSP Engine">RESTART</button>
                         {/* Separator */}
                         <div className="w-px h-6 bg-themed-medium mx-1" />
                         {/* Bypass Toggle */}
