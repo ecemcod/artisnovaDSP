@@ -3,6 +3,7 @@ import axios from 'axios';
 import FilterGraph from './components/FilterGraph';
 import PEQEditor from './components/PEQEditor';
 import VUMeter from './components/VUMeter';
+import { createPortal } from 'react-dom';
 import {
   Panel,
   Group,
@@ -19,6 +20,7 @@ import {
   Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk, Gauge, Power, X, ExternalLink, BookOpen
 } from 'lucide-react';
 import './index.css';
+import './App.css';
 import { parseRewFile } from './utils/rewParser';
 
 // Use current hostname to support access from any device on the local network
@@ -155,6 +157,7 @@ function App() {
   const nowPlayingContainerRef = useRef<HTMLDivElement>(null);
   const secondaryContainerRef = useRef<HTMLDivElement>(null);
   const [isDspManaged, setIsDspManaged] = useState(false);
+  const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false); // New: Artwork Modal State
   const isSeeking = useRef(false);
 
   // DSP Context Configuration
@@ -934,7 +937,10 @@ function App() {
           <div className="w-full max-w-lg mx-auto flex flex-col justify-center flex-1 min-h-0">
 
             {/* Artwork - Responsive Size */}
-            <div className="aspect-square w-full max-w-[380px] mx-auto mb-8 relative group/art now-playing-artwork">
+            <div
+              className="aspect-square w-full max-w-[380px] mx-auto mb-8 relative group/art now-playing-artwork"
+              onClick={() => setIsArtworkModalOpen(true)}
+            >
               <div className="absolute inset-0 bg-black/40 rounded-2xl transform translate-y-2 blur-xl opacity-50" />
               <div className="relative w-full h-full bg-white/5 rounded-2xl overflow-hidden shadow-2xl">
                 {nowPlaying.artworkUrl && artworkRetryKey < 10 ? (
@@ -1367,7 +1373,21 @@ function App() {
 
     return (
       <Group orientation="horizontal" className="h-full w-full" onLayoutChange={onLayoutChange}>
-        <Panel defaultSize={panelSizes[0]} minSize={30} id="now-playing">{renderNowPlaying()}</Panel>
+        <Panel defaultSize={panelSizes[0]} minSize={30} id="now-playing">
+          <div
+            className="h-full w-full cursor-pointer"
+            onClick={(e) => {
+              // Don't navigate if clicking on buttons, inputs, or signal path elements
+              const target = e.target as HTMLElement;
+              const clickedInteractive = target.closest('button, input, a, [role="button"], .signal-path-popover');
+              if (!clickedInteractive) {
+                setActiveMode('playback');
+              }
+            }}
+          >
+            {renderNowPlaying()}
+          </div>
+        </Panel>
         <Separator className="w-1 bg-themed-deep hover:bg-accent-primary/20 cursor-col-resize mx-0.5 rounded-full flex items-center justify-center transition-colors">
           <div className="w-1 h-12 bg-themed-medium rounded-full" />
         </Separator>
@@ -1942,6 +1962,40 @@ function App() {
         nowPlayingRect={nowPlayingContainerRef.current?.getBoundingClientRect()}
         secondaryRect={secondaryContainerRef.current?.getBoundingClientRect()}
       />
+
+      {/* Artwork Modal - Portaled to Body for Full Screen */}
+      {isArtworkModalOpen && createPortal(
+        <div
+          className="artwork-modal"
+          onClick={() => setIsArtworkModalOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            width: '100vw',
+            height: '100vh',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            backgroundColor: 'rgba(0, 0, 0, 0.9)',
+            zIndex: 99999,
+            backdropFilter: 'blur(10px)'
+          }}
+        >
+          <img
+            src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
+            alt="Full Artwork"
+            className="artwork-modal-image"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              objectFit: 'contain',
+              boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
+            }}
+          />
+        </div>,
+        document.body
+      )}
     </div >
   );
 }

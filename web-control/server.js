@@ -17,13 +17,9 @@ const os = require('os');
 const yaml = require('js-yaml');
 
 // Node 22 workaround
-if (typeof WebSocket === 'undefined') {
-    global.WebSocket = require('ws');
-    console.log('RoonController: Shared WebSocket sham applied (Node < 22)');
-} else {
-    console.log('RoonController: Native WebSocket detected. Using native implementation.');
-}
-console.log('RoonController: WebSocket check:', typeof WebSocket !== 'undefined' ? 'Defined' : 'UNDEFINED');
+// Node 22 workaround: Force 'ws' package for Roon API compatibility
+global.WebSocket = require('ws');
+console.log('Server: Forced use of "ws" package for Roon API compatibility.');
 const http = require('http');
 const https = require('https');
 const DSPManager = require('./dsp-manager');
@@ -393,6 +389,9 @@ app.get('/api/status', async (req, res) => {
     }
 
     // Local DSP Status
+    const nowPlaying = roonController.getNowPlaying() || {};
+    const currentBitDepth = nowPlaying.bitDepth || 24;
+
     res.json({
         running: activeDsp.isRunning(),
         sampleRate: activeDsp.currentState.sampleRate,
@@ -405,7 +404,8 @@ app.get('/api/status', async (req, res) => {
         zone: zoneName,
         backend: backendId,
         isDspManaged: true, // Always managed in "Always-On" mode
-        isAutoSelected: false
+        isAutoSelected: false,
+        bitDepth: currentBitDepth
     });
 });
 
@@ -679,42 +679,61 @@ async function getArtistInfo(artist, album) {
 async function getAlbumInfo(artist, album) {
     if (!artist || !album) return null;
 
-    try {
-        const adbUrl = `https://www.theaudiodb.com/api/v1/json/2/searchalbum.php?s=${encodeURIComponent(artist)}&a=${encodeURIComponent(album)}`;
-        const adbRes = await axios.get(adbUrl, { timeout: 4000 });
-        const adbAlbum = adbRes.data?.album?.[0];
+    // Normalize album name by stripping common suffixes that may not match TheAudioDB
+    const normalizeAlbumName = (name) => {
+        return name
+            .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version)\)\s*$/i, '')
+            .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition)\]\s*$/i, '')
+            .trim();
+    };
 
-        if (adbAlbum) {
-            let tracklist = [];
-            if (adbAlbum.idAlbum) {
-                try {
-                    const tracksUrl = `https://www.theaudiodb.com/api/v1/json/2/track.php?m=${adbAlbum.idAlbum}`;
-                    const tracksRes = await axios.get(tracksUrl, { timeout: 3000 });
-                    if (tracksRes.data?.track) {
-                        tracklist = tracksRes.data.track.map(t => ({
-                            number: parseInt(t.intTrackNumber),
-                            title: t.strTrack,
-                            duration: t.intDuration ? `${Math.floor(t.intDuration / 60000)}:${((t.intDuration % 60000) / 1000).toFixed(0).padStart(2, '0')}` : '--:--',
-                            disc: 1
-                        })).sort((a, b) => a.number - b.number);
-                    }
-                } catch (err) { console.warn('AudioDB Tracks failed', err.message); }
-            }
-
-            return {
-                title: adbAlbum.strAlbum,
-                date: adbAlbum.intYearReleased,
-                label: adbAlbum.strLabel || 'Unknown Label',
-                type: adbAlbum.strReleaseFormat || 'Album',
-                trackCount: tracklist.length || 0,
-                tracklist: tracklist,
-                credits: [],
-                albumUrl: null
-            };
-        }
-    } catch (e) {
-        console.warn('Album Info: AudioDB failed', e.message);
+    const normalizedAlbum = normalizeAlbumName(album);
+    const searchVariants = [album]; // Always try exact match first
+    if (normalizedAlbum !== album) {
+        searchVariants.push(normalizedAlbum); // Then try normalized
     }
+
+    for (const searchAlbum of searchVariants) {
+        try {
+            const adbUrl = `https://www.theaudiodb.com/api/v1/json/2/searchalbum.php?s=${encodeURIComponent(artist)}&a=${encodeURIComponent(searchAlbum)}`;
+            const adbRes = await axios.get(adbUrl, { timeout: 4000 });
+            const adbAlbum = adbRes.data?.album?.[0];
+
+            if (adbAlbum) {
+                console.log(`AlbumInfo: Found "${adbAlbum.strAlbum}" for query "${searchAlbum}"`);
+                let tracklist = [];
+                if (adbAlbum.idAlbum) {
+                    try {
+                        const tracksUrl = `https://www.theaudiodb.com/api/v1/json/2/track.php?m=${adbAlbum.idAlbum}`;
+                        const tracksRes = await axios.get(tracksUrl, { timeout: 3000 });
+                        if (tracksRes.data?.track) {
+                            tracklist = tracksRes.data.track.map(t => ({
+                                number: parseInt(t.intTrackNumber),
+                                title: t.strTrack,
+                                duration: t.intDuration ? `${Math.floor(t.intDuration / 60000)}:${((t.intDuration % 60000) / 1000).toFixed(0).padStart(2, '0')}` : '--:--',
+                                disc: 1
+                            })).sort((a, b) => a.number - b.number);
+                        }
+                    } catch (err) { console.warn('AudioDB Tracks failed', err.message); }
+                }
+
+                return {
+                    title: adbAlbum.strAlbum,
+                    date: adbAlbum.intYearReleased,
+                    label: adbAlbum.strLabel || 'Unknown Label',
+                    type: adbAlbum.strReleaseFormat || 'Album',
+                    trackCount: tracklist.length || 0,
+                    tracklist: tracklist,
+                    credits: [],
+                    albumUrl: null
+                };
+            }
+        } catch (e) {
+            console.warn(`Album Info: AudioDB failed for "${searchAlbum}"`, e.message);
+        }
+    }
+
+    console.log(`AlbumInfo: No results for "${artist}" - "${album}" (normalized: "${normalizedAlbum}")`);
     return null;
 }
 
@@ -924,9 +943,9 @@ app.get('/api/media/info', async (req, res) => {
                 uiNodes.push(
                     {
                         type: 'dsp',
-                        description: isRemote ? 'CamillaDSP (Remote)' : 'CamillaDSP (Always-On)',
+                        description: activeDsp.currentState.bypass ? 'CamillaDSP (Bypassed)' : 'CamillaDSP',
                         details: `64-bit • ${activeDsp.currentState.presetName || 'Custom'}`,
-                        status: 'enhanced'
+                        status: activeDsp.currentState.bypass ? 'lossless' : 'enhanced'
                     },
                     {
                         type: 'output',
@@ -988,7 +1007,7 @@ app.get('/api/media/info', async (req, res) => {
             quality: 'enhanced',
             nodes: [
                 { type: 'source', description: 'Apple Music / System', details: 'CoreAudio Local', status: 'lossless' },
-                { type: 'dsp', description: 'CamillaDSP (Always-On)', details: '64-bit Processing', status: 'enhanced' },
+                { type: 'dsp', description: 'CamillaDSP', details: '64-bit Processing', status: 'enhanced' },
                 { type: 'output', description: 'D50 III', details: '96kHz Output', status: 'enhanced' }
             ]
         };

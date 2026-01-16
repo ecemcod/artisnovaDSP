@@ -4,13 +4,13 @@ const RoonApiImage = require("node-roon-api-image");
 const RoonApiBrowse = require("node-roon-api-browse");
 
 // Node 22 workaround
-if (typeof WebSocket === 'undefined') {
+// Node 22 workaround: Force 'ws' package as native WebSocket isn't fully compatible with node-roon-api yet
+try {
     global.WebSocket = require('ws');
-    console.log('RoonController: Shared WebSocket sham applied (Node < 22)');
-} else {
-    console.log('RoonController: Native WebSocket detected. Using native implementation.');
+    console.log('RoonController: Forced use of "ws" package for Roon API compatibility.');
+} catch (e) {
+    console.error('RoonController: Failed to load "ws" package:', e);
 }
-console.log('RoonController: WebSocket check:', typeof WebSocket !== 'undefined' ? 'Defined' : 'UNDEFINED');
 
 
 
@@ -204,6 +204,31 @@ class RoonController {
                 this.transport.mute(zone, 'unmute', (err) => {
                     if (err) reject(err); else resolve();
                 });
+            } else if (action === 'prev' || action === 'previous') {
+                // Robust Previous Logic: Try Previous, if it fails (First Track), Seek to 0.
+                const position = zone.seek_position || 0;
+
+                // 1. If deep in track, restart is the standard behavior
+                if (position > 5) {
+                    console.log(`RoonController: >5s into track (${position}s). Seeking to start.`);
+                    this.transport.seek(zone, 'absolute', 0, (err) => {
+                        if (err) reject(err); else resolve();
+                    });
+                    return;
+                }
+
+                // 2. Try Previous. If it fails, Fallback to Seek(0)
+                this.transport.control(zone, 'previous', (err) => {
+                    if (err) {
+                        console.log('RoonController: "Previous" command failed (likely start of queue). Fallback to Seek(0).');
+                        this.transport.seek(zone, 'absolute', 0, (seekErr) => {
+                            if (seekErr) reject(seekErr); else resolve();
+                        });
+                    } else {
+                        resolve();
+                    }
+                });
+
             } else {
                 this.transport.control(zone, action, (err) => {
                     if (err) reject(err); else resolve();
@@ -495,7 +520,7 @@ class RoonController {
             }
         }
 
-        return null;
+        return 24;
     }
 
     // Check if sample rate changed and trigger callback
