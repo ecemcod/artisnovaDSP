@@ -47,6 +47,10 @@ class DSPManager {
         if (this.persistedState.bypass) this.currentState.bypass = this.persistedState.bypass;
         if (this.persistedState.sampleRate) this.currentState.sampleRate = this.persistedState.sampleRate;
 
+        // Restore filter data for robust restarts
+        if (this.persistedState.lastFilterData) this.lastFilterData = this.persistedState.lastFilterData;
+        if (this.persistedState.lastOptions) this.lastOptions = this.persistedState.lastOptions;
+
         console.log('DSPManager initialized. Persisted Intent:', this.shouldBeRunning ? (this.persistedState.bypass ? 'Bypass' : 'Running') : 'Stopped');
     }
 
@@ -58,12 +62,16 @@ class DSPManager {
         } catch (e) {
             console.error('Failed to load state.json:', e);
         }
-        return { running: true, bypass: false }; // Default intent is running (appliance mode)
+        return { running: true, bypass: false };
     }
 
     saveState(updates = {}) {
         try {
             this.persistedState = { ...this.persistedState, ...updates };
+            // Persist critical start data if available
+            if (this.lastFilterData) this.persistedState.lastFilterData = this.lastFilterData;
+            if (this.lastOptions) this.persistedState.lastOptions = this.lastOptions;
+
             fs.writeFileSync(this.stateFilePath, JSON.stringify(this.persistedState, null, 2));
         } catch (e) {
             console.error('Failed to save state.json:', e);
@@ -262,13 +270,14 @@ class DSPManager {
 
                 console.log('Starting CamillaDSP with config:', configPath);
 
-                // Cleanup any orphaned processes on port 5005 before starting (Mac)
+                // Cleanup any orphaned processes named camilladsp before starting (Mac)
                 if (process.platform === 'darwin') {
                     try {
                         const { execSync } = require('child_process');
-                        console.log('DSPManager: Cleaning up orphaned 5005 processes...');
+                        console.log('DSPManager: Cleaning up all camilladsp processes...');
+                        execSync('killall -9 camilladsp 2>/dev/null || true');
                         execSync('lsof -ti:5005 | xargs kill -9 2>/dev/null || true');
-                        execSync('sleep 0.5'); // Give CoreAudio a moment to breathe
+                        execSync('sleep 1.0'); // Give CoreAudio more time to release hardware
                     } catch (e) { }
                 }
 
@@ -304,6 +313,10 @@ class DSPManager {
                 this.process.on('close', (code) => {
                     console.log(`DSP exited with code ${code}`);
                     this.process = null;
+                    // Reset format error on explicit stop or if we are about to restart
+                    if (this.shouldBeRunning) {
+                        console.log('DSPManager: Process exited while it should be running. Watchdog will handle.');
+                    }
                 });
 
                 this.process.on('error', (err) => {
@@ -358,57 +371,45 @@ class DSPManager {
         if (this.signalCheckInterval) clearInterval(this.signalCheckInterval);
         if (this.deviceCheckInterval) clearInterval(this.deviceCheckInterval);
 
-        console.log('Starting Enhanced DSP Watchdog...');
+        console.log('Starting Enhanced DSP Watchdog (2s interval)...');
         this.healthState.startTime = Date.now();
         this.healthState.restartCount = 0;
 
-        // Process health check - every 5 seconds
+        // Process health check - Enhanced Keep-Alive
         this.watchdogInterval = setInterval(() => {
             this.healthState.lastCheck = Date.now();
 
+            // Simple Keep-Alive: If it should be running but isn't, restart it.
+            // Ignoramos silencio, Roon states, etc. Solo nos importa: ¿Existe el proceso?
             if (this.shouldBeRunning && !this.isRunning()) {
-                // Circuit breaker: max 5 restarts in 5 minutes
-                if (this.healthState.restartCount >= 5) {
-                    console.log('Watchdog: Circuit breaker triggered - too many restarts. Manual intervention required.');
-                    this.healthState.lastError = 'Circuit breaker: too many restart attempts. ' + (this.healthState.formatError ? 'Format mismatch detected.' : '');
-                    this.shouldBeRunning = false; // Stop trying automatically
+                console.log('Watchdog: DSP process is dead. Restarting...');
+
+                // Basic restart throttling (prevent rapid-fire if config is broken)
+                const now = Date.now();
+                if (now - this.healthState.lastRestartTime < 2000) {
+                    console.log('Watchdog: Skipping restart (too fast)');
                     return;
                 }
-
-                console.log('Watchdog: DSP process died unexpectedly. Attempting restart...');
-                this.healthState.restartCount++;
+                this.healthState.lastRestartTime = now;
 
                 if (this.lastFilterData) {
                     this.start(this.lastFilterData, this.lastOptions)
-                        .then(() => {
-                            console.log('Watchdog: Restart successful');
-                            this.healthState.lastError = null;
-                        })
-                        .catch(e => {
-                            this.healthState.lastError = e.message;
-                            if (e.message.includes('Could not find playback device')) {
-                                console.log('Watchdog: Device missing, checking for fallback...');
-                                this.handleDeviceFallback();
-                            } else {
-                                console.error('Watchdog: Restart failed', e);
-                            }
-                        });
-                } else {
-                    console.log('Watchdog: Must restart but no last config found.');
-                    this.healthState.lastError = 'No configuration available for restart';
+                        .catch(e => console.error('Watchdog: Restart failed', e));
                 }
             }
-        }, 5000);
+        }, 3000); // Check every 3 seconds
 
         // Device health check - every 10 seconds
         this.deviceCheckInterval = setInterval(() => {
             this.checkDeviceHealth();
         }, 10000);
 
-        // Signal presence check - less frequent for health, avoid constant WS toggling
+        // Signal presence check - frequent for debugging playback issue
         this.signalCheckInterval = setInterval(() => {
-            this.checkSignalPresence();
-        }, 15000); // 15 seconds is enough for a health check
+            // this.checkSignalPresence(); // DISABLED: Let's trust the server to manage silence. 
+            // The DSP manager killing process on silence is fighting the server's logic.
+            // If we want "Always On", we shouldn't kill it just because it's silent.
+        }, 10000);
 
         // Initial checks
         this.checkDeviceHealth();
@@ -454,6 +455,31 @@ class DSPManager {
         this.healthState.playbackDevice = currentPlayback;
     }
 
+    _updateSignalState(captureLevels, playbackLevels) {
+        this.healthState.signalLevels = { capture: captureLevels, playback: playbackLevels };
+        const [cL, cR] = captureLevels;
+        const [pL, pR] = playbackLevels;
+
+        if (cL > -100) {
+            console.log(`[LEVELS] Capture: L=${cL.toFixed(1)}, R=${cR.toFixed(1)} | Playback: L=${pL.toFixed(1)}, R=${pR.toFixed(1)}`);
+        }
+
+        const hasSignal = cL > -60 || cR > -60;
+        if (hasSignal) {
+            this.healthState.signalPresent = true;
+            this.healthState.silenceDuration = 0;
+        } else {
+            // Increment silence duration (this method is called once per 2s check)
+            this.healthState.silenceDuration += 2;
+            if (this.healthState.silenceDuration >= 30) { // Aumentado de 5 a 30 segundos
+                this.healthState.signalPresent = false;
+                if (this.healthState.silenceDuration === 32) { // Aumentado de 6 a 32 segundos
+                    console.warn('DSPManager: Prolonged silence detected while running.');
+                }
+            }
+        }
+    }
+
     async checkSignalPresence() {
         if (!this.isRunning()) {
             this.healthState.signalPresent = false;
@@ -466,42 +492,35 @@ class DSPManager {
 
             const timeout = setTimeout(() => {
                 ws.terminate();
-            }, 1500);
+            }, 1000);
 
             ws.on('open', () => {
+                // Request both in one go if possible, or sequentially
                 ws.send('"GetCaptureSignalPeak"');
+                ws.send('"GetPlaybackSignalPeak"');
             });
 
+            let capture = null;
+            let playback = null;
+
             ws.on('message', (data) => {
-                clearTimeout(timeout);
                 try {
                     const response = JSON.parse(data.toString());
-                    if (response.GetCaptureSignalPeak?.result === 'Ok') {
-                        const [left, right] = response.GetCaptureSignalPeak.value;
-                        this.healthState.signalLevels = { left, right };
+                    if (response.GetCaptureSignalPeak) capture = response.GetCaptureSignalPeak.value;
+                    if (response.GetPlaybackSignalPeak) playback = response.GetPlaybackSignalPeak.value;
 
-                        // Signal present if above -60 dB
-                        const hasSignal = left > -60 || right > -60;
-                        if (hasSignal) {
-                            this.healthState.signalPresent = true;
-                            this.healthState.silenceDuration = 0;
-                        } else {
-                            this.healthState.silenceDuration += 2; // 2 second check interval
-                            if (this.healthState.silenceDuration >= 5) {
-                                this.healthState.signalPresent = false;
-                            }
-                        }
+                    if (capture !== null && playback !== null) {
+                        clearTimeout(timeout);
+                        this._updateSignalState(capture, playback);
+                        ws.close();
                     }
                 } catch (e) { }
-                ws.close();
             });
 
             ws.on('error', () => {
                 clearTimeout(timeout);
             });
-        } catch (e) {
-            // WebSocket module might not be available in all contexts
-        }
+        } catch (e) { }
     }
 
     handleDeviceFallback() {
@@ -572,7 +591,7 @@ class DSPManager {
     }
 
     async stop() {
-        console.log('DSPManager: Stop called from:', new Error().stack);
+        console.log('DSPManager: stop() called. Current stack:', new Error().stack);
         this.shouldBeRunning = false; // Mark as explicitly stopped by user/system
         this.saveState({ running: false });
 

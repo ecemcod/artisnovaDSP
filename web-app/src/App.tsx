@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import axios from 'axios';
 import FilterGraph from './components/FilterGraph';
 import PEQEditor from './components/PEQEditor';
-import VUMeter from './components/VUMeter';
+import VisualizationPage from './components/VisualizationPage';
 import { createPortal } from 'react-dom';
 import {
   Panel,
@@ -87,7 +87,7 @@ interface SavedConfig {
   sampleRate: number | null;
   bitDepth: number;
   selectedPreset: string | null;
-  activeMode?: 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'vumeters';
+  activeMode?: 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization';
   backend?: 'local' | 'raspi';
   bypass?: boolean;
   bgColor?: BgColorId;
@@ -98,7 +98,7 @@ const BACKENDS = {
   raspi: { name: 'Raspberry Pi', wsUrl: 'ws://raspberrypi.local:1234' }
 } as const;
 
-type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'vumeters';
+type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization';
 
 function App() {
   const [presets, setPresets] = useState<string[]>([]);
@@ -116,6 +116,7 @@ function App() {
     track: string;
     artist: string;
     album?: string;
+    year?: string | number;
     artworkUrl?: string;
     position: number;
     duration: number;
@@ -546,6 +547,7 @@ function App() {
               signalPath: res.data.signalPath,
               artist: res.data.artist || prev.artist,
               album: res.data.album || prev.album,
+              year: res.data.year || prev.year,
               artworkUrl: res.data.artworkUrl || prev.artworkUrl,
               style: res.data.style || prev.style,
               device: res.data.device || prev.device
@@ -1248,94 +1250,7 @@ function App() {
   };
 
 
-  // Render VU Meters fullscreen view (for Raspberry Pi)
-  const renderVUMetersView = () => {
-    return (
-      <div className="h-full w-full relative overflow-clip group flex flex-col bg-themed-deep">
-        {/* Dynamic Background */}
-        <div className="absolute inset-0 z-0 overflow-hidden" style={{ backgroundColor: 'var(--bg-app)' }}>
-          <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--accent-primary)_0%,_transparent_70%)]" />
-          {nowPlaying.artworkUrl && artworkRetryKey < 4 && (
-            <img
-              src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
-              alt=""
-              className="absolute inset-0 w-full h-full object-cover filter blur-[100px] scale-[5.0] saturate-100 opacity-20"
-              onError={handleArtworkError}
-            />
-          )}
-        </div>
 
-        {/* Main Content */}
-        <div className={`flex-1 flex flex-col relative z-10 min-h-0 ${isMobile() ? 'p-6 justify-center pt-20' : 'p-4 md:p-8'}`}>
-          {/* VU Meters - On mobile, we constrain height to avoid huge gaps */}
-          <div className={`${isMobile() ? 'h-[180px] shrink-0' : 'flex-1'} min-h-0 flex flex-col`}>
-            <VUMeter isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} className={isMobile() ? 'h-full' : 'flex-1'} />
-          </div>
-
-          {/* Track Info Section - Below VU Meters */}
-          <div className={`shrink-0 border-t border-white/10 ${isMobile() ? 'mt-3 pt-3' : 'mt-4 pt-4 md:pt-6'}`}>
-            {/* Track Title & Artist */}
-            <div className={`text-center ${isMobile() ? 'mb-1' : 'mb-3'}`}>
-              <h2 className={`${isMobile() ? 'text-lg' : 'text-xl md:text-2xl'} font-bold text-white leading-tight line-clamp-1 mb-0.5`}>
-                {nowPlaying.track || 'Not Playing'}
-              </h2>
-              <p className={`${isMobile() ? 'text-[11px]' : 'text-sm md:text-base'} text-white/60 font-medium truncate`}>
-                <span className="text-white/80">{nowPlaying.album || 'No Album'}</span>
-                {nowPlaying.artist && ` — ${nowPlaying.artist}`}
-              </p>
-            </div>
-
-            {/* Style Badge - Much smaller on mobile */}
-            {nowPlaying.style && (
-              <div className={`text-center ${isMobile() ? 'mb-1.5' : 'mb-3'}`}>
-                <span className={`inline-block px-4 py-0.5 rounded-full bg-white/5 text-[9px] font-bold uppercase text-accent-secondary border border-white/10 backdrop-blur-md`}>
-                  {nowPlaying.style}
-                </span>
-              </div>
-            )}
-
-            {/* Transport Controls - Compact on mobile */}
-            <div className={`flex items-center justify-center ${isMobile() ? 'gap-4 mb-2' : 'gap-6 mb-3'}`}>
-              <button
-                onClick={() => handleMediaControl('prev')}
-                className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
-              >
-                <SkipBack size={isMobile() ? 16 : 18} fill="currentColor" />
-              </button>
-              <button
-                onClick={() => handleMediaControl('playpause')}
-                className={`rounded-full hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl ${isMobile() ? 'p-2.5' : 'p-3'}`}
-                style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
-              >
-                {nowPlaying.state === 'playing' ? <Pause size={isMobile() ? 20 : 24} fill="currentColor" /> : <Play size={isMobile() ? 20 : 24} fill="currentColor" />}
-              </button>
-              <button
-                onClick={() => handleMediaControl('next')}
-                className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
-              >
-                <SkipForward size={isMobile() ? 16 : 18} fill="currentColor" />
-              </button>
-            </div>
-
-            {/* Resolution Badge & Device */}
-            <div className="text-center">
-              <div
-                className="text-[10px] font-black tracking-[0.3em] leading-none select-none uppercase mb-1"
-                style={{ color: '#9b59b6' }}
-              >
-                {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
-              </div>
-              {nowPlaying.device && (
-                <span className="text-[9px] text-white/30 font-black uppercase tracking-[0.2em]">{nowPlaying.device}</span>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
 
 
   // Main layout
@@ -1349,7 +1264,7 @@ function App() {
         case 'info': return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
         case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
         case 'history': return <History />;
-        case 'vumeters': return renderVUMetersView();
+        case 'visualization': return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
         default: return renderNowPlaying();
       }
     }
@@ -1366,9 +1281,9 @@ function App() {
       );
     }
 
-    // VU Meters - Fullscreen mode (no split panel)
-    if (activeMode === 'vumeters') {
-      return renderVUMetersView();
+    // Visualization - Fullscreen mode (no split panel)
+    if (activeMode === 'visualization') {
+      return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
     }
 
     return (
@@ -1548,15 +1463,15 @@ function App() {
                   </button>
 
                   <button
-                    onClick={() => { setActiveMode('vumeters'); setMenuOpen(false); }}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'vumeters' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
-                    style={activeMode === 'vumeters' ? { backgroundColor: 'white', color: 'black' } : {}}
+                    onClick={() => { setActiveMode('visualization'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'visualization' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'visualization' ? { backgroundColor: 'white', color: 'black' } : {}}
                   >
                     <div className="flex items-center gap-3">
-                      <Gauge size={16} style={activeMode === 'vumeters' ? { color: 'black' } : { color: '#606080' }} />
-                      <span className="text-sm font-black">VU Meters</span>
+                      <Gauge size={16} style={activeMode === 'visualization' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">Visualization</span>
                     </div>
-                    {activeMode === 'vumeters' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                    {activeMode === 'visualization' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
                 </div>
               </div>

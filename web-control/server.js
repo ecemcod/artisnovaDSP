@@ -235,23 +235,28 @@ function saveZoneConfig() {
 // ALWAYS-ON DSP LOGIC (Replaces LevelProbe)
 // ----------------------------------------------------------------------
 
-// Ensure DSP is running on boot (Always On)
+// Ensure DSP is running on boot (Always On) - ONLY if persisted state is true
 if (!isRunningOnPi) {
     // Initial start delay to allow system to settle
     setTimeout(async () => {
-        console.log('Server: Ensuring Main DSP (Always-On) is running...');
-        if (!dsp.isRunning()) {
-            try {
-                // Determine initial filters (from empty/default)
-                const filters = [];
-                const preamp = 0;
+        if (dsp.persistedState && dsp.persistedState.running) {
+            console.log('Server: Ensuring Main DSP is running (Persisted=true)...');
+            if (!dsp.isRunning()) {
+                try {
+                    // Determine initial filters (from empty/default)
+                    const filters = dsp.lastFilterData || { filters: [], preamp: 0 };
+                    const preamp = 0;
 
-                // Use FIXED 96kHz sample rate
-                await dsp.start({ filters, preamp }, { sampleRate: 96000 });
-                console.log('Server: Main DSP started successfully (96kHz).');
-            } catch (e) {
-                console.error('Server: Failed to start Main DSP on boot:', e);
+                    // Use FIXED 96kHz sample rate
+                    const options = dsp.lastOptions || { sampleRate: 96000 };
+                    await dsp.start(filters, options);
+                    console.log('Server: Main DSP started successfully.');
+                } catch (e) {
+                    console.error('Server: Failed to start Main DSP on boot:', e);
+                }
             }
+        } else {
+            console.log('Server: Main DSP start skipped (Persisted=false). Waiting for manual start.');
         }
     }, 2000);
 }
@@ -745,6 +750,7 @@ console.log('Server: History DB module loaded');
 // Lyrics Utilities
 // Simple in-memory cache for lyrics to avoid spamming the API
 const lyricsCache = new Map();
+const metadataCache = new Map(); // New: Metadata Cache for Album/Year enrichment
 
 async function fetchLyrics(url, params) {
     try {
@@ -960,6 +966,24 @@ app.get('/api/media/info', async (req, res) => {
                 quality: 'enhanced',
                 nodes: uiNodes
             };
+
+            // Enrich with cached Year/Album info if missing
+            const cacheKey = `${info.artist}-${info.album}`;
+            if (info.artist && info.album && !info.year) {
+                if (metadataCache.has(cacheKey)) {
+                    info.year = metadataCache.get(cacheKey).year;
+                } else {
+                    // Trigger async fetch but return current response immediately to avoid lag
+                    // The next poll will pick it up
+                    getAlbumInfo(info.artist, info.album).then(data => {
+                        if (data && data.date) {
+                            metadataCache.set(cacheKey, { year: data.date });
+                        } else {
+                            metadataCache.set(cacheKey, { year: '' }); // Prevent retry spam
+                        }
+                    });
+                }
+            }
 
             return res.json(info);
         } else if (source === 'lms') {
@@ -1301,10 +1325,95 @@ function broadcastLevels(levels) {
     levelSubscribers.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) ws.send(message);
     });
+
+    // Also drive the RTA generation from these levels
+    updateSpectrum(levels);
 }
 
+// --- SYNTHETIC RTA GENERATOR ---
+// Generates a believable 31-band 1/3 octave spectrum from peak levels
+const BANDS = 31;
+let spectrumData = new Array(BANDS).fill(-100);
+let spectrumDecay = new Array(BANDS).fill(0);
+// Simple noise generator state
+let seed = 1;
+function random() {
+    const x = Math.sin(seed++) * 10000;
+    return x - Math.floor(x);
+}
+
+function updateSpectrum(levels) {
+    if (!levels) return;
+
+    // Average levels and clamp
+    const l = Math.max(-100, levels[0]);
+    const r = Math.max(-100, levels[1]);
+    const maxDb = Math.max(l, r); // Driver
+
+    // If silence, decay rapidly
+    if (maxDb < -60) {
+        for (let i = 0; i < BANDS; i++) {
+            spectrumData[i] = Math.max(-120, spectrumData[i] - 2);
+        }
+        broadcastSpectrum();
+        return;
+    }
+
+    // Generate spectrum shape
+    // Bass (0-5) is high energy, Mids (6-20) moderate, Highs (21-30) roll off
+    for (let i = 0; i < BANDS; i++) {
+        // Base energy from volume
+        let energy = maxDb;
+
+        // Shape the EQ curve roughly (Green/Pink noise-ish)
+        let curveOffset = 0;
+        if (i < 4) curveOffset = 5; // Bass boost
+        else if (i > 20) curveOffset = -((i - 20) * 1.5); // HF Roll-off
+
+        // Add pseudo-random variance per band that moves slowly
+        const variance = (Math.sin(Date.now() / (100 + i * 20)) + 1) * 5; // 0-10db variance
+
+        // Add fast jitter
+        const jitter = (random() - 0.5) * 4;
+
+        let targetDb = energy + curveOffset + variance + jitter;
+
+        // Clamp logical max
+        targetDb = Math.min(0, Math.max(-100, targetDb));
+
+        // Physics: Attack is instant, Decay is linear
+        if (targetDb > spectrumData[i]) {
+            spectrumData[i] = targetDb;
+        } else {
+            spectrumData[i] = Math.max(-120, spectrumData[i] - 1.5); // Decay speed
+        }
+    }
+    broadcastSpectrum();
+}
+
+function broadcastSpectrum() {
+    const message = JSON.stringify({ type: 'rta', data: spectrumData });
+    // Broadcast to visualization subscribers (piggyback on main WSS or levelWSS? 
+    // Let's use the main WSS for metadata/state/rta to keep levels separated if needed, 
+    // BUT RTA is high frequency. Let's send it effectively via the level broadcasting loop or similar mechanism.
+    // Actually, create a dedicated channel or just use the main one? 
+    // The main WSS is for "metadata and state". Let's use it but perhaps limit rate if needed. 
+    // ACTUALLY: RTA is 30-60fps. Levels is 10fps. 
+    // Let's add RTA to the 'broadcast' function logic or a specific rtaSubscribers set.
+
+    // We'll trust the main broadcast function for now, or optimizing:
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            // Only send if client actually wants it? For now broadcast all.
+            client.send(message);
+        }
+    });
+}
+
+
 // Start Proxy
-connectToMainDsp();
+// Start Proxy
+connectToMainDsp(); // Re-enabled: Connects to LOCAL (127.0.0.1:5005), vital for UI.
 
 
 levelWss.on('connection', (ws) => {
@@ -1337,6 +1446,53 @@ roonController.init((info) => {
         roonUpdateTimeout = null;
     }, 100);
 });
+
+// Proactive Sample Rate Handling
+roonController.onSampleRateChange = async (newRate, zone) => {
+    console.log(`Server: Sample rate change detected -> ${newRate}Hz for zone "${zone.display_name}"`);
+    const activeDsp = getDspForZone(zone.display_name);
+
+    if (newRate === 'CHECK') {
+        // Simplified: Do nothing on periodic checks. Trust the persistent Keep-Alive of DSP Manager.
+        return;
+    }
+
+    // Normal rate change: Restart with new rate
+    const filters = activeDsp.lastFilterData || { filters: [], preamp: 0 };
+    const options = { ...activeDsp.lastOptions, sampleRate: newRate };
+    await activeDsp.start(filters, options);
+};
+
+// Silence Watchdog: If Roon is playing but no signal reaches Camilla
+// Silence Watchdog: DISABLED - Was causing auto-stop issues
+// Original watchdog was too aggressive and stopped DSP during normal pauses
+// setInterval(async () => {
+//     const activeZone = roonController.getActiveZone();
+//     if (activeZone && activeZone.state === 'playing') {
+//         const health = dsp.getHealthReport();
+//         // If DSP is running but silent for > 5s while Roon is playing
+//         if (health.dsp.running && !health.signal.present && health.signal.silenceDuration >= 6) {
+//             console.warn(`Server: Silence Watchdog triggered! Roon is playing but Camilla is silent (${health.signal.silenceDuration}s). Restarting...`);
+//             const activeDsp = getDspForZone(activeZone.display_name);
+//             const filters = activeDsp.lastFilterData || { filters: [], preamp: 0 };
+//             const options = activeDsp.lastOptions || { sampleRate: 96000 };
+//             await activeDsp.start(filters, options);
+//         }
+//     }
+// }, 2000);
+
+// Periodic Diagnostic Logs
+setInterval(() => {
+    const localStatus = dsp.getHealthReport();
+    const remoteStatus = remoteDsp.currentState || {};
+    const zoneName = getActiveZoneName();
+    const backendId = getBackendIdForZone(zoneName);
+
+    console.log(`[HEARTBEAT] LocalDSP: ${localStatus.dsp.running ? 'RUNNING' : 'STOPPED'} | RemoteDSP: ${remoteStatus.running ? 'RUNNING' : 'STOPPED'} | ActiveZone: ${zoneName} (${backendId}) | Silence: ${localStatus.signal.silenceDuration}s`);
+    if (!localStatus.dsp.running && dsp.shouldBeRunning) {
+        console.warn(`[DIAGNOSTIC] Local DSP should be running but is stopped! Last Error: ${localStatus.lastError}`);
+    }
+}, 30000);
 
 // Load configs and start
 loadZoneConfig();

@@ -9,9 +9,10 @@ interface Props {
     onClick?: () => void;
     onLevelsChange?: (left: number, right: number) => void;
     className?: string;
+    skin?: 'modern' | 'classic' | 'dark' | 'minimal' | 'retro';
 }
 
-const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', onLevelsChange, className = "" }) => {
+const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', onLevelsChange, className = "", skin = 'modern' }) => {
     const isMobile = typeof window !== 'undefined' ? window.innerWidth < 768 : false;
     const [levels, setLevels] = useState({ left: -60, right: -60 });
     const [status, setStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
@@ -194,8 +195,8 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                         onClick={handleReconnect}
                         disabled={isReconnecting}
                         className={`p-1.5 rounded-lg border transition-all duration-200 ${isReconnecting
-                                ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 cursor-wait'
-                                : 'bg-white/5 text-themed-muted border-white/10 hover:bg-white/10 hover:text-themed-primary hover:border-white/20'
+                            ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 cursor-wait'
+                            : 'bg-white/5 text-themed-muted border-white/10 hover:bg-white/10 hover:text-themed-primary hover:border-white/20'
                             }`}
                         title="Reconnect VU Meters"
                     >
@@ -211,10 +212,10 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
             {/* Meters Container */}
             <div className="flex-1 flex flex-row items-center justify-center gap-2 md:gap-8 min-h-0 overflow-hidden">
                 <div className="flex-1 h-full min-h-0">
-                    <AnalogVUMeter level={levels.left} channel="L" />
+                    <AnalogVUMeter level={levels.left} channel="L" skin={skin} />
                 </div>
                 <div className="flex-1 h-full min-h-0">
-                    <AnalogVUMeter level={levels.right} channel="R" />
+                    <AnalogVUMeter level={levels.right} channel="R" skin={skin} />
                 </div>
             </div>
         </div>
