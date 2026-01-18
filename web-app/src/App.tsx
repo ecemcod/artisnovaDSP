@@ -160,6 +160,12 @@ function App() {
   const [isDspManaged, setIsDspManaged] = useState(false);
   const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false); // New: Artwork Modal State
   const isSeeking = useRef(false);
+  const mediaSourceRef = useRef(mediaSource);
+
+  // Sync ref with state to avoid stale closures in effects
+  useEffect(() => {
+    mediaSourceRef.current = mediaSource;
+  }, [mediaSource]);
 
   // DSP Context Configuration
 
@@ -474,7 +480,7 @@ function App() {
           if (message.type === 'metadata_update') {
             // ONLY trigger fetch if the update is for our current media source
             // to prevent "flapping" when Roon background changes affect Apple Music view.
-            if (message.data?.source === mediaSource || !message.data?.source) {
+            if (message.data?.source === mediaSourceRef.current || !message.data?.source) {
               console.log('App: Relevant metadata update received via WS');
               fetchNowPlaying();
               if (message.data?.source === 'roon') {

@@ -1,16 +1,16 @@
 {
   "running": true,
   "autoRestart": false,
-  "bypass": false,
-  "presetName": "Manual",
+  "bypass": true,
+  "presetName": "BYPASS",
   "lastFilterData": {
     "filters": [],
     "preamp": 0
   },
   "lastOptions": {
     "sampleRate": 96000,
-    "bitDepth": 24,
-    "backend": "local",
+    "bypass": true,
+    "presetName": "BYPASS",
     "format": "S32LE",
     "isFallback": true
   }
