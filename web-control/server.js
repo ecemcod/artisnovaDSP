@@ -72,9 +72,114 @@ let historyState = {
     startTime: 0, // Unix timestamp when track started
     accumulatedTime: 0, // Seconds played
     isPlaying: false,
-    lastCheck: 0,
+    lastCheck: Date.now(),
     metadata: { genre: null, artworkUrl: null }
 };
+
+async function updatePlaybackHistory() {
+    try {
+        let activeInfo = null;
+        let source = null;
+
+        // 1. Check Roon First (highest priority)
+        const roonInfo = roonController.getNowPlaying();
+        if (roonInfo && roonInfo.state === 'playing') {
+            activeInfo = roonInfo;
+            source = 'roon';
+        }
+
+        // 2. Check LMS if Roon is idle
+        if (!activeInfo) {
+            const lmsInfo = await lmsController.getStatus();
+            if (lmsInfo && lmsInfo.state === 'playing') {
+                activeInfo = lmsInfo;
+                source = 'lms';
+            }
+        }
+
+        // 3. Fallback to Apple Music / System (Mac only)
+        if (!activeInfo && !isRunningOnPi) {
+            try {
+                const output = await runMediaCommand('info');
+                const systemInfo = JSON.parse(output);
+                if (systemInfo && systemInfo.state === 'playing') {
+                    activeInfo = systemInfo;
+                    source = 'apple';
+                }
+            } catch (e) { }
+        }
+
+        const now = Date.now();
+        const delta = (now - historyState.lastCheck) / 1000;
+        historyState.lastCheck = now;
+
+        if (activeInfo) {
+            const isSameTrack = activeInfo.track === historyState.currentTrack &&
+                activeInfo.artist === historyState.currentArtist;
+
+            if (isSameTrack) {
+                // Increment time if playing
+                historyState.accumulatedTime += delta;
+            } else {
+                // TRACK CHANGED: Save old track if it met the duration requirement
+                if (historyState.currentTrack && historyState.accumulatedTime >= 30) {
+                    await db.saveTrack({
+                        title: historyState.currentTrack,
+                        artist: historyState.currentArtist,
+                        album: historyState.currentAlbum,
+                        style: historyState.metadata.genre || 'Music',
+                        source: historyState.currentSource,
+                        device: historyState.currentDevice,
+                        artworkUrl: historyState.metadata.artworkUrl,
+                        timestamp: Math.floor(historyState.startTime / 1000),
+                        durationListened: Math.floor(historyState.accumulatedTime)
+                    });
+                }
+
+                // Initialize new track
+                historyState.currentTrack = activeInfo.track;
+                historyState.currentArtist = activeInfo.artist;
+                historyState.currentAlbum = activeInfo.album;
+                historyState.currentSource = source;
+                historyState.currentDevice = activeInfo.device || (source === 'roon' ? getActiveZoneName() : 'System');
+                historyState.startTime = now;
+                historyState.accumulatedTime = 0;
+                historyState.isPlaying = true;
+                historyState.metadata = {
+                    genre: activeInfo.style || (metadataCache.get(`${activeInfo.artist}-${activeInfo.album}`)?.style) || null,
+                    artworkUrl: activeInfo.artworkUrl || null
+                };
+            }
+        } else {
+            // STOPPED: If it was playing, we might want to save it now or wait for next start.
+            // Decided: Save on stop if duration met.
+            if (historyState.isPlaying && historyState.currentTrack && historyState.accumulatedTime >= 30) {
+                await db.saveTrack({
+                    title: historyState.currentTrack,
+                    artist: historyState.currentArtist,
+                    album: historyState.currentAlbum,
+                    style: historyState.metadata.genre || 'Music',
+                    source: historyState.currentSource,
+                    device: historyState.currentDevice,
+                    artworkUrl: historyState.metadata.artworkUrl,
+                    timestamp: Math.floor(historyState.startTime / 1000),
+                    durationListened: Math.floor(historyState.accumulatedTime)
+                });
+
+                // Clear state so we don't save again
+                historyState.currentTrack = null;
+                historyState.isPlaying = false;
+                historyState.accumulatedTime = 0;
+            }
+            historyState.isPlaying = false;
+        }
+    } catch (err) {
+        console.error('History: Update Loop Error:', err);
+    }
+}
+
+// Start history tracking loop (every 5 seconds)
+setInterval(updatePlaybackHistory, 5000);
 
 const PORT = 3000;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
@@ -730,7 +835,7 @@ async function getAlbumInfo(artist, album) {
                     trackCount: tracklist.length || 0,
                     tracklist: tracklist,
                     credits: [],
-                    albumUrl: null
+                    artwork: adbAlbum.strAlbumThumb || null
                 };
             }
         } catch (e) {
@@ -754,18 +859,45 @@ const metadataCache = new Map(); // New: Metadata Cache for Album/Year enrichmen
 
 async function fetchLyrics(url, params) {
     try {
-        const response = await axios.get(url, { params, timeout: 3000 });
+        const response = await axios.get(url, {
+            params,
+            timeout: 5000,
+            headers: {
+                'User-Agent': 'ArtisNova/1.2.1 (contact: artisnova@example.com)'
+            }
+        });
         return response.data;
     } catch (e) {
-        if (e.response && e.response.status === 404) return null; // Not found is fine
-        throw e;
+        if (e.response && e.response.status === 404) {
+            console.log(`Lyrics: API 404 for ${url} with params: ${JSON.stringify(params)}`);
+            return null;
+        }
+        console.error(`Lyrics: API Error (${e.response?.status}) for ${url}:`, e.message);
+        return null; // Return null so we can try the next strategy instead of crashing
     }
+}
+
+function normalizeLyricsMetadata(artist, track) {
+    // 1. Normalize Artist: Take only the first artist if it's a list
+    let cleanArtist = artist
+        .split(/[\\\/,;&]/)[0] // Split by /, \, ,, ;, &, etc.
+        .replace(/\s+(feat|ft)\.?\s+.*/i, '') // Strip "feat."
+        .trim();
+
+    // 2. Normalize Track: Strip common suffixes
+    let cleanTrack = track
+        .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version|Radio Edit|Edit|Duet With.*)\)\s*$/i, '')
+        .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition)\]\s*$/i, '')
+        .replace(/\s*-\s*(Live|Remastered|Deluxe|Single Version|Radio Edit).*/i, '')
+        .trim();
+
+    return { artist: cleanArtist, track: cleanTrack };
 }
 
 async function getLyricsFromLrcLib(track, artist) {
     const cacheKey = `${artist}-${track}`.toLowerCase();
 
-    // Check cache (expire after 24 hours?) - keeping it simple for now
+    // Check cache
     if (lyricsCache.has(cacheKey)) {
         const cached = lyricsCache.get(cacheKey);
         if (Date.now() - cached.timestamp < 1000 * 60 * 60 * 24) {
@@ -773,11 +905,10 @@ async function getLyricsFromLrcLib(track, artist) {
         }
     }
 
-    const cleanArtist = artist.trim();
-    const cleanTrack = track.trim();
+    const { artist: cleanArtist, track: cleanTrack } = normalizeLyricsMetadata(artist, track);
 
-    // Strategy A: Direct Get
-    console.log(`Lyrics: Trying Get for "${cleanArtist}" - "${cleanTrack}"`);
+    // Strategy A: Direct Get with Normalized Data
+    console.log(`Lyrics: Trying Get (Normalized) for "${cleanArtist}" - "${cleanTrack}"`);
     let data = await fetchLyrics('https://lrclib.net/api/get', {
         artist_name: cleanArtist,
         track_name: cleanTrack
@@ -789,19 +920,56 @@ async function getLyricsFromLrcLib(track, artist) {
         return result;
     }
 
-    // Strategy B: Search
-    console.log(`Lyrics: Trying Search for "${cleanArtist} ${cleanTrack}"`);
+    // Strategy B: Search with Normalized Concatenation
+    const searchQuery = `${cleanArtist} ${cleanTrack}`.replace(/\//g, ' ');
+    console.log(`Lyrics: Trying Search (Normalized) for "${searchQuery}"`);
     let searchData = await fetchLyrics('https://lrclib.net/api/search', {
-        q: `${cleanArtist} ${cleanTrack}`
+        q: searchQuery
     });
 
     if (Array.isArray(searchData) && searchData.length > 0) {
-        const bestMatch = searchData[0]; // Take first match
+        const bestMatch = searchData[0];
         const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
         lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
         return result;
     }
 
+    // Strategy C: Last Resort - Original Raw Strings in Search
+    if (artist !== cleanArtist || track !== cleanTrack) {
+        const rawSearchQuery = `${artist} ${track}`.replace(/\//g, ' ');
+        console.log(`Lyrics: Strategy C - Searching for "${rawSearchQuery}"`);
+        let rawSearchData = await fetchLyrics('https://lrclib.net/api/search', {
+            q: rawSearchQuery
+        });
+        if (Array.isArray(rawSearchData) && rawSearchData.length > 0) {
+            const bestMatch = rawSearchData[0];
+            const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
+            lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
+            return result;
+        }
+    }
+
+    // Strategy D: Medley handling (split by /)
+    if (cleanTrack.includes('/')) {
+        const parts = cleanTrack.split('/').map(p => p.trim()).filter(p => p.length >= 3);
+        console.log(`Lyrics: Strategy D - Detected medley. Trying components: ${parts.join(', ')}`);
+        for (const part of parts) {
+            console.log(`Lyrics: Strategy D - Trying Search for medley component: "${cleanArtist} ${part}"`);
+            let medleySearchData = await fetchLyrics('https://lrclib.net/api/search', {
+                q: `${cleanArtist} ${part}`.replace(/\//g, ' ')
+            });
+
+            if (Array.isArray(medleySearchData) && medleySearchData.length > 0) {
+                const bestMatch = medleySearchData[0];
+                const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
+                lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
+                console.log(`Lyrics: Strategy D - SUCCEEDED for medley component "${part}"`);
+                return result;
+            }
+        }
+    }
+
+    console.log(`Lyrics: All strategies FAILED for "${artist}" - "${track}"`);
     return null;
 }
 
@@ -966,21 +1134,26 @@ app.get('/api/media/info', async (req, res) => {
                 quality: 'enhanced',
                 nodes: uiNodes
             };
+            info.source = 'roon';
 
-            // Enrich with cached Year/Album info if missing
+            // Enrich with cached Year/Genre/Artwork info if missing
             const cacheKey = `${info.artist}-${info.album}`;
-            if (info.artist && info.album && !info.year) {
+            if (info.artist && info.album && (!info.year || !info.style || !info.artworkUrl)) {
                 if (metadataCache.has(cacheKey)) {
-                    info.year = metadataCache.get(cacheKey).year;
+                    const cached = metadataCache.get(cacheKey);
+                    if (!info.year) info.year = cached.year;
+                    if (!info.style) info.style = cached.style;
+                    if (!info.artworkUrl) info.artworkUrl = cached.artwork;
                 } else {
-                    // Trigger async fetch but return current response immediately to avoid lag
-                    // The next poll will pick it up
-                    getAlbumInfo(info.artist, info.album).then(data => {
-                        if (data && data.date) {
-                            metadataCache.set(cacheKey, { year: data.date });
-                        } else {
-                            metadataCache.set(cacheKey, { year: '' }); // Prevent retry spam
-                        }
+                    // Trigger async fetch
+                    Promise.all([
+                        getAlbumInfo(info.artist, info.album),
+                        getArtistInfo(info.artist, info.album)
+                    ]).then(([albumData, artistData]) => {
+                        const year = albumData?.date || '';
+                        const style = artistData?.tags?.[0] || '';
+                        const artwork = albumData?.artwork || '';
+                        metadataCache.set(cacheKey, { year, style, artwork });
                     });
                 }
             }
@@ -998,6 +1171,7 @@ app.get('/api/media/info', async (req, res) => {
                     { type: 'output', description: 'Raspberry Pi DAC', details: 'Hardware Output', status: 'enhanced' }
                 ]
             };
+            info.source = 'lms';
             return res.json(info);
         }
 
@@ -1010,7 +1184,8 @@ app.get('/api/media/info', async (req, res) => {
                 album: '',
                 artworkUrl: null,
                 device: 'Apple Music (Remote)',
-                signalPath: { quality: 'lossless', nodes: [] }
+                signalPath: { quality: 'lossless', nodes: [] },
+                source: 'apple'
             });
         }
 
@@ -1019,12 +1194,28 @@ app.get('/api/media/info', async (req, res) => {
         const output = await runMediaCommand('info');
         const info = JSON.parse(output);
         info.device = 'Mac / System';
+        info.source = 'apple';
 
-        // Retrieve artwork via hash... (simplified for brevity, existing logic holds)
         if (info.artwork) {
             const crypto = require('crypto');
             const trackHash = crypto.createHash('md5').update(`${info.track}-${info.artist}`).digest('hex').substring(0, 8);
             info.artworkUrl = `/api/media/artwork?h=${trackHash}`;
+        } else {
+            // FALLBACK: Use metadata cache or fetch from AudioDB
+            const cacheKey = `${info.artist}-${info.album}`;
+            if (metadataCache.has(cacheKey)) {
+                info.artworkUrl = metadataCache.get(cacheKey).artwork;
+                if (!info.year) info.year = metadataCache.get(cacheKey).year;
+                if (!info.style) info.style = metadataCache.get(cacheKey).style;
+            } else {
+                // Async trigger for next poll
+                getAlbumInfo(info.artist, info.album).then(data => {
+                    if (data && data.artwork) {
+                        const existing = metadataCache.get(cacheKey) || {};
+                        metadataCache.set(cacheKey, { ...existing, artwork: data.artwork, year: data.date });
+                    }
+                });
+            }
         }
 
         info.signalPath = {
@@ -1321,6 +1512,12 @@ setInterval(() => {
 
 function broadcastLevels(levels) {
     if (!levels) return;
+
+    // Filter: Only broadcast levels if the active backend is local
+    const zoneName = getActiveZoneName();
+    const backendId = getBackendIdForZone(zoneName);
+    if (backendId !== 'local') return;
+
     const message = JSON.stringify(levels);
     levelSubscribers.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) ws.send(message);
@@ -1392,19 +1589,14 @@ function updateSpectrum(levels) {
 }
 
 function broadcastSpectrum() {
-    const message = JSON.stringify({ type: 'rta', data: spectrumData });
-    // Broadcast to visualization subscribers (piggyback on main WSS or levelWSS? 
-    // Let's use the main WSS for metadata/state/rta to keep levels separated if needed, 
-    // BUT RTA is high frequency. Let's send it effectively via the level broadcasting loop or similar mechanism.
-    // Actually, create a dedicated channel or just use the main one? 
-    // The main WSS is for "metadata and state". Let's use it but perhaps limit rate if needed. 
-    // ACTUALLY: RTA is 30-60fps. Levels is 10fps. 
-    // Let's add RTA to the 'broadcast' function logic or a specific rtaSubscribers set.
+    // Filter: Only broadcast RTA if the active backend is local
+    const zoneName = getActiveZoneName();
+    const backendId = getBackendIdForZone(zoneName);
+    if (backendId !== 'local') return;
 
-    // We'll trust the main broadcast function for now, or optimizing:
+    const message = JSON.stringify({ type: 'rta', data: spectrumData });
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
-            // Only send if client actually wants it? For now broadcast all.
             client.send(message);
         }
     });
@@ -1423,6 +1615,19 @@ levelWss.on('connection', (ws) => {
 });
 
 function broadcast(type, data) {
+    if (type === 'metadata_update' || type === 'levels') {
+        const zoneName = getActiveZoneName();
+        const backendId = getBackendIdForZone(zoneName);
+        if (data.source === 'roon' && backendId !== 'local') {
+            // If it's a Roon update but we're in remote mode, it should be handled by the remote broadcast
+            // BUT wait, metadata is global from Roon? 
+            // Let's keep metadata global but filter levels.
+        }
+        if (type === 'levels') {
+            if (backendId !== 'local') return;
+        }
+    }
+
     const message = JSON.stringify({ type, data });
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) client.send(message);

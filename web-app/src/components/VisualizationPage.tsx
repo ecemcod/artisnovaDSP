@@ -147,8 +147,8 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
             </div>
 
             {/* Main Content Area - Visualizer */}
-            <div className="flex-1 w-full flex items-center justify-center p-4 md:p-8 relative z-20 min-h-0">
-                <div className="w-full h-full max-w-7xl max-h-[70vh] flex items-center justify-center">
+            <div className="flex-1 w-full flex items-center justify-center p-4 md:p-6 relative z-20 min-h-0 bg-black/40 overflow-hidden">
+                <div className="w-full h-full max-w-7xl max-h-[55vh] flex items-center justify-center overflow-hidden">
                     {mode === 'vu' ? (
                         <VUMeter isRunning={isRunning} wsUrl={wsUrl} skin={skin} className="w-full h-full" />
                     ) : (
@@ -157,10 +157,10 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                 </div>
             </div>
 
-            {/* Footer Section (Information & Transport) */}
-            <div className="w-full pb-20 pt-8 px-4 flex flex-col items-center justify-center bg-gradient-to-t from-black via-black/80 to-transparent relative z-30">
+            {/* Footer Section (Information & Transport) - Solid background to prevent overlap */}
+            <div className="w-full pb-10 pt-8 px-4 flex flex-col items-center justify-center bg-[#000000] border-t border-white/5 relative z-40 shadow-[0_-30px_60px_rgba(0,0,0,0.8)]">
                 {renderTrackInfo()}
-                <div className="h-2 w-24 bg-white/5 rounded-full mt-12 opacity-10" />
+                <div className="h-1 w-20 bg-white/5 rounded-full mt-8 opacity-10" />
             </div>
         </div>
     );

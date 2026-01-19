@@ -58,7 +58,11 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
         let isMounted = true;
 
         const fetchInfo = async () => {
-            if (!artist) return;
+            if (!artist) {
+                setInfo(null);
+                lastFetchedRef.current = { artist: '', album: '' };
+                return;
+            }
 
             // STABILITY FIX: Normalice strings and check if they really changed
             const normalizedArtist = artist.trim().toLowerCase();

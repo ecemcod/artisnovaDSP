@@ -167,6 +167,8 @@ function App() {
     mediaSourceRef.current = mediaSource;
   }, [mediaSource]);
 
+  const wsConnectedRef = useRef(false);
+
   // DSP Context Configuration
 
   const [availableBackends, setAvailableBackends] = useState<{ id: string, name: string, wsUrl: string }[]>([]);
@@ -457,6 +459,7 @@ function App() {
         setBackend('raspi'); // LMS is always on the Pi
         await axios.post(`${API_URL}/media/lms/select`, { playerId: zoneId });
       }
+      setLyrics(null);
       fetchMediaZones();
       setTimeout(fetchNowPlaying, 100);
       setTimeout(fetchNowPlaying, 500);
@@ -473,16 +476,20 @@ function App() {
       const wsUrl = `${protocol}//${window.location.hostname}:3000`;
       console.log('App: Connecting to metadata WebSocket:', wsUrl);
       ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        console.log('App: Metadata WebSocket connected');
+        wsConnectedRef.current = true;
+      };
 
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
           if (message.type === 'metadata_update') {
-            // ONLY trigger fetch if the update is for our current media source
-            // to prevent "flapping" when Roon background changes affect Apple Music view.
-            if (message.data?.source === mediaSourceRef.current || !message.data?.source) {
-              console.log('App: Relevant metadata update received via WS');
-              fetchNowPlaying();
+            // SYNC CHECK: Use Ref for current media source to be up to date
+            const currentSource = mediaSourceRef.current;
+            if (message.data?.source === currentSource || !message.data?.source) {
+              console.log(`App: Relevant WS update (${message.data?.source || 'unknown'}). Fetching.`);
+              fetchNowPlayingRef.current();
               if (message.data?.source === 'roon') {
                 fetchMediaZones(); // Refresh zones when Roon update happens
               }
@@ -497,6 +504,7 @@ function App() {
 
       ws.onclose = () => {
         console.log('App: Metadata WebSocket closed. Reconnecting...');
+        wsConnectedRef.current = false;
         reconnectTimeout = setTimeout(connect, 3000);
       };
 
@@ -517,8 +525,17 @@ function App() {
     if (isFetchingRef.current) return;
     try {
       isFetchingRef.current = true;
-      const res = await axios.get(`${API_URL}/media/info?source=${mediaSource}`, { timeout: 3000 });
+      // ALWAYS use the latest ref for the source to avoid stale closure fetches
+      const currentSource = mediaSourceRef.current;
+      const res = await axios.get(`${API_URL}/media/info?source=${currentSource}`, { timeout: 3000 });
       if (res.data && !res.data.error) {
+        // STRICT SOURCE FILTER: Discard if source doesn't match current selection
+        // This prevents "metadata flickering" when Roon background changes affect Apple/LMS view.
+        if (res.data.source && res.data.source !== mediaSourceRef.current) {
+          console.log(`App: Data source mismatch. Expected ${mediaSourceRef.current}, got ${res.data.source}. Ignoring.`);
+          return;
+        }
+
         // TRACK CHANGE: Full update
         if (res.data.track !== nowPlaying.track) {
           console.log(`App: Track changed to "${res.data.track}". Full state update.`);
@@ -566,19 +583,34 @@ function App() {
     } finally {
       isFetchingRef.current = false;
     }
-  }, [mediaSource, nowPlaying.track]); // Dependencies for track change detection
+  }, [nowPlaying.track]); // Removed mediaSource dependency to avoid frequent re-creation
+
+  const fetchNowPlayingRef = useRef(fetchNowPlaying);
+  useEffect(() => {
+    fetchNowPlayingRef.current = fetchNowPlaying;
+  }, [fetchNowPlaying]);
 
   useEffect(() => {
-    fetchNowPlaying();
-    const interval = setInterval(fetchNowPlaying, 2000);
+    fetchNowPlayingRef.current();
+    const interval = setInterval(() => {
+      // Only poll if WebSocket is disconnected to minimize traffic and conflicts
+      if (!wsConnectedRef.current) {
+        fetchNowPlayingRef.current();
+      } else if (Math.random() < 0.05) { // Occasional sync even if WS is on
+        fetchNowPlayingRef.current();
+      }
+    }, 2000);
     return () => clearInterval(interval);
-  }, [fetchNowPlaying]); // Stability: depends only on the memoized callback
+  }, []); // Static interval
 
   const fetchLyrics = async (track: string, artist: string, device?: string) => {
     if (!track || !artist) {
       setLyrics(null);
       return;
     }
+
+    // Race condition protection: Capture current track to validate response later
+    const requestedTrack = track;
     // Safety: If track matches device name, it's a Roon metadata artifact (e.g. AirPlay stream)
     if (device && track === device) {
       console.log('Skipping lyrics: Track equals Device name (Metadata artifact)');
@@ -587,13 +619,23 @@ function App() {
     }
     try {
       const res = await axios.get(`${API_URL}/media/lyrics`, { params: { track, artist } });
+
+      // Only update if we are still on the same track
+      if (requestedTrack !== nowPlaying.track) {
+        console.log(`App: Lyrics received for "${requestedTrack}" but current track is "${nowPlaying.track}". Ignoring.`);
+        return;
+      }
+
       if (res.data.instrumental) {
         setLyrics("[INSTRUMENTAL]");
       } else {
         setLyrics(res.data.plain || null);
       }
     } catch {
-      setLyrics(null);
+      // Only clear if we failed for the actual current track
+      if (requestedTrack === nowPlaying.track) {
+        setLyrics(null);
+      }
     }
   };
 
