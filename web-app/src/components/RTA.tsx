@@ -35,32 +35,74 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false }
     });
 
     useEffect(() => {
-        let url = 'ws://localhost:3000';
-        if (typeof window !== 'undefined') {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            if (window.location.port !== '5173') {
-                url = `${protocol}//${window.location.host}`;
+        let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+        let watchdogTimeout: ReturnType<typeof setTimeout> | null = null;
+        let isCleaningUp = false;
+
+        const resetWatchdog = () => {
+            if (watchdogTimeout) clearTimeout(watchdogTimeout);
+            if (isRunning) {
+                watchdogTimeout = setTimeout(() => {
+                    console.warn('RTA: No data received for 3s. Reconnecting...');
+                    if (wsRef.current) wsRef.current.close();
+                }, 3000);
             }
-        }
-
-        const ws = new WebSocket(url);
-        wsRef.current = ws;
-
-        ws.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'rta') {
-                    if (msg.left && msg.right) {
-                        dataRef.current = { left: msg.left, right: msg.right };
-                    } else if (Array.isArray(msg.data)) {
-                        dataRef.current = { left: msg.data, right: msg.data };
-                    }
-                }
-            } catch (e) { }
         };
 
-        return () => ws.close();
-    }, []);
+        const connect = () => {
+            if (isCleaningUp) return;
+
+            let url = 'ws://localhost:3000';
+            if (typeof window !== 'undefined') {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                if (window.location.port !== '5173') {
+                    url = `${protocol}//${window.location.host}`;
+                }
+            }
+
+            console.log('RTA: Connecting to WebSocket:', url);
+            const ws = new WebSocket(url);
+            wsRef.current = ws;
+
+            ws.onmessage = (event) => {
+                if (isCleaningUp) return;
+                resetWatchdog();
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'rta') {
+                        if (msg.left && msg.right) {
+                            dataRef.current = { left: msg.left, right: msg.right };
+                        } else if (Array.isArray(msg.data)) {
+                            dataRef.current = { left: msg.data, right: msg.data };
+                        }
+                    }
+                } catch (e) { }
+            };
+
+            ws.onclose = () => {
+                if (isCleaningUp) return;
+                console.log('RTA: WebSocket closed. Reconnecting...');
+                wsRef.current = null;
+                reconnectTimeout = setTimeout(connect, 2000);
+            };
+
+            ws.onerror = (err) => {
+                console.warn('RTA: WebSocket error, closing...', err);
+                ws.close();
+            };
+
+            resetWatchdog();
+        };
+
+        connect();
+
+        return () => {
+            isCleaningUp = true;
+            if (wsRef.current) wsRef.current.close();
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            if (watchdogTimeout) clearTimeout(watchdogTimeout);
+        };
+    }, [isRunning]);
 
     useEffect(() => {
         let animationId: number;

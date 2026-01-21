@@ -233,6 +233,8 @@ remoteDsp.on('levels', (levels) => {
 
     // Direct broadcast for remote levels
     broadcast('levels', levels);
+    // Also drive the RTA generation from remote levels
+    updateSpectrum(levels);
 });
 
 // Available backends registry
@@ -1721,20 +1723,11 @@ function updateSpectrum(levels) {
     const changedL = runSimulation(l, 'L', spectrumL);
     const changedR = runSimulation(r, 'R', spectrumR);
 
-    // Only log if there's actual signal difference to debug "all same" issue
-    if (Math.abs(l - r) > 5 && (l > -60 || r > -60) && Math.random() < 0.1) {
-        console.log(`RTA Stereo Debug: L=${l.toFixed(1)} R=${r.toFixed(1)} | Diff=${Math.abs(l - r).toFixed(1)}`);
-    }
 
     broadcastSpectrum();
 }
 
 function broadcastSpectrum() {
-    // Filter: Only broadcast RTA if the active backend is local
-    const zoneName = getActiveZoneName();
-    const backendId = getBackendIdForZone(zoneName);
-    if (backendId !== 'local') return;
-
     // Send both L and R, plus combined legacy for compatibility
     const message = JSON.stringify({
         type: 'rta',
@@ -1767,12 +1760,18 @@ function broadcast(type, data) {
         const zoneName = getActiveZoneName();
         const backendId = getBackendIdForZone(zoneName);
         if (data.source === 'roon' && backendId !== 'local') {
-            // If it's a Roon update but we're in remote mode, it should be handled by the remote broadcast
-            // BUT wait, metadata is global from Roon? 
-            // Let's keep metadata global but filter levels.
+            // ... (keep logic)
         }
         if (type === 'levels') {
-            if (backendId !== 'local') return;
+            if (backendId !== 'local') {
+                // For remote levels, send raw array to level subscribers for compatibility
+                const rawMessage = JSON.stringify(data);
+                levelSubscribers.forEach(ws => {
+                    if (ws.readyState === WebSocket.OPEN) ws.send(rawMessage);
+                });
+            } else {
+                return; // Already handled by broadcastLevels for local
+            }
         }
     }
 
@@ -1795,6 +1794,18 @@ roonController.init((info) => {
     if (roonUpdateTimeout) clearTimeout(roonUpdateTimeout);
     roonUpdateTimeout = setTimeout(() => {
         checkHybridGroupMute();
+
+        // Enrich the broadcast update with cached metadata if available
+        if (info && info.artist && info.album) {
+            const cacheKey = `${info.artist}-${info.album}`;
+            const cached = metadataCache.get(cacheKey);
+            if (cached) {
+                if (!info.year) info.year = cached.year;
+                if (!info.style) info.style = cached.style;
+                if (!info.artworkUrl && cached.artwork) info.artworkUrl = cached.artwork;
+            }
+        }
+
         broadcast('metadata_update', { source: 'roon', info });
         roonUpdateTimeout = null;
     }, 100);

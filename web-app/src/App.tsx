@@ -587,9 +587,9 @@ function App() {
               signalPath: res.data.signalPath,
               artist: res.data.artist || prev.artist,
               album: res.data.album || prev.album,
-              year: res.data.year || prev.year,
-              artworkUrl: res.data.artworkUrl || prev.artworkUrl,
-              style: res.data.style || prev.style,
+              year: res.data.year ? res.data.year : prev.year,
+              artworkUrl: res.data.artworkUrl ? res.data.artworkUrl : prev.artworkUrl,
+              style: res.data.style ? res.data.style : prev.style,
               device: res.data.device || prev.device
             };
           });
