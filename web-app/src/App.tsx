@@ -22,6 +22,7 @@ import {
 import './index.css';
 import './App.css';
 import { parseRewFile } from './utils/rewParser';
+import { AppStorage } from './utils/storage';
 
 // Use current hostname to support access from any device on the local network
 const API_HOST = window.location.hostname;
@@ -106,7 +107,16 @@ function App() {
   const [filters, setFilters] = useState<FilterParam[]>([]);
   const [preamp, setPreamp] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
-  const [isBypass, setIsBypass] = useState(false);
+  const [isBypass, setIsBypass] = useState(() => {
+    const saved = AppStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const config = JSON.parse(saved);
+        return !!config.bypass;
+      } catch { }
+    }
+    return false;
+  });
   const [isAutoMuted, setIsAutoMuted] = useState(false); // New: Tracks auto-mute status
   const [sampleRate, setSampleRate] = useState<number | null>(96000);
   const [bitDepth, setBitDepth] = useState(24);
@@ -136,18 +146,21 @@ function App() {
   const [queue, setQueue] = useState<{ track: string; artist: string; album?: string; artworkUrl?: string }[]>([]);
   const [backend, setBackend] = useState<'local' | 'raspi'>('local');
   const [raspiOnline, setRaspiOnline] = useState(false);
-  const [activeMode, setActiveMode] = useState<LayoutMode>('processing');
+  const [activeMode, setActiveMode] = useState<LayoutMode>(() => {
+    const saved = AppStorage.getItem('artisNovaDSP_activeMode');
+    return (saved as LayoutMode) || 'processing';
+  });
   const [panelSizes, setPanelSizes] = useState<number[]>([55, 45]);
   const [isLayoutLoaded, setIsLayoutLoaded] = useState(false);
   const [volume, setVolume] = useState(50);
   const [bgColor, setBgColor] = useState<BgColorId>(() => {
-    const saved = localStorage.getItem(BG_COLOR_STORAGE_KEY);
+    const saved = AppStorage.getItem(BG_COLOR_STORAGE_KEY);
     return (saved as BgColorId) || 'noir';
   });
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaZones, setMediaZones] = useState<{ id: string, name: string, active: boolean, state: string, source: 'apple' | 'roon' | 'lms' }[]>([]);
   const [mediaSource, setMediaSource] = useState<'apple' | 'roon' | 'lms'>(() => {
-    const saved = localStorage.getItem('artisNovaDSP_mediaSource');
+    const saved = AppStorage.getItem('artisNovaDSP_mediaSource');
     return (saved === 'roon' || saved === 'apple' || saved === 'lms') ? saved : 'apple';
   });
   const [hostname, setHostname] = useState<string>('Local');
@@ -162,12 +175,17 @@ function App() {
   const isSeeking = useRef(false);
   const mediaSourceRef = useRef(mediaSource);
 
-  // Sync ref with state to avoid stale closures in effects
   useEffect(() => {
     mediaSourceRef.current = mediaSource;
   }, [mediaSource]);
 
+  const nowPlayingTrackRef = useRef(nowPlaying.track);
+  useEffect(() => {
+    nowPlayingTrackRef.current = nowPlaying.track;
+  }, [nowPlaying.track]);
+
   const wsConnectedRef = useRef(false);
+  const hasRestoredZoneRef = useRef(false);
 
   // DSP Context Configuration
 
@@ -177,7 +195,7 @@ function App() {
 
   // Backend URL overrides (e.g. if .local doesn't work in browser)
   const [backendOverrides, setBackendOverrides] = useState<Record<string, string>>(() => {
-    const saved = localStorage.getItem('artisNovaDSP_backendOverrides');
+    const saved = AppStorage.getItem('artisNovaDSP_backendOverrides');
     return saved ? JSON.parse(saved) : {};
   });
 
@@ -193,7 +211,7 @@ function App() {
   const updateBackendOverride = async (backendId: string, url: string) => {
     const next = { ...backendOverrides, [backendId]: url };
     setBackendOverrides(next);
-    localStorage.setItem('artisNovaDSP_backendOverrides', JSON.stringify(next));
+    AppStorage.setItem('artisNovaDSP_backendOverrides', JSON.stringify(next));
 
     // Sync with server if it's an IP or custom host
     try {
@@ -247,22 +265,18 @@ function App() {
     return () => clearInterval(interval);
   }, [nowPlaying.state]);
 
-  // Persist Media Source and Restore Roon Zone
-  const isInitialMount = useRef(true);
 
   useEffect(() => {
-    localStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
+    AppStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
 
-    // FIX: Only restore zone if it's a manual switch (not initial mount)
-    // On initial mount, we trust the server's active zone (synced via checkStatus)
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    if (mediaSource === 'roon') {
-      const lastZone = localStorage.getItem('artisNovaDSP_lastRoonZone');
-      if (lastZone) selectZone(lastZone, 'roon');
+    // Initial Restoration: If we are on Roon and haven't restored yet, do it.
+    if (!hasRestoredZoneRef.current && mediaSource === 'roon') {
+      const lastZone = AppStorage.getItem('artisNovaDSP_lastRoonZone');
+      if (lastZone) {
+        console.log(`App: Restoring last Roon zone on mount/switch: ${lastZone}`);
+        selectZone(lastZone, 'roon');
+        hasRestoredZoneRef.current = true;
+      }
     }
   }, [mediaSource]);
 
@@ -283,13 +297,13 @@ function App() {
     if (selectedColor) {
       document.documentElement.style.setProperty('--bg-app', selectedColor.color);
       document.body.style.backgroundColor = selectedColor.color;
-      localStorage.setItem(BG_COLOR_STORAGE_KEY, bgColor);
+      AppStorage.setItem(BG_COLOR_STORAGE_KEY, bgColor);
     }
   }, [bgColor]);
 
   useEffect(() => {
-    console.log("Artis Nova DSP v1.2.1 - Loading Layout...");
-    const savedLayout = localStorage.getItem(PANEL_STORAGE_KEY);
+    console.log("Artis Nova DSP v1.2.2 - Loading Layout...");
+    const savedLayout = AppStorage.getItem(PANEL_STORAGE_KEY);
     if (savedLayout) {
       try {
         const parsed = JSON.parse(savedLayout);
@@ -311,12 +325,12 @@ function App() {
 
   useEffect(() => {
     // Save source preference independently
-    localStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
+    AppStorage.setItem('artisNovaDSP_mediaSource', mediaSource);
 
     // Also update legacy config for backward compatibility, but don't depend on it for reading
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const saved = AppStorage.getItem(STORAGE_KEY);
     const config = saved ? JSON.parse(saved) : {};
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...config, mediaSource }));
+    AppStorage.setItem(STORAGE_KEY, JSON.stringify({ ...config, mediaSource }));
   }, [mediaSource]);
 
   const onLayoutChange = (sizes: any) => {
@@ -326,7 +340,7 @@ function App() {
     if (JSON.stringify(sizes) !== JSON.stringify(panelSizes)) {
       console.log('Saving layout:', sizes);
       setPanelSizes(sizes);
-      localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(sizes));
+      AppStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(sizes));
     }
   };
 
@@ -444,7 +458,7 @@ function App() {
         setMediaSource('apple');
         setBackend('local');
       } else if (source === 'roon') {
-        localStorage.setItem('artisNovaDSP_lastRoonZone', zoneId);
+        AppStorage.setItem('artisNovaDSP_lastRoonZone', zoneId);
         setMediaSource('roon');
 
         // Context Awareness: Switch DSP backend based on Roon zone mapping
@@ -549,6 +563,7 @@ function App() {
             position: res.data.position || 0,
             duration: res.data.duration || 0
           }));
+          nowPlayingTrackRef.current = res.data.track; // Update Ref immediately for fetchLyrics
           setArtworkRetryKey(0); // Reset retry on track change
           fetchLyrics(res.data.track, res.data.artist, res.data.device);
         } else {
@@ -559,8 +574,10 @@ function App() {
             const posChanged = Math.abs((res.data.position || 0) - prev.position) > 1;
             const pathChanged = JSON.stringify(res.data.signalPath) !== JSON.stringify(prev.signalPath);
             const artworkChanged = res.data.artworkUrl !== prev.artworkUrl;
+            const yearChanged = res.data.year !== prev.year;
+            const styleChanged = res.data.style !== prev.style;
 
-            if (!stateChanged && !posChanged && !pathChanged && !artworkChanged) return prev;
+            if (!stateChanged && !posChanged && !pathChanged && !artworkChanged && !yearChanged && !styleChanged) return prev;
 
             return {
               ...prev,
@@ -618,11 +635,12 @@ function App() {
       return;
     }
     try {
+      console.log(`App: Fetching lyrics for "${track}" by "${artist}"...`);
       const res = await axios.get(`${API_URL}/media/lyrics`, { params: { track, artist } });
 
       // Only update if we are still on the same track
-      if (requestedTrack !== nowPlaying.track) {
-        console.log(`App: Lyrics received for "${requestedTrack}" but current track is "${nowPlaying.track}". Ignoring.`);
+      if (requestedTrack !== nowPlayingTrackRef.current) {
+        console.log(`App: Lyrics received for "${requestedTrack}" but current track migrated to "${nowPlayingTrackRef.current}". Ignoring.`);
         return;
       }
 
@@ -644,7 +662,7 @@ function App() {
   const savedBypassRef = useRef<boolean>(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const saved = AppStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const config: SavedConfig = JSON.parse(saved);
@@ -674,7 +692,8 @@ function App() {
   useEffect(() => {
     if (!isLoaded) return;
     const config: SavedConfig = { filters, preamp, sampleRate, bitDepth, selectedPreset, activeMode, backend, bypass: isBypass };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    AppStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    AppStorage.setItem('artisNovaDSP_activeMode', activeMode);
   }, [filters, preamp, sampleRate, bitDepth, selectedPreset, isLoaded, activeMode, backend, isBypass]);
 
   // Check Raspberry Pi connectivity
@@ -727,9 +746,9 @@ function App() {
 
       setIsDspManaged(prev => prev !== (res.data.isDspManaged || false) ? (res.data.isDspManaged || false) : prev);
 
-      // Auto-sync backend
-      if (res.data.isAutoSelected && res.data.backend && res.data.backend !== backend) {
-        console.log(`App: Auto-switching backend to "${res.data.backend}"`);
+      // FORCED BACKEND SYNC: Ensure all devices use the backend the server reports as active
+      if (res.data.backend && res.data.backend !== backend) {
+        console.log(`App: Syncing backend with server -> "${res.data.backend}"`);
         setBackend(res.data.backend as 'local' | 'raspi');
       }
 
@@ -758,16 +777,20 @@ function App() {
       }
 
       // Auto-start logic...
-      if (!res.data.running && !hasAutoStartedRef.current) {
+      // Auto-state sync logic (Initial Load)
+      if (!hasAutoStartedRef.current) {
         hasAutoStartedRef.current = true;
-        try {
-          if (savedBypassRef.current) {
-            // await axios.post(`${API_URL}/bypass`);
-            console.log('App: Auto-bypass disabled to prevent conflict loop');
-          } else {
-            await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth });
-          }
-        } catch (e) { }
+
+        // Scenario A: Server is NOT running, but we want DSP
+        if (!res.data.running && !savedBypassRef.current) {
+          console.log('App: Auto-starting DSP (Saved state is ENABLED)...');
+          await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth });
+        }
+        // Scenario B: Server IS running, but we wanted Bypass and it's NOT bypassed
+        else if (res.data.running && savedBypassRef.current && !res.data.bypass) {
+          console.log('App: Mismatch detected - Forcing Bypass as per saved preference');
+          await axios.post(`${API_URL}/bypass`).catch(() => { });
+        }
       }
 
       if (res.data.isAutoMuted !== undefined) {
@@ -1031,8 +1054,8 @@ function App() {
                   </button>
                 </div>
                 <div className="flex flex-col items-center justify-center">
-                  <p className="text-base md:text-lg text-white/60 font-medium truncate max-w-[95%]">
-                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'}</span> — {nowPlaying.artist || 'Not Connected'}
+                  <p className="text-xl md:text-3xl text-white/60 font-medium line-clamp-1 mb-10 max-w-[90vw]">
+                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'} {nowPlaying.year ? `(${nowPlaying.year})` : ''}</span> — {nowPlaying.artist || 'Not Connected'}
                   </p>
                   {nowPlaying.style && (
                     <div className="mt-4 animate-in fade-in slide-in-from-top-1 duration-500">

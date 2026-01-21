@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React from 'react';
 import axios from 'axios';
 import VUMeter from './VUMeter';
 import { type Skin } from './SkinSelector';
-import RTA from './RTA';
-import { Gauge, Activity, Play, Pause, SkipBack, SkipForward } from 'lucide-react';
+import RTA, { type RTASkin } from './RTA';
+import { AppStorage } from '../utils/storage';
+import { Gauge, Activity, Play, Pause, SkipBack, SkipForward, Palette } from 'lucide-react';
 
 const API_Base = window.location.protocol + '//' + window.location.hostname + ':3000/api';
 
@@ -17,8 +18,26 @@ interface Props {
 
 
 const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, resolvedArtworkUrl }) => {
-    const [mode, setMode] = useState<'vu' | 'rta'>('vu');
-    const [skin, setSkin] = useState<Skin>('modern');
+    const [mode, setMode] = React.useState<'vu' | 'rta'>(() => {
+        return (AppStorage.getItem('artisNovaDSP_viz_mode') as 'vu' | 'rta') || 'vu';
+    });
+    const [skin, setSkin] = React.useState<Skin>(() => {
+        return (AppStorage.getItem('artisNovaDSP_viz_skin') as Skin) || 'modern';
+    });
+    const [rtaSkin, setRtaSkin] = React.useState<RTASkin>(() => {
+        return (AppStorage.getItem('artisNovaDSP_viz_rta_skin') as RTASkin) || 'blue';
+    });
+    const [isAsymmetric, setIsAsymmetric] = React.useState(() => {
+        return AppStorage.getItem('artisNovaDSP_viz_stereo') === 'true';
+    });
+
+    // Save settings on change
+    React.useEffect(() => {
+        AppStorage.setItem('artisNovaDSP_viz_mode', mode);
+        AppStorage.setItem('artisNovaDSP_viz_skin', skin);
+        AppStorage.setItem('artisNovaDSP_viz_rta_skin', rtaSkin);
+        AppStorage.setItem('artisNovaDSP_viz_stereo', isAsymmetric.toString());
+    }, [mode, skin, rtaSkin, isAsymmetric]);
 
     // Restoration of detailed info display
     const renderTrackInfo = () => {
@@ -33,7 +52,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                 </h2>
 
                 <p className="text-lg md:text-2xl text-white/60 font-medium line-clamp-1 mb-8 max-w-[90vw]">
-                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'}</span> — {nowPlaying.artist || 'Not Connected'}
+                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'} {nowPlaying.year ? `(${nowPlaying.year})` : ''}</span> — {nowPlaying.artist || 'Not Connected'}
                 </p>
 
                 {/* Transport Controls - EXACT Match with App.tsx */}
@@ -71,7 +90,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                         </div>
                     )}
                     <div className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-2 text-center uppercase" style={{ color: '#9b59b6' }}>
-                        {isRunning ? '96.0 kHz — 24 bits' : 'Direct Mode'}
+                        {isRunning ? (nowPlaying.sampleRate ? `${(nowPlaying.sampleRate / 1000).toFixed(1)} kHz — ${nowPlaying.bitDepth} bits` : '96.0 kHz — 24 bits') : 'Direct Mode'}
                     </div>
                 </div>
             </div>
@@ -139,9 +158,44 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                                 <option value="retro" className="bg-[#121212]">Retro Paper</option>
                             </select>
                             <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none opacity-40">
-                                <Activity size={10} className="rotate-90" />
+                                <Palette size={10} className="" />
                             </div>
                         </div>
+                    </div>
+                )}
+
+                {/* RTA Configuration (Skin + Stereo Toggle) */}
+                {mode === 'rta' && (
+                    <div className="flex items-center gap-3 scale-100 md:scale-95">
+                        <div className="relative w-[180px]">
+                            <select
+                                value={rtaSkin}
+                                onChange={(e) => setRtaSkin(e.target.value as RTASkin)}
+                                className="w-full appearance-none bg-white/5 hover:bg-white/10 backdrop-blur-xl text-white font-bold border border-white/10 hover:border-accent-primary/30 rounded-lg px-6 py-2.5 text-[9px] uppercase tracking-[0.25em] outline-none cursor-pointer transition-all text-center shadow-lg"
+                            >
+                                <option value="blue" className="bg-[#121212]">Indigo Blue</option>
+                                <option value="red" className="bg-[#121212]">Crimson Red</option>
+                                <option value="traffic" className="bg-[#121212]">Traffic Light</option>
+                                <option value="soft" className="bg-[#121212]">Soft Lavender</option>
+                                <option value="neon" className="bg-[#121212]">Neon High-Vis</option>
+                                <option value="sunset" className="bg-[#121212]">Sunset Glow</option>
+                                <option value="forest" className="bg-[#121212]">Forest Green</option>
+                                <option value="ocean" className="bg-[#121212]">Deep Ocean</option>
+                                <option value="gold" className="bg-[#121212]">Golden Hour</option>
+                                <option value="cyber" className="bg-[#121212]">Cyberpunk</option>
+                            </select>
+                            <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none opacity-40">
+                                <Palette size={10} />
+                            </div>
+                        </div>
+
+                        {/* Stereo Toggle Switch */}
+                        <button
+                            onClick={() => setIsAsymmetric(!isAsymmetric)}
+                            className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border transition-all duration-300 font-bold text-[9px] uppercase tracking-[0.25em] ${isAsymmetric ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 shadow-[0_0_20px_rgba(34,211,238,0.2)]' : 'bg-white/5 text-white/40 border-white/10 hover:border-white/20'}`}
+                        >
+                            Stereo
+                        </button>
                     </div>
                 )}
             </div>
@@ -152,7 +206,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                     {mode === 'vu' ? (
                         <VUMeter isRunning={isRunning} wsUrl={wsUrl} skin={skin} className="w-full h-full" />
                     ) : (
-                        <RTA isRunning={isRunning} wsUrl={wsUrl} />
+                        <RTA isRunning={isRunning} wsUrl={wsUrl} skin={rtaSkin} isAsymmetric={isAsymmetric} />
                     )}
                 </div>
             </div>

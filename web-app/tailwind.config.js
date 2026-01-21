@@ -7,9 +7,10 @@ export default {
     theme: {
         extend: {
             colors: {
-                accent: "#22c55e",         // Pro Green
-                "accent-secondary": "#0ea5e9", // Cyan
-                "accent-red": "#ef4444",   // Red for alerts/stop
+                accent: "#22c55e",
+                "accent-primary": "#00d4ff",
+                "accent-secondary": "#00d4ff",
+                "accent-red": "#ef4444",
                 surface: "#121212",
                 panel: "#1a1a1a",
                 deep: "#0a0a0a",

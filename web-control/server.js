@@ -127,7 +127,7 @@ async function updatePlaybackHistory() {
                         title: historyState.currentTrack,
                         artist: historyState.currentArtist,
                         album: historyState.currentAlbum,
-                        style: historyState.metadata.genre || 'Music',
+                        style: historyState.metadata.genre || null,
                         source: historyState.currentSource,
                         device: historyState.currentDevice,
                         artworkUrl: historyState.metadata.artworkUrl,
@@ -158,7 +158,7 @@ async function updatePlaybackHistory() {
                     title: historyState.currentTrack,
                     artist: historyState.currentArtist,
                     album: historyState.currentAlbum,
-                    style: historyState.metadata.genre || 'Music',
+                    style: historyState.metadata.genre || null,
                     source: historyState.currentSource,
                     device: historyState.currentDevice,
                     artworkUrl: historyState.metadata.artworkUrl,
@@ -733,11 +733,15 @@ async function getArtistInfo(artist, album) {
         console.log(`Artist Info: Searching for "${artist}"...`);
         let adbArtist = await fetchAudioDB(artist);
 
-        // Retry with first artist if failed and separator exists
-        if (!adbArtist && (artist.includes('/') || artist.includes(',') || artist.toLowerCase().includes('feat.'))) {
-            const firstArtist = artist.split(/(?:\/|,|feat\.)/i)[0].trim();
-            console.log(`Artist Info: Retrying with first artist "${firstArtist}"...`);
-            adbArtist = await fetchAudioDB(firstArtist);
+        // Retry with variants if failed
+        if (!adbArtist) {
+            const parts = artist.split(/[;\/&]| and | feat\. /i).map(p => p.trim());
+            for (const part of parts) {
+                if (part === artist) continue;
+                console.log(`Artist Info: Retrying with part "${part}"...`);
+                adbArtist = await fetchAudioDB(part);
+                if (adbArtist) break;
+            }
         }
 
         if (adbArtist) {
@@ -745,7 +749,9 @@ async function getArtistInfo(artist, album) {
                 bio: adbArtist.strBiographyEN || null,
                 formed: adbArtist.intFormedYear || 'Unknown',
                 origin: adbArtist.strCountry || 'Unknown',
-                tags: [adbArtist.strStyle, adbArtist.strGenre].filter(Boolean),
+                tags: [adbArtist.strStyle, adbArtist.strGenre]
+                    .filter(Boolean)
+                    .filter(t => !['music', 'unknown'].includes(t.toLowerCase().trim())),
                 image: adbArtist.strArtistThumb || null,
                 source: 'TheAudioDB'
             };
@@ -759,7 +765,9 @@ async function getArtistInfo(artist, album) {
         }
 
         if (mbArtist) {
-            const tags = mbArtist.tags ? mbArtist.tags.map(t => t.name).slice(0, 5) : ['Music'];
+            const tags = mbArtist.tags
+                ? mbArtist.tags.map(t => t.name).filter(t => !['music', 'unknown'].includes(t.toLowerCase().trim())).slice(0, 5)
+                : [];
             const formed = mbArtist['life-span'] ? (mbArtist['life-span'].begin || 'Unknown') : 'Unknown';
 
             return {
@@ -780,7 +788,7 @@ async function getArtistInfo(artist, album) {
         bio: null,
         formed: '-',
         origin: '-',
-        tags: ['Music'],
+        tags: [],
         source: 'Local'
     };
 }
@@ -789,61 +797,162 @@ async function getArtistInfo(artist, album) {
 async function getAlbumInfo(artist, album) {
     if (!artist || !album) return null;
 
-    // Normalize album name by stripping common suffixes that may not match TheAudioDB
+    // Normalize names to improve AudioDB matching
+    const cleanStr = (s) => s.replace(/\s+/g, ' ').trim();
+    const normalizeArtistName = (name) => {
+        // Handle "Artist A / Artist B" or "Artist A & Artist B"
+        const parts = name.split(/[;\/&]| and /i);
+        return parts.map(p => cleanStr(p));
+    };
     const normalizeAlbumName = (name) => {
-        return name
+        return cleanStr(name
+            .replace(/\s*\(\d{4}\)\s*$/g, '') // Strip trailing year in parentheses (e.g. "(1973)")
             .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version)\)\s*$/i, '')
-            .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition)\]\s*$/i, '')
-            .trim();
+            .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition)\]\s*$/i, ''));
     };
 
-    const normalizedAlbum = normalizeAlbumName(album);
-    const searchVariants = [album]; // Always try exact match first
-    if (normalizedAlbum !== album) {
-        searchVariants.push(normalizedAlbum); // Then try normalized
-    }
+    const artistVariants = [artist, ...normalizeArtistName(artist)];
+    const albumVariants = [album];
+    const normalizedA = normalizeAlbumName(album);
+    if (normalizedA !== album) albumVariants.push(normalizedA);
 
-    for (const searchAlbum of searchVariants) {
-        try {
-            const adbUrl = `https://www.theaudiodb.com/api/v1/json/2/searchalbum.php?s=${encodeURIComponent(artist)}&a=${encodeURIComponent(searchAlbum)}`;
-            const adbRes = await axios.get(adbUrl, { timeout: 4000 });
-            const adbAlbum = adbRes.data?.album?.[0];
+    console.log(`AlbumInfo: Searching variants for "${album}" by "${artist}": Artists=[${artistVariants.join(', ')}], Albums=[${albumVariants.join(', ')}]`);
 
-            if (adbAlbum) {
-                console.log(`AlbumInfo: Found "${adbAlbum.strAlbum}" for query "${searchAlbum}"`);
-                let tracklist = [];
-                if (adbAlbum.idAlbum) {
-                    try {
-                        const tracksUrl = `https://www.theaudiodb.com/api/v1/json/2/track.php?m=${adbAlbum.idAlbum}`;
-                        const tracksRes = await axios.get(tracksUrl, { timeout: 3000 });
-                        if (tracksRes.data?.track) {
-                            tracklist = tracksRes.data.track.map(t => ({
-                                number: parseInt(t.intTrackNumber),
-                                title: t.strTrack,
-                                duration: t.intDuration ? `${Math.floor(t.intDuration / 60000)}:${((t.intDuration % 60000) / 1000).toFixed(0).padStart(2, '0')}` : '--:--',
-                                disc: 1
-                            })).sort((a, b) => a.number - b.number);
-                        }
-                    } catch (err) { console.warn('AudioDB Tracks failed', err.message); }
+    for (const searchArtist of artistVariants) {
+        for (const searchAlbum of albumVariants) {
+            try {
+                console.log(`AlbumInfo: Trying "${searchAlbum}" by "${searchArtist}"...`);
+                const adbUrl = `https://www.theaudiodb.com/api/v1/json/2/searchalbum.php?s=${encodeURIComponent(searchArtist)}&a=${encodeURIComponent(searchAlbum)}`;
+                const adbRes = await axios.get(adbUrl, { timeout: 4000 });
+                console.log(`AlbumInfo: AudioDB response for "${searchAlbum}":`, JSON.stringify(adbRes.data).substring(0, 500));
+                const adbAlbum = adbRes.data?.album?.[0];
+
+                if (adbAlbum) {
+                    console.log(`AlbumInfo: Found "${adbAlbum.strAlbum}" (${adbAlbum.intYearReleased}) for query "${searchAlbum}"`);
+                    let tracklist = [];
+                    if (adbAlbum.idAlbum) {
+                        try {
+                            const tracksUrl = `https://www.theaudiodb.com/api/v1/json/2/track.php?m=${adbAlbum.idAlbum}`;
+                            const tracksRes = await axios.get(tracksUrl, { timeout: 3000 });
+                            if (tracksRes.data?.track) {
+                                tracklist = tracksRes.data.track.map(t => ({
+                                    number: parseInt(t.intTrackNumber),
+                                    title: t.strTrack,
+                                    duration: t.intDuration ? `${Math.floor(t.intDuration / 60000)}:${Math.floor((t.intDuration % 60000) / 1000).toString().padStart(2, '0')}` : '--:--',
+                                    disc: 1
+                                })).sort((a, b) => a.number - b.number);
+                            }
+                        } catch (err) { console.warn('AudioDB Tracks failed', err.message); }
+                    }
+
+                    return {
+                        title: adbAlbum.strAlbum,
+                        date: adbAlbum.intYearReleased,
+                        label: adbAlbum.strLabel || 'Unknown Label',
+                        type: adbAlbum.strReleaseFormat || 'Album',
+                        trackCount: tracklist.length || 0,
+                        tracklist: tracklist,
+                        credits: [],
+                        artwork: adbAlbum.strAlbumThumb || null
+                    };
                 }
-
-                return {
-                    title: adbAlbum.strAlbum,
-                    date: adbAlbum.intYearReleased,
-                    label: adbAlbum.strLabel || 'Unknown Label',
-                    type: adbAlbum.strReleaseFormat || 'Album',
-                    trackCount: tracklist.length || 0,
-                    tracklist: tracklist,
-                    credits: [],
-                    artwork: adbAlbum.strAlbumThumb || null
-                };
+            } catch (e) {
+                console.warn(`Album Info: AudioDB failed for "${searchArtist}" - "${searchAlbum}"`, e.message);
             }
-        } catch (e) {
-            console.warn(`Album Info: AudioDB failed for "${searchAlbum}"`, e.message);
         }
     }
 
-    console.log(`AlbumInfo: No results for "${artist}" - "${album}" (normalized: "${normalizedAlbum}")`);
+    // NEW: Search for album name only if artist-specific search failed
+    console.log(`AlbumInfo: Trying album-only search for "${album}" on AudioDB...`);
+    try {
+        const adbUrl = `https://www.theaudiodb.com/api/v1/json/2/searchalbum.php?a=${encodeURIComponent(album)}`;
+        const adbRes = await axios.get(adbUrl, { timeout: 4000 });
+        const albums = adbRes.data?.album;
+        if (albums && albums.length > 0) {
+            // Find the best match if multiple
+            const adbAlbum = albums.find(a => a.strArtist.includes(artist) || artist.includes(a.strArtist)) || albums[0];
+            console.log(`AlbumInfo: Found via album-only search: "${adbAlbum.strAlbum}" by "${adbAlbum.strArtist}" (${adbAlbum.intYearReleased})`);
+            return {
+                title: adbAlbum.strAlbum,
+                date: adbAlbum.intYearReleased,
+                label: adbAlbum.strLabel || 'Unknown Label',
+                type: adbAlbum.strReleaseFormat || 'Album',
+                trackCount: 0,
+                tracklist: [],
+                artwork: adbAlbum.strAlbumThumb || null
+            };
+        }
+    } catch (e) {
+        console.warn(`Album Info: Album-only AudioDB search failed for "${album}"`, e.message);
+    }
+
+    console.log(`AlbumInfo: TheAudioDB FAILED for "${artist}" - "${album}". Trying MusicBrainz fallback...`);
+    const mbResult = await getAlbumInfoFromMusicBrainz(artist, album);
+    if (mbResult) return mbResult;
+
+    console.log(`AlbumInfo: All sources FAILED for "${artist}" - "${album}" (normalized: "${normalizedA}")`);
+    return null;
+}
+
+// Helper: Get Album Info (MusicBrainz Fallback)
+async function getAlbumInfoFromMusicBrainz(artist, album) {
+    if (!artist || !album) return null;
+
+    const cleanStr = (s) => s.replace(/\s+/g, ' ').trim();
+    const normalizeArtistName = (name) => {
+        const parts = name.split(/[;\/&]| and | feat\. /i);
+        return parts.map(p => cleanStr(p));
+    };
+
+    const artistVariants = [artist, ...normalizeArtistName(artist)];
+
+    for (const searchArtist of artistVariants) {
+        try {
+            console.log(`MusicBrainz: Searching for "${album}" by "${searchArtist}"...`);
+            const query = `artist:"${searchArtist}" AND release:"${album}"`;
+            const searchUrl = `https://musicbrainz.org/ws/2/release?query=${encodeURIComponent(query)}&fmt=json`;
+
+            const searchRes = await axios.get(searchUrl, {
+                timeout: 6000,
+                headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+            });
+
+            const release = searchRes.data?.releases?.[0];
+            if (release && release.score >= 75) {
+                console.log(`AlbumInfo: MusicBrainz found match "${release.title}" (Score: ${release.score})`);
+
+                const detailsUrl = `https://musicbrainz.org/ws/2/release/${release.id}?inc=recordings+labels+release-groups&fmt=json`;
+                const detailsRes = await axios.get(detailsUrl, {
+                    timeout: 6000,
+                    headers: { 'User-Agent': 'ArtisNova/1.2.1 (contact: artisnova@example.com)' }
+                });
+
+                const data = detailsRes.data;
+                if (data) {
+                    const tracklist = data.media?.[0]?.tracks?.map(t => ({
+                        number: parseInt(t.number) || t.position,
+                        title: t.title,
+                        duration: t.length ? `${Math.floor(t.length / 60000)}:${Math.floor((t.length % 60000) / 1000).toString().padStart(2, '0')}` : '--:--',
+                        disc: 1
+                    })) || [];
+
+                    const year = data['release-group']?.['first-release-date'] ? data['release-group']['first-release-date'].substring(0, 4) : (data.date ? data.date.substring(0, 4) : 'Unknown');
+
+                    return {
+                        title: data.title,
+                        date: year,
+                        label: data['label-info']?.[0]?.label?.name || 'Unknown Label',
+                        type: data['release-group']?.['primary-type'] || 'Album',
+                        trackCount: tracklist.length,
+                        tracklist: tracklist,
+                        artwork: `https://coverartarchive.org/release/${release.id}/front`
+                    };
+                }
+            }
+        } catch (err) {
+            console.warn(`MusicBrainz: Search variant failed for "${searchArtist}":`, err.message);
+        }
+    }
     return null;
 }
 
@@ -855,7 +964,8 @@ console.log('Server: History DB module loaded');
 // Lyrics Utilities
 // Simple in-memory cache for lyrics to avoid spamming the API
 const lyricsCache = new Map();
-const metadataCache = new Map(); // New: Metadata Cache for Album/Year enrichment
+const metadataCache = new Map();
+let loggedRoonRaw = false; // Global flag for one-time detailed log // New: Metadata Cache for Album/Year enrichment
 
 async function fetchLyrics(url, params) {
     try {
@@ -1088,6 +1198,7 @@ app.get('/api/media/queue', async (req, res) => {
 });
 
 app.get('/api/media/info', async (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const source = req.query.source;
     try {
         if (source === 'roon') {
@@ -1138,6 +1249,7 @@ app.get('/api/media/info', async (req, res) => {
 
             // Enrich with cached Year/Genre/Artwork info if missing
             const cacheKey = `${info.artist}-${info.album}`;
+
             if (info.artist && info.album && (!info.year || !info.style || !info.artworkUrl)) {
                 if (metadataCache.has(cacheKey)) {
                     const cached = metadataCache.get(cacheKey);
@@ -1145,19 +1257,35 @@ app.get('/api/media/info', async (req, res) => {
                     if (!info.style) info.style = cached.style;
                     if (!info.artworkUrl) info.artworkUrl = cached.artwork;
                 } else {
-                    // Trigger async fetch
-                    Promise.all([
-                        getAlbumInfo(info.artist, info.album),
-                        getArtistInfo(info.artist, info.album)
-                    ]).then(([albumData, artistData]) => {
-                        const year = albumData?.date || '';
-                        const style = artistData?.tags?.[0] || '';
-                        const artwork = albumData?.artwork || '';
-                        metadataCache.set(cacheKey, { year, style, artwork });
-                    });
+                    // BACKGROUND ENRICHMENT: Trigger fetch in background and return immediate current info
+                    (async () => {
+                        try {
+                            console.log(`Enrichment (Background): Fetching metadata for "${cacheKey}"...`);
+                            const [albumData, artistData] = await Promise.all([
+                                getAlbumInfo(info.artist, info.album),
+                                getArtistInfo(info.artist, info.album)
+                            ]);
+
+                            const year = albumData?.date || '';
+                            // FILTER GENERIC GENRES: Prefer any tag that isn't 'music'. If only 'music' exists, return empty.
+                            const style = (artistData?.tags || []).find(t => t.toLowerCase() !== 'music') || '';
+                            const artwork = albumData?.artwork || '';
+
+                            if (year || style || artwork) {
+                                metadataCache.set(cacheKey, { year, style, artwork });
+                                console.log(`Enrichment (Background): Success for "${cacheKey}" -> Year: ${year || '?'}, Style: ${style || '?'}`);
+
+                                // PROPER SYNC: Trigger a metadata broadcast so the frontend refreshes
+                                broadcast('metadata_update', { source: 'roon', info: { ...info, year, style, artworkUrl: artwork } });
+                            }
+                        } catch (e) {
+                            console.warn('Metadata enrichment background task failed:', e.message);
+                        }
+                    })();
                 }
             }
 
+            console.log(`API Info (Roon): Sending Metadata for "${info.track}" - Year: ${info.year || 'MISSING'}`);
             return res.json(info);
         } else if (source === 'lms') {
             const data = await lmsController.getStatus();
@@ -1200,21 +1328,25 @@ app.get('/api/media/info', async (req, res) => {
             const crypto = require('crypto');
             const trackHash = crypto.createHash('md5').update(`${info.track}-${info.artist}`).digest('hex').substring(0, 8);
             info.artworkUrl = `/api/media/artwork?h=${trackHash}`;
-        } else {
-            // FALLBACK: Use metadata cache or fetch from AudioDB
-            const cacheKey = `${info.artist}-${info.album}`;
+        }
+
+        // ALWAYS attempt metadata enrichment for Year/Style regardless of artwork
+        const cacheKey = `${info.artist}-${info.album}`;
+        if (info.artist && info.album && (!info.year || !info.style)) {
             if (metadataCache.has(cacheKey)) {
-                info.artworkUrl = metadataCache.get(cacheKey).artwork;
-                if (!info.year) info.year = metadataCache.get(cacheKey).year;
-                if (!info.style) info.style = metadataCache.get(cacheKey).style;
+                const cached = metadataCache.get(cacheKey);
+                if (!info.year) info.year = cached.year;
+                if (!info.style) info.style = cached.style;
+                if (!info.artworkUrl && cached.artwork) info.artworkUrl = cached.artwork;
             } else {
-                // Async trigger for next poll
-                getAlbumInfo(info.artist, info.album).then(data => {
-                    if (data && data.artwork) {
-                        const existing = metadataCache.get(cacheKey) || {};
-                        metadataCache.set(cacheKey, { ...existing, artwork: data.artwork, year: data.date });
+                try {
+                    const data = await getAlbumInfo(info.artist, info.album);
+                    if (data) {
+                        if (!info.year) info.year = data.date;
+                        if (!info.artworkUrl) info.artworkUrl = data.artwork;
+                        metadataCache.set(cacheKey, { artwork: data.artwork, year: data.date });
                     }
-                });
+                } catch (e) { }
             }
         }
 
@@ -1227,6 +1359,7 @@ app.get('/api/media/info', async (req, res) => {
             ]
         };
 
+        console.log(`API Info (System/Apple): Sending Metadata for "${info.track}" - Year: ${info.year || 'MISSING'}`);
         return res.json(info);
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1530,8 +1663,8 @@ function broadcastLevels(levels) {
 // --- SYNTHETIC RTA GENERATOR ---
 // Generates a believable 31-band 1/3 octave spectrum from peak levels
 const BANDS = 31;
-let spectrumData = new Array(BANDS).fill(-100);
-let spectrumDecay = new Array(BANDS).fill(0);
+let spectrumL = new Array(BANDS).fill(-100);
+let spectrumR = new Array(BANDS).fill(-100);
 // Simple noise generator state
 let seed = 1;
 function random() {
@@ -1542,49 +1675,57 @@ function random() {
 function updateSpectrum(levels) {
     if (!levels) return;
 
-    // Average levels and clamp
-    const l = Math.max(-100, levels[0]);
-    const r = Math.max(-100, levels[1]);
-    const maxDb = Math.max(l, r); // Driver
+    const normalizedL = levels[0] !== undefined ? Math.max(-100, levels[0]) : -100;
+    const normalizedR = levels[1] !== undefined ? Math.max(-100, levels[1]) : -100;
 
-    // If silence, decay rapidly
-    if (maxDb < -60) {
+    // Strict separation: Force silence if below a certain threshold to avoid "residual energy"
+    const l = normalizedL < -65 ? -120 : normalizedL;
+    const r = normalizedR < -65 ? -120 : normalizedR;
+
+    const runSimulation = (energy, channel, channelData) => {
+        // Strict silence threshold for synthetic RTA
+        if (energy <= -99) {
+            let changed = false;
+            for (let i = 0; i < BANDS; i++) {
+                if (channelData[i] > -120) {
+                    channelData[i] = Math.max(-120, channelData[i] - 15); // Instant-like decay for silence
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        const time = Date.now();
         for (let i = 0; i < BANDS; i++) {
-            spectrumData[i] = Math.max(-120, spectrumData[i] - 2);
+            let curveOffset = 0;
+            if (i < 4) curveOffset = 5; // Bass boost
+            else if (i > 20) curveOffset = -((i - 20) * 1.5); // HF Roll-off
+
+            // Force visual difference between L and R
+            const channelOffset = channel === 'L' ? 0 : Math.PI;
+            const variance = (Math.sin(time / (100 + i * 20) + channelOffset) + 1) * 3;
+            const jitter = (random() - 0.5) * 2;
+
+            let targetDb = energy + curveOffset + (energy > -50 ? variance + jitter : 0);
+            targetDb = Math.min(0, Math.max(-100, targetDb));
+
+            if (targetDb > channelData[i]) {
+                channelData[i] = targetDb;
+            } else {
+                channelData[i] = Math.max(-120, channelData[i] - 4.0); // Faster decay
+            }
         }
-        broadcastSpectrum();
-        return;
+        return true;
+    };
+
+    const changedL = runSimulation(l, 'L', spectrumL);
+    const changedR = runSimulation(r, 'R', spectrumR);
+
+    // Only log if there's actual signal difference to debug "all same" issue
+    if (Math.abs(l - r) > 5 && (l > -60 || r > -60) && Math.random() < 0.1) {
+        console.log(`RTA Stereo Debug: L=${l.toFixed(1)} R=${r.toFixed(1)} | Diff=${Math.abs(l - r).toFixed(1)}`);
     }
 
-    // Generate spectrum shape
-    // Bass (0-5) is high energy, Mids (6-20) moderate, Highs (21-30) roll off
-    for (let i = 0; i < BANDS; i++) {
-        // Base energy from volume
-        let energy = maxDb;
-
-        // Shape the EQ curve roughly (Green/Pink noise-ish)
-        let curveOffset = 0;
-        if (i < 4) curveOffset = 5; // Bass boost
-        else if (i > 20) curveOffset = -((i - 20) * 1.5); // HF Roll-off
-
-        // Add pseudo-random variance per band that moves slowly
-        const variance = (Math.sin(Date.now() / (100 + i * 20)) + 1) * 5; // 0-10db variance
-
-        // Add fast jitter
-        const jitter = (random() - 0.5) * 4;
-
-        let targetDb = energy + curveOffset + variance + jitter;
-
-        // Clamp logical max
-        targetDb = Math.min(0, Math.max(-100, targetDb));
-
-        // Physics: Attack is instant, Decay is linear
-        if (targetDb > spectrumData[i]) {
-            spectrumData[i] = targetDb;
-        } else {
-            spectrumData[i] = Math.max(-120, spectrumData[i] - 1.5); // Decay speed
-        }
-    }
     broadcastSpectrum();
 }
 
@@ -1594,7 +1735,14 @@ function broadcastSpectrum() {
     const backendId = getBackendIdForZone(zoneName);
     if (backendId !== 'local') return;
 
-    const message = JSON.stringify({ type: 'rta', data: spectrumData });
+    // Send both L and R, plus combined legacy for compatibility
+    const message = JSON.stringify({
+        type: 'rta',
+        left: spectrumL,
+        right: spectrumR,
+        data: spectrumL.map((l, i) => Math.max(l, spectrumR[i])) // Legacy fallback
+    });
+
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(message);

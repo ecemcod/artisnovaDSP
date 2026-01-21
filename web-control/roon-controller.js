@@ -407,19 +407,27 @@ class RoonController {
             return { state: z.state };
         }
 
+        // HEAVY DEBUG: Log everything Roon sends for this zone
+        if (!global.loggedRoonZone) {
+            console.log('DEBUG: Full Roon Zone Object:', JSON.stringify(z, null, 2));
+            global.loggedRoonZone = true;
+        }
+
         console.log(`Roon Metadata[${z.display_name}]: ${track.three_line?.line1} - SignalPath: ${track.signal_path ? 'YES' : 'NO'} `);
 
-        // DEBUG: Verbose logging disabled for performance
-        // console.log('Roon Track Debug:', JSON.stringify(track, null, 2));
-        // if (track.signal_path) {
-        //     console.log('Roon SignalPath Details:', JSON.stringify(track.signal_path));
-        // }
+        // Try to extract year from line3 if it looks like "(2023)"
+        let extractedYear = null;
+        if (track.three_line?.line3) {
+            const match = track.three_line.line3.match(/\((\d{4})\)/);
+            if (match) extractedYear = match[1];
+        }
 
         return {
             state: z.state,
             track: track.three_line.line1 || 'Unknown Track',
             artist: track.three_line.line2 || 'Unknown Artist',
             album: track.three_line.line3 || '',
+            year: extractedYear, // First attempt at Roon year
             artworkUrl: track.image_key ? `/api/image/${track.image_key}` : null,
             duration: track.length || 0,
             position: track.seek_position || 0,
