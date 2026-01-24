@@ -478,15 +478,16 @@ class RemoteDSPManager extends EventEmitter {
     async start(filterData, options = {}) {
         try {
             this.shouldBeRunning = true;
-            this.lastFilterData = filterData;
-            this.lastOptions = options;
-            this.currentState.sampleRate = options.sampleRate || 44100;
+            this.currentState.sampleRate = options.sampleRate || 96000; // Default to 96k if not specified
             this.currentState.bitDepth = options.bitDepth || 24;
             this.currentState.presetName = options.presetName || null;
-            this.currentState.filtersCount = filterData.filters?.length || 0;
+            this.currentState.filtersCount = (filterData.filters && Array.isArray(filterData.filters)) ? filterData.filters.length : 0;
             this.currentState.preamp = filterData.preamp || 0;
             this.currentState.bypass = false;
             this.currentState.running = true;
+
+            this.lastFilterData = filterData;
+            this.lastOptions = options;
 
             // Connect is handled inside pushConfig now (after SSH sync)
             // await this.connect();
@@ -527,12 +528,13 @@ class RemoteDSPManager extends EventEmitter {
     async startBypass(sampleRate) {
         try {
             console.log(`RemoteDSP: startBypass() called at ${sampleRate}Hz`);
-            // await this.connect();
-
             this.shouldBeRunning = true;
             this.currentState.sampleRate = sampleRate;
             this.currentState.bypass = true;
             this.currentState.running = true;
+            this.currentState.presetName = 'BYPASS';
+            this.currentState.filtersCount = 0;
+            this.currentState.preamp = 0;
 
             // Generate a simple bypass config
             const bypassFilterData = { preamp: 0, filters: [] };

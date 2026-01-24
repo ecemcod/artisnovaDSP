@@ -63,10 +63,10 @@ class RoonController {
                 this.browseApi = core.services.RoonApiBrowse;
                 this.isPaired = true;
 
-                // Probe History on Pair
-                setTimeout(() => {
-                    this.probeHistoryAccess();
-                }, 5000);
+                // Probe History on Pair - DISABLED to prevent connection instability
+                // setTimeout(() => {
+                //    this.probeHistoryAccess();
+                // }, 5000);
 
                 this.transport.subscribe_zones(async (status, data) => {
                     console.log(`RoonController: SubscribeZones Status=${status}`);
@@ -145,13 +145,25 @@ class RoonController {
             },
 
             core_unpaired: (core) => {
-                console.log('Roon Core Unpaired');
-                this.core = null;
-                this.transport = null;
+                console.log('Roon Core Unpaired - Retaining state for 30s grace period');
                 this.isPaired = false;
-                this.zones.clear();
-                this._unsubscribeQueue();
-                this._notifyStatus();
+
+                // Don't clear immediately to prevent UI flicker
+                // this.zones.clear();
+                // this.core = null;
+
+                setTimeout(() => {
+                    if (!this.isPaired) {
+                        console.log('RoonController: Grace period ended, clearing zones.');
+                        this.zones.clear();
+                        this.core = null;
+                        this.transport = null;
+                        this._unsubscribeQueue();
+                        this._notifyStatus();
+                    } else {
+                        console.log('RoonController: Re-paired within grace period, keeping state.');
+                    }
+                }, 30000);
             }
         });
 
@@ -300,6 +312,8 @@ class RoonController {
 
         // Ensure no existing subscription (safety)
         console.log(`RoonController: _subscribeQueue called. activeZoneId=${this.activeZoneId}, subscribed=${this.isQueueSubscribed}`);
+
+        // Re-enabled queue subscription
         if (this.isQueueSubscribed) {
             console.log('RoonController: Already subscribed, unsubscribing first...');
             this._unsubscribeQueue();
@@ -422,11 +436,12 @@ class RoonController {
             if (match) extractedYear = match[1];
         }
 
+        const artist = track.three_line?.line2?.trim() || 'Unknown Artist';
         return {
             state: z.state,
-            track: track.three_line.line1 || 'Unknown Track',
-            artist: track.three_line.line2 || 'Unknown Artist',
-            album: track.three_line.line3 || '',
+            track: track.three_line?.line1 || 'Unknown Track',
+            artist: artist,
+            album: track.three_line?.line3 || '',
             year: extractedYear, // First attempt at Roon year
             artworkUrl: track.image_key ? `/api/image/${track.image_key}` : null,
             duration: track.length || 0,
@@ -457,30 +472,45 @@ class RoonController {
         });
     }
 
-    getImage(imageKey, res) {
-        console.log(`RoonController: getImage request for key: ${imageKey} `);
-        if (!this.core) {
-            console.warn('RoonController: getImage failed - No core available');
-            return res.status(404).json({ error: 'No Roon Core' });
-        }
+    async getImage(imageKey, res) {
+        // console.log(`RoonController: getImage request for key: ${imageKey} `);
 
-        const imageService = this.core.services.RoonApiImage;
-        if (!imageService) {
-            console.warn('RoonController: getImage failed - No image service available');
-            return res.status(404).json({ error: 'No Image Service' });
-        }
-
-        imageService.get_image(imageKey, { format: "image/jpeg", width: 600, height: 600, scale: "fit" }, (err, contentType, data) => {
-            if (err) {
-                console.error(`RoonController: getImage ERROR for key ${imageKey}: `, err);
-                return res.status(404).end();
+        try {
+            // Robustness: Wait for connection if momentarily unpaired (grace period)
+            let attempts = 0;
+            while (!this.isPaired && attempts < 10) {
+                // console.log('Waiting for Roon re-pair...');
+                await new Promise(r => setTimeout(r, 500));
+                attempts++;
             }
-            console.log(`RoonController: getImage SUCCESS for key ${imageKey}.Content - Type: ${contentType}, Size: ${data.length} bytes`);
-            res.set("Content-Type", contentType);
-            // Disable caching for images to allow retries with different keys if needed
-            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-            res.send(data);
-        });
+
+            if (!this.core) {
+                console.warn('RoonController: getImage failed - No core available');
+                return res.status(404).json({ error: 'No Roon Core' });
+            }
+
+            const imageService = this.core.services.RoonApiImage;
+            if (!imageService) {
+                console.warn('RoonController: getImage failed - No image service available');
+                return res.status(404).json({ error: 'No Image Service' });
+            }
+
+            imageService.get_image(imageKey, { format: "image/jpeg", width: 600, height: 600, scale: "fit" }, (err, contentType, data) => {
+                if (res.headersSent) return;
+                if (err) {
+                    console.error(`RoonController: getImage ERROR for key ${imageKey}: `, err);
+                    return res.status(404).end();
+                }
+                // console.log(`RoonController: getImage SUCCESS for key ${imageKey}`);
+                res.set("Content-Type", contentType);
+                // Enable aggressive caching for immutable image keys to fix flickering
+                res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+                res.send(data);
+            });
+        } catch (e) {
+            console.error('RoonController: getImage Exception:', e);
+            if (!res.headersSent) res.status(500).end();
+        }
     }
 
     _notifyStatus() {

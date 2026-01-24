@@ -1,0 +1,55 @@
+{
+  "name": "Cantautor",
+  "description": "Imported from txt",
+  "filters": [
+    {
+      "id": "evpzuoc2u",
+      "type": "Peaking",
+      "freq": 95,
+      "gain": -5.5,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "58up2iaoy",
+      "type": "Highshelf",
+      "freq": 10000,
+      "gain": 2,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "87xn2h24y",
+      "type": "Lowshelf",
+      "freq": 60,
+      "gain": 2.5,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "qsc9bvlb8",
+      "type": "Peaking",
+      "freq": 200,
+      "gain": 1.2,
+      "q": 0.9,
+      "enabled": true
+    },
+    {
+      "id": "mf0bndjrf",
+      "type": "Peaking",
+      "freq": 3000,
+      "gain": 1.5,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "658pejase",
+      "type": "Peaking",
+      "freq": 6000,
+      "gain": 1,
+      "q": 1.2,
+      "enabled": true
+    }
+  ],
+  "preamp": -3
+}

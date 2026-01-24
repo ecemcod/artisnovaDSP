@@ -30,6 +30,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
     const [isAsymmetric, setIsAsymmetric] = React.useState(() => {
         return AppStorage.getItem('artisNovaDSP_viz_stereo') === 'true';
     });
+    const [isFrozen, setIsFrozen] = React.useState(false);
 
     // Save settings on change
     React.useEffect(() => {
@@ -196,6 +197,15 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                         >
                             Stereo
                         </button>
+
+                        {/* Freeze Toggle Switch */}
+                        <button
+                            onClick={() => setIsFrozen(!isFrozen)}
+                            className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border transition-all duration-300 font-bold text-[9px] uppercase tracking-[0.25em] ${isFrozen ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 shadow-[0_0_20px_rgba(34,211,238,0.2)]' : 'bg-white/5 text-white/40 border-white/10 hover:border-white/20'}`}
+                        >
+                            <div className={`w-1.5 h-1.5 rounded-full ${isFrozen ? 'bg-accent-primary animate-pulse' : 'bg-white/40'}`} />
+                            {isFrozen ? 'Resume' : 'Freeze'}
+                        </button>
                     </div>
                 )}
             </div>
@@ -206,7 +216,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                     {mode === 'vu' ? (
                         <VUMeter isRunning={isRunning} wsUrl={wsUrl} skin={skin} className="w-full h-full" />
                     ) : (
-                        <RTA isRunning={isRunning} wsUrl={wsUrl} skin={rtaSkin} isAsymmetric={isAsymmetric} />
+                        <RTA isRunning={isRunning} wsUrl={wsUrl} skin={rtaSkin} isAsymmetric={isAsymmetric} isFrozen={isFrozen} />
                     )}
                 </div>
             </div>

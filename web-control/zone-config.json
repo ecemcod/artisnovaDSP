@@ -1,7 +1,8 @@
 {
     "zones": {
         "Raspberry": "raspi",
-        "Camilla": "local"
+        "Camilla": "local",
+        "artis nova": "local"
     },
     "defaults": {
         "dspBackend": "local"

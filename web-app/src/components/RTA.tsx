@@ -7,6 +7,7 @@ interface Props {
     wsUrl?: string;
     skin?: RTASkin;
     isAsymmetric?: boolean;
+    isFrozen?: boolean;
 }
 
 const PALETTES: Record<RTASkin, string[]> = {
@@ -25,9 +26,15 @@ const PALETTES: Record<RTASkin, string[]> = {
 const FREQUENCIES = [20, 25, 31, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, '1k', '1.2k', '1.6k', '2k', '2.5k', '3.1k', '4k', '5k', '6.3k', '8k', '10k', '12.5k', '16k', '20k'];
 const DEFAULT_BANDS = 31;
 
-const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false }) => {
+const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, isFrozen = false }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const wsRef = useRef<WebSocket | null>(null);
+    const isFrozenRef = useRef(isFrozen);
+
+    // Sync ref with prop for use in event listeners
+    React.useEffect(() => {
+        isFrozenRef.current = isFrozen;
+    }, [isFrozen]);
     // Support both single array and L/R object
     const dataRef = useRef<{ left: number[], right: number[] }>({
         left: new Array(DEFAULT_BANDS).fill(-100),
@@ -65,7 +72,7 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false }
             wsRef.current = ws;
 
             ws.onmessage = (event) => {
-                if (isCleaningUp) return;
+                if (isCleaningUp || isFrozenRef.current) return;
                 resetWatchdog();
                 try {
                     const msg = JSON.parse(event.data);
@@ -170,7 +177,7 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false }
 
     return (
         <div className="w-full h-full flex flex-col pt-4 md:pt-8">
-            <div className="flex-1 min-h-0 relative">
+            <div className="flex-1 min-h-0 relative group">
                 <canvas
                     ref={canvasRef}
                     width={1000}

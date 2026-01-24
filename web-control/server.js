@@ -557,7 +557,11 @@ app.post('/api/filters', async (req, res) => {
             // record event?
         }
 
-        res.json({ success: true, state: 'running' });
+        res.json({
+            success: true,
+            state: 'running',
+            currentState: activeDsp.currentState
+        });
     } catch (err) {
         console.error('Filter Update Error:', err);
         res.status(500).json({ error: err.message });
@@ -568,11 +572,7 @@ app.get('/api/presets', (req, res) => {
     try {
         if (!fs.existsSync(PRESETS_DIR)) fs.mkdirSync(PRESETS_DIR, { recursive: true });
         const files = fs.readdirSync(PRESETS_DIR).filter(f => f.endsWith('.json'));
-        const presets = files.map(f => {
-            const content = JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, f), 'utf8'));
-            return { id: f.replace('.json', ''), name: content.name, description: content.description };
-        });
-        res.json(presets);
+        res.json(files);
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -580,10 +580,27 @@ app.get('/api/presets', (req, res) => {
 
 app.get('/api/presets/:id', (req, res) => {
     try {
-        const filePath = path.join(PRESETS_DIR, `${req.params.id}.json`);
+        let filePath = path.join(PRESETS_DIR, req.params.id);
+        if (!fs.existsSync(filePath)) {
+            // Try with extensions if id doesn't have one
+            if (!req.params.id.endsWith('.json') && !req.params.id.endsWith('.txt')) {
+                const jsonPath = path.join(PRESETS_DIR, `${req.params.id}.json`);
+                const txtPath = path.join(PRESETS_DIR, `${req.params.id}.txt`);
+                if (fs.existsSync(jsonPath)) filePath = jsonPath;
+                else if (fs.existsSync(txtPath)) filePath = txtPath;
+            }
+        }
+
         if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Preset not found' });
-        const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        res.json(content);
+
+        if (filePath.endsWith('.json')) {
+            const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            res.json(content);
+        } else {
+            const content = fs.readFileSync(filePath, 'utf8');
+            const parsed = FilterParser.parse(content);
+            res.json(parsed);
+        }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -593,9 +610,10 @@ app.post('/api/presets', (req, res) => {
     try {
         const { name, description, filters, preamp } = req.body;
         const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        const filePath = path.join(PRESETS_DIR, `${id}.json`);
+        const filename = `${id}.json`;
+        const filePath = path.join(PRESETS_DIR, filename);
         fs.writeFileSync(filePath, JSON.stringify({ name, description, filters, preamp }, null, 2));
-        res.json({ success: true, id });
+        res.json({ success: true, id: filename }); // Return filename as id
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -603,9 +621,21 @@ app.post('/api/presets', (req, res) => {
 
 app.delete('/api/presets/:id', (req, res) => {
     try {
-        const filePath = path.join(PRESETS_DIR, `${req.params.id}.json`);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        res.json({ success: true });
+        let filePath = path.join(PRESETS_DIR, req.params.id);
+        if (!fs.existsSync(filePath)) {
+            // Try extensions
+            const jsonPath = path.join(PRESETS_DIR, `${req.params.id}.json`);
+            const txtPath = path.join(PRESETS_DIR, `${req.params.id}.txt`);
+            if (fs.existsSync(jsonPath)) filePath = jsonPath;
+            else if (fs.existsSync(txtPath)) filePath = txtPath;
+        }
+
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            res.json({ success: true });
+        } else {
+            res.status(404).json({ error: 'Preset not found' });
+        }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -629,12 +659,20 @@ app.post('/api/start', async (req, res) => {
             sampleRate: fixedRate,
             bitDepth: parseInt(bitDepth) || 24,
             presetName: presetName,
-            backend: backendId
+            backend: backendId,
+            bypass: false
         };
         console.log(`Starting ${zoneName || 'Local'} DSP with FORCED sample rate: ${fixedRate}Hz`);
 
         await activeDsp.start(filterData, options);
-        res.json({ success: true, state: 'running', sampleRate: fixedRate, bitDepth: options.bitDepth, backend: backendId });
+        res.json({
+            success: true,
+            state: 'running',
+            sampleRate: fixedRate,
+            bitDepth: options.bitDepth,
+            backend: backendId,
+            currentState: activeDsp.currentState
+        });
     } catch (err) {
         console.error('API Start Error:', err);
         res.status(500).json({ error: err.message });
@@ -654,9 +692,14 @@ app.post('/api/bypass', async (req, res) => {
     try {
         const zoneName = getActiveZoneName();
         const activeDsp = getDspForZone(zoneName);
-        const rate = 96000; // Fixed
-        await activeDsp.startBypass(rate);
-        res.json({ success: true, state: 'bypass', sampleRate: rate });
+        const currentRate = activeDsp.currentState.sampleRate || 96000;
+        await activeDsp.startBypass(currentRate);
+        res.json({
+            success: true,
+            state: 'bypass',
+            sampleRate: currentRate,
+            currentState: activeDsp.currentState
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -721,14 +764,29 @@ async function getArtistInfo(artist, album) {
 
     // Helper to fetch from MusicBrainz
     const fetchMusicBrainz = async (name) => {
+        console.log(`CRITICAL: fetchMusicBrainz called for "${name}" (FILTER_ACTIVE: true)`);
         try {
             const url = `https://musicbrainz.org/ws/2/artist/?query=artist:${encodeURIComponent(name)}&fmt=json`;
             const res = await axios.get(url, {
                 headers: { 'User-Agent': 'ArtisNova/1.0.0 ( contact@example.com )' },
                 timeout: 5000
             });
-            return res.data.artists?.[0];
-        } catch { return null; }
+            const artists = res.data.artists || [];
+            // Filter out junk artists like "/" or those consisting only of special characters/short strings
+            const filtered = artists.filter(a => {
+                const cleanName = (a.name || '').trim();
+                // Reject names that are just "/" or "Unknown" or mostly symbols
+                const isJunk = cleanName.length <= 1 ||
+                    /^[\/\.\s\-\,]+$/.test(cleanName) ||
+                    ['unknown', '[unknown]', 'unknown artist', '[no artist]'].includes(cleanName.toLowerCase());
+                return !isJunk;
+            });
+            console.log(`MusicBrainz search for "${name}": Found ${artists.length} artists, ${filtered.length} after filtering junk.`);
+            return filtered[0];
+        } catch (e) {
+            console.error(`MusicBrainz error for "${name}":`, e.message);
+            return null;
+        }
     };
 
     // Helper to fetch bio from Wikipedia
@@ -812,9 +870,15 @@ async function getArtistInfo(artist, album) {
 
         // 3. Fallback: MusicBrainz (Metadata only, synthetic bio)
         let mbArtist = await fetchMusicBrainz(artist);
-        if (!mbArtist && (artist.includes('/') || artist.includes(',') || artist.toLowerCase().includes('feat.'))) {
+
+        // If we got a result but the artist name is exactly "/", or if we got nothing and name has dividers, try splitting
+        const hasDividers = artist.includes('/') || artist.includes(',') || artist.toLowerCase().includes('feat.');
+
+        if (hasDividers && (!mbArtist || mbArtist.name === '/')) {
             const firstArtist = artist.split(/(?:\/|,|feat\.)/i)[0].trim();
-            mbArtist = await fetchMusicBrainz(firstArtist);
+            console.log(`Artist Info: Trying first artist split: "${firstArtist}"`);
+            const splitMatch = await fetchMusicBrainz(firstArtist);
+            if (splitMatch) mbArtist = splitMatch;
         }
 
         if (mbArtist) {
@@ -879,7 +943,10 @@ async function getAlbumInfo(artist, album) {
 
     console.log(`AlbumInfo: Searching variants for "${album}" by "${artist}": Artists=[${artistVariants.join(', ')}], Albums=[${albumVariants.join(', ')}]`);
 
+    const artistUnknown = !artist || artist === 'Unknown Artist';
+
     for (const searchArtist of artistVariants) {
+        if (artistUnknown) break; // Skip artist-specific searches if unknown
         for (const searchAlbum of albumVariants) {
             try {
                 console.log(`AlbumInfo: Trying "${searchAlbum}" by "${searchArtist}"...`);
@@ -908,6 +975,7 @@ async function getAlbumInfo(artist, album) {
 
                     return {
                         title: adbAlbum.strAlbum,
+                        artist: adbAlbum.strArtist,
                         date: adbAlbum.intYearReleased,
                         label: adbAlbum.strLabel || 'Unknown Label',
                         type: adbAlbum.strReleaseFormat || 'Album',
@@ -923,7 +991,7 @@ async function getAlbumInfo(artist, album) {
         }
     }
 
-    // NEW: Search for album name only if artist-specific search failed
+    // NEW: Search for album name only if artist-specific search failed or artist is unknown
     console.log(`AlbumInfo: Trying album-only search for "${album}" on AudioDB...`);
     try {
         const adbUrl = `https://www.theaudiodb.com/api/v1/json/2/searchalbum.php?a=${encodeURIComponent(album)}`;
@@ -935,6 +1003,7 @@ async function getAlbumInfo(artist, album) {
             console.log(`AlbumInfo: Found via album-only search: "${adbAlbum.strAlbum}" by "${adbAlbum.strArtist}" (${adbAlbum.intYearReleased})`);
             return {
                 title: adbAlbum.strAlbum,
+                artist: adbAlbum.strArtist || artist,
                 date: adbAlbum.intYearReleased,
                 label: adbAlbum.strLabel || 'Unknown Label',
                 type: adbAlbum.strReleaseFormat || 'Album',
@@ -962,13 +1031,15 @@ async function getAlbumInfo(artist, album) {
 // Helper: Get Album Info (Discogs)
 async function getAlbumInfoFromDiscogs(artist, album) {
     try {
-        console.log(`Discogs: Searching for "${album}" by "${artist}"...`);
-        // Use release_title and artist for more targeted search
-        const searchUrl = `https://api.discogs.com/database/search?release_title=${encodeURIComponent(album)}&artist=${encodeURIComponent(artist)}&type=release&per_page=1`;
+        const artistUnknown = !artist || artist === 'Unknown Artist';
+        // Use release_title and artist for more targeted search, OR just q for broader search if artist unknown
+        const searchUrl = artistUnknown
+            ? `https://api.discogs.com/database/search?q=${encodeURIComponent(album)}&type=release&per_page=1`
+            : `https://api.discogs.com/database/search?release_title=${encodeURIComponent(album)}&artist=${encodeURIComponent(artist)}&type=release&per_page=1`;
 
-        // Note: Discogs requires a User-Agent and ideally an API key, but simple search might work or we use a generic one
+        // Note: Discogs requires a User-Agent and ideally an API key
         const searchRes = await axios.get(searchUrl, {
-            headers: { 'User-Agent': 'ArtisNova/1.2.1 +https://github.com/mcouceiro/artisnova' },
+            headers: { 'User-Agent': 'ArtisNova/1.2.1' }, // Simplified UA
             timeout: 5000
         });
 
@@ -995,6 +1066,7 @@ async function getAlbumInfoFromDiscogs(artist, album) {
 
                 return {
                     title: data.title,
+                    artist: (data.artists && data.artists[0]?.name) || release.title.split(' - ')[0] || artist,
                     date: data.year || data.released?.substring(0, 4) || release.year || 'Unknown',
                     label: data.labels?.[0]?.name || 'Unknown Label',
                     type: 'Album',
@@ -1021,12 +1093,16 @@ async function getAlbumInfoFromMusicBrainz(artist, album) {
         return parts.map(p => cleanStr(p));
     };
 
-    const artistVariants = [artist, ...normalizeArtistName(artist)];
+    const artistUnknown = !artist || artist === 'Unknown Artist';
+    const artistVariants = artistUnknown ? ['*'] : [artist, ...normalizeArtistName(artist)];
 
     for (const searchArtist of artistVariants) {
         try {
-            console.log(`MusicBrainz: Searching for "${album}" by "${searchArtist}"...`);
-            const query = `artist:"${searchArtist}" AND release:"${album}"`;
+            console.log(`MusicBrainz: Searching for "${album}" ${searchArtist !== '*' ? `by "${searchArtist}"` : '(album only)'}...`);
+            const query = searchArtist !== '*'
+                ? `artist:"${searchArtist}" AND release:"${album}"`
+                : `release:"${album}"`;
+
             const searchUrl = `https://musicbrainz.org/ws/2/release?query=${encodeURIComponent(query)}&fmt=json`;
 
             const searchRes = await axios.get(searchUrl, {
@@ -1038,10 +1114,10 @@ async function getAlbumInfoFromMusicBrainz(artist, album) {
             if (release && release.score >= 75) {
                 console.log(`AlbumInfo: MusicBrainz found match "${release.title}" (Score: ${release.score})`);
 
-                const detailsUrl = `https://musicbrainz.org/ws/2/release/${release.id}?inc=recordings+labels+release-groups&fmt=json`;
+                const detailsUrl = `https://musicbrainz.org/ws/2/release/${release.id}?inc=recordings+labels+release-groups+artist-credits&fmt=json`;
                 const detailsRes = await axios.get(detailsUrl, {
                     timeout: 6000,
-                    headers: { 'User-Agent': 'ArtisNova/1.2.1 (contact: artisnova@example.com)' }
+                    headers: { 'User-Agent': 'ArtisNova/1.2.1' }
                 });
 
                 const data = detailsRes.data;
@@ -1055,8 +1131,12 @@ async function getAlbumInfoFromMusicBrainz(artist, album) {
 
                     const year = data['release-group']?.['first-release-date'] ? data['release-group']['first-release-date'].substring(0, 4) : (data.date ? data.date.substring(0, 4) : 'Unknown');
 
+                    const foundArtist = data['artist-credit']?.[0]?.name || release['artist-credit']?.[0]?.name || (searchArtist !== '*' ? searchArtist : artist);
+                    console.log(`AlbumInfo: MusicBrainz matched Artist: "${foundArtist}", Year: ${year}`);
+
                     return {
                         title: data.title,
+                        artist: foundArtist,
                         date: year,
                         label: data['label-info']?.[0]?.label?.name || 'Unknown Label',
                         type: data['release-group']?.['primary-type'] || 'Album',
@@ -1069,6 +1149,29 @@ async function getAlbumInfoFromMusicBrainz(artist, album) {
         } catch (err) {
             console.warn(`MusicBrainz: Search variant failed for "${searchArtist}":`, err.message);
         }
+    }
+    return null;
+}
+
+// Helper: Get Artwork from iTunes (Fast and reliable for new releases)
+async function getArtworkFromITunes(artist, album) {
+    try {
+        // Filter out generic artist names for better query
+        const cleanArtist = (artist && artist !== 'Unknown Artist' && artist !== '*') ? artist : '';
+        const query = (cleanArtist ? `${cleanArtist} ${album}` : album).trim();
+
+        console.log(`iTunes: Searching for artwork with query: "${query}"...`);
+        const url = `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&entity=album&limit=1`;
+        const res = await axios.get(url, { timeout: 4000 });
+        const result = res.data?.results?.[0];
+
+        if (result) {
+            const highRes = result.artworkUrl100.replace('100x100bb', '600x600bb');
+            console.log(`iTunes: Found artwork: ${highRes} for "${result.collectionName}" by "${result.artistName}"`);
+            return highRes;
+        }
+    } catch (e) {
+        console.warn('iTunes Artwork Fetch failed:', e.message);
     }
     return null;
 }
@@ -1373,6 +1476,7 @@ app.get('/api/media/info', async (req, res) => {
                     if (!info.year) info.year = cached.year;
                     if (!info.style) info.style = cached.style;
                     if (!info.artworkUrl) info.artworkUrl = cached.artwork;
+                    if (info.artist === 'Unknown Artist' && cached.artist) info.artist = cached.artist;
                 } else {
                     // BACKGROUND ENRICHMENT: Trigger fetch in background and return immediate current info
                     (async () => {
@@ -1383,17 +1487,36 @@ app.get('/api/media/info', async (req, res) => {
                                 getArtistInfo(info.artist, info.album)
                             ]);
 
-                            const year = albumData?.date || '';
-                            // FILTER GENERIC GENRES: Prefer any tag that isn't 'music'. If only 'music' exists, return empty.
-                            const style = (artistData?.tags || []).find(t => t.toLowerCase() !== 'music') || '';
-                            const artwork = albumData?.artwork || '';
+                            let year = albumData?.date || '';
+                            let style = (artistData?.tags || []).find(t => t.toLowerCase() !== 'music') || '';
+                            let artwork = albumData?.artwork || '';
+                            const realArtist = albumData?.artist || artistData?.name || null;
 
-                            if (year || style || artwork) {
-                                metadataCache.set(cacheKey, { year, style, artwork });
-                                console.log(`Enrichment (Background): Success for "${cacheKey}" -> Year: ${year || '?'}, Style: ${style || '?'}`);
+                            // Fallback to iTunes for artwork if missing or potentially broken (e.g. from MusicBrainz)
+                            if (!artwork || artwork.includes('coverartarchive.org')) {
+                                const itunesArtwork = await getArtworkFromITunes(realArtist || info.artist, info.album);
+                                if (itunesArtwork) artwork = itunesArtwork;
+                            }
+
+                            if (year || style || artwork || (realArtist && info.artist === 'Unknown Artist')) {
+                                const metadata = { year, style, artwork, artist: realArtist };
+
+                                // DOUBLE CACHE: Store under both the requested key and the corrected artist key
+                                metadataCache.set(cacheKey, metadata);
+                                if (realArtist && realArtist !== info.artist) {
+                                    metadataCache.set(`${realArtist}-${info.album}`, metadata);
+                                }
+
+                                console.log(`Enrichment (Background): Success for "${cacheKey}" -> Year: ${year || '?'}, Style: ${style || '?'}, Artist: ${realArtist || '?'}, Artwork: ${artwork ? 'YES' : 'NO'}`);
+
+                                const updatedInfo = { ...info };
+                                if (year) updatedInfo.year = year;
+                                if (style) updatedInfo.style = style;
+                                if (artwork) updatedInfo.artworkUrl = artwork;
+                                if (realArtist && info.artist === 'Unknown Artist') updatedInfo.artist = realArtist;
 
                                 // PROPER SYNC: Trigger a metadata broadcast so the frontend refreshes
-                                broadcast('metadata_update', { source: 'roon', info: { ...info, year, style, artworkUrl: artwork } });
+                                broadcast('metadata_update', { source: 'roon', info: updatedInfo });
                             }
                         } catch (e) {
                             console.warn('Metadata enrichment background task failed:', e.message);
@@ -1766,7 +1889,7 @@ setInterval(() => {
     if (mainDspSocket && mainDspSocket.readyState === WebSocket.OPEN) {
         mainDspSocket.send('"GetCaptureSignalPeak"');
     }
-}, 100);
+}, 50);
 
 function broadcastLevels(levels) {
     if (!levels) return;
@@ -1829,15 +1952,17 @@ function updateSpectrum(levels) {
             // Force visual difference between L and R
             const channelOffset = channel === 'L' ? 0 : Math.PI;
             const variance = (Math.sin(time / (100 + i * 20) + channelOffset) + 1) * 3;
-            const jitter = (random() - 0.5) * 2;
+            const jitter = (random() - 0.5) * 0.8;
 
             let targetDb = energy + curveOffset + (energy > -50 ? variance + jitter : 0);
             targetDb = Math.min(0, Math.max(-100, targetDb));
 
             if (targetDb > channelData[i]) {
-                channelData[i] = targetDb;
+                // Rising signal smoothing (Alpha: 0.4 for responsive but smooth attack)
+                channelData[i] = channelData[i] + (targetDb - channelData[i]) * 0.4;
             } else {
-                channelData[i] = Math.max(-120, channelData[i] - 4.0); // Faster decay
+                // Adjusted decay for 20Hz (~36dB/s)
+                channelData[i] = Math.max(-120, channelData[i] - 1.8);
             }
         }
         return true;

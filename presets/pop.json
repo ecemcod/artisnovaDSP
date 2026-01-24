@@ -1,0 +1,55 @@
+{
+  "name": "Pop",
+  "description": "Imported from txt",
+  "filters": [
+    {
+      "id": "rlh4jwmkg",
+      "type": "Peaking",
+      "freq": 95,
+      "gain": -5.5,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "3juuh42mp",
+      "type": "Highshelf",
+      "freq": 10000,
+      "gain": 2,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "ps4ijt3e9",
+      "type": "Lowshelf",
+      "freq": 60,
+      "gain": 2.5,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "mi5fmqm3l",
+      "type": "Peaking",
+      "freq": 120,
+      "gain": 1.8,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "qg9ha8ari",
+      "type": "Peaking",
+      "freq": 2500,
+      "gain": 1.5,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "qpjbtyokj",
+      "type": "Peaking",
+      "freq": 8000,
+      "gain": 2,
+      "q": 0.9,
+      "enabled": true
+    }
+  ],
+  "preamp": -3
+}

@@ -1,0 +1,55 @@
+{
+  "name": "Rock",
+  "description": "Imported from txt",
+  "filters": [
+    {
+      "id": "lffip2sbv",
+      "type": "Peaking",
+      "freq": 95,
+      "gain": -5.5,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "7905f33hf",
+      "type": "Highshelf",
+      "freq": 10000,
+      "gain": 2,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "64spn9riv",
+      "type": "Lowshelf",
+      "freq": 60,
+      "gain": 2.5,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "93f4gvbnt",
+      "type": "Peaking",
+      "freq": 110,
+      "gain": 1.5,
+      "q": 0.9,
+      "enabled": true
+    },
+    {
+      "id": "j71qwihia",
+      "type": "Peaking",
+      "freq": 2500,
+      "gain": 2,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "g2emm9q6w",
+      "type": "Peaking",
+      "freq": 7000,
+      "gain": 1.5,
+      "q": 0.8,
+      "enabled": true
+    }
+  ],
+  "preamp": -3
+}

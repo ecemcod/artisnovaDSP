@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 
+// Flags to manage hot reload behavior
+// Indicates that the next DSP process exit is expected after a hot reload
+this.ignoreNextExit = false;
+// Tracks if hot reload succeeded
+this.hotReloadSuccessful = false;
+
 class DSPManager {
     constructor(baseDir) {
         this.process = null;
@@ -12,6 +18,9 @@ class DSPManager {
         this.dspPath = this.isLinux ? 'camilladsp' : path.join(baseDir, 'camilladsp');
         this.bypassConfigPath = path.join(baseDir, 'config-bypass.yml');
         this.stateFilePath = path.join(baseDir, 'state.json');
+        // Flags to manage hot reload behavior
+        this.ignoreNextExit = false;
+        this.hotReloadSuccessful = false;
 
         this.currentState = {
             running: false,
@@ -45,7 +54,13 @@ class DSPManager {
         // Sync vital state from persistence
         if (this.persistedState.presetName) this.currentState.presetName = this.persistedState.presetName;
         if (this.persistedState.bypass) this.currentState.bypass = this.persistedState.bypass;
-        if (this.persistedState.sampleRate) this.currentState.sampleRate = this.persistedState.sampleRate;
+
+        // Robust sample rate loading
+        if (this.persistedState.sampleRate) {
+            this.currentState.sampleRate = this.persistedState.sampleRate;
+        } else if (this.persistedState.lastOptions && this.persistedState.lastOptions.sampleRate) {
+            this.currentState.sampleRate = this.persistedState.lastOptions.sampleRate;
+        }
 
         // Restore filter data for robust restarts
         if (this.persistedState.lastFilterData) this.lastFilterData = this.persistedState.lastFilterData;
@@ -78,7 +93,28 @@ class DSPManager {
         }
     }
     isRunning() {
-        return this.process !== null && !this.process.killed;
+        // Check internal reference first
+        if (this.process !== null && !this.process.killed) {
+            return true;
+        }
+        // Fallback: check if camilladsp is actually running on the system
+        try {
+            const { execSync } = require('child_process');
+            const result = execSync('pgrep -x camilladsp', { encoding: 'utf8' }).trim();
+            if (result) {
+                console.log('DSPManager: isRunning() - Found orphaned camilladsp process:', result);
+                // Sync sample rate to 96000 so hot reload can work
+                if (this.currentState.sampleRate === 0 || this.currentState.sampleRate === undefined) {
+                    console.log('DSPManager: Syncing orphaned process state - assuming 96kHz');
+                    this.currentState.sampleRate = 96000;
+                    this.currentState.running = true;
+                }
+                return true;
+            }
+        } catch (e) {
+            // pgrep returns non-zero if no process found
+        }
+        return false;
     }
 
     getAvailableDevices() {
@@ -240,10 +276,58 @@ class DSPManager {
     }
 
     async start(filterData, options = {}) {
+        console.log(`DSPManager: start() called. isStarting=${this.isStarting}, isFallback=${options.isFallback}, bypass=${options.bypass}`);
+        console.log(`DSPManager: Current State: running=${this.currentState.running}, bypass=${this.currentState.bypass}`);
+
         if (this.isStarting && !options.isFallback) {
             console.log('DSPManager: Start ignored - already starting');
             return Promise.resolve(false);
         }
+
+        const isRunningNow = this.isRunning();
+        const currentSR = this.currentState.sampleRate;
+        const targetSR = options.sampleRate || 96000;
+        const isSameSampleRate = isRunningNow && currentSR === targetSR;
+        const canHotReload = isSameSampleRate && !options.isFallback && !options.forceRestart;
+
+        console.log(`DSPManager: Hot Reload check - isRunning=${isRunningNow}, currentSR=${currentSR}, targetSR=${targetSR}, isFallback=${options.isFallback}, forceRestart=${options.forceRestart}, canHotReload=${canHotReload}`);
+        if (!canHotReload) {
+            console.log(`DSPManager: Hot Reload NOT possible. Reasons: isRunning=${isRunningNow}, SR match=${currentSR === targetSR}, isFallback=${!!options.isFallback}, forceRestart=${!!options.forceRestart}`);
+        }
+
+        // Update state IMMEDIATELY for UI responsiveness
+        this.currentState = {
+            ...this.currentState,
+            running: true,
+            bypass: options.bypass || false,
+            sampleRate: options.sampleRate || 96000,
+            bitDepth: options.bitDepth || 24,
+            presetName: options.presetName || (options.bypass ? 'BYPASS' : 'Manual'),
+            filtersCount: filterData?.filters?.length || 0,
+            preamp: filterData?.preamp || 0
+        };
+
+        if (canHotReload) {
+            console.log('DSPManager: Attempting Hot Reload...');
+            try {
+                const success = await this.hotReload(filterData, options);
+                if (success) {
+                    // Save filter data for future restarts
+                    this.lastFilterData = filterData;
+                    this.lastOptions = { ...options };
+                    const bypassFlag = options.bypass || false;
+                    this.saveState({ running: true, bypass: bypassFlag, presetName: this.currentState.presetName });
+                    console.log(`DSPManager: Hot Reload complete (Bypass: ${bypassFlag}) - returning early`);
+                    return true;
+                }
+                console.warn('DSPManager: Hot Reload failed, falling back to full restart');
+            } catch (e) {
+                console.error('DSPManager: Hot Reload error:', e.message);
+            }
+        } else {
+            console.log(`DSPManager: Hot Reload not possible. isRunning=${this.isRunning()}, sampleRate match=${this.currentState.sampleRate === (options.sampleRate || 96000)}, isFallback=${options.isFallback}, forceRestart=${options.forceRestart}`);
+        }
+
         this.isStarting = true;
 
         // ALWAYS stop and wait before starting to ensure audio devices are released
@@ -290,13 +374,8 @@ class DSPManager {
                 });
 
                 this.currentState = {
+                    ...this.currentState,
                     running: true,
-                    bypass: options.bypass || false,
-                    sampleRate: options.sampleRate,
-                    bitDepth: options.bitDepth || 24,
-                    presetName: options.presetName || (options.bypass ? 'BYPASS' : 'Manual'),
-                    filtersCount: filterData?.filters?.length || 0,
-                    preamp: filterData?.preamp || 0,
                     device: options.device || (this.isLinux ? 'D50 III' : this.findBestOutputDevice())
                 };
 
@@ -313,6 +392,12 @@ class DSPManager {
                 this.process.on('close', (code) => {
                     console.log(`DSP exited with code ${code}`);
                     this.process = null;
+                    // If this exit was expected after a hot reload, ignore watchdog restart
+                    if (this.ignoreNextExit) {
+                        console.log('DSPManager: Expected exit after hot reload, ignoring for watchdog.');
+                        this.ignoreNextExit = false;
+                        return;
+                    }
                     // Reset format error on explicit stop or if we are about to restart
                     if (this.shouldBeRunning) {
                         console.log('DSPManager: Process exited while it should be running. Watchdog will handle.');
@@ -591,10 +676,11 @@ class DSPManager {
     }
 
     async stop() {
-        console.log('DSPManager: stop() called. Current stack:', new Error().stack);
+        console.log('DSPManager: stop() called');
         this.shouldBeRunning = false; // Mark as explicitly stopped by user/system
-        this.saveState({ running: false });
+        this.currentState.running = false;
 
+        this.saveState({ running: false });
         this.stopWatchdog();
 
         if (this.process) {
@@ -696,11 +782,16 @@ class DSPManager {
 
     // Start in bypass mode (no filters, just pass-through)
     async startBypass(sampleRate) {
-        console.log(`DSPManager: startBypass requested at ${sampleRate}Hz`);
+        console.log(`DSPManager: startBypass requested at ${sampleRate}Hz. Current bypass state: ${this.currentState.bypass}`);
         return this.start({ filters: [], preamp: 0 }, {
             sampleRate,
             bypass: true,
             presetName: 'BYPASS'
+        }).then(started => {
+            if (started) {
+                this.saveState({ running: true, bypass: true, presetName: 'BYPASS' });
+            }
+            return started;
         });
     }
 
@@ -743,6 +834,72 @@ class DSPManager {
             console.log('DSPManager: Mute command sent successfully');
         } catch (e) {
             console.error('DSPManager: Failed to send mute command', e);
+        }
+    }
+
+    async hotReload(filterData, options = {}) {
+        console.log('DSPManager: hotReload() called');
+
+        if (!this.isRunning()) {
+            console.log('DSPManager: hotReload aborted - isRunning() returned false');
+            return false;
+        }
+
+        try {
+            console.log('DSPManager: Generating config for hot reload...');
+            const configYaml = this.generateConfig(filterData, options);
+            const configJson = yaml.load(configYaml);
+
+            // Also write to file for consistency and debugging
+            const configPath = path.join(this.baseDir, 'temp_config.yml');
+            fs.writeFileSync(configPath, configYaml);
+            console.log('DSPManager: Config written to file, connecting to ws://localhost:5005...');
+
+            const WebSocket = require('ws');
+            const ws = new WebSocket('ws://localhost:5005');
+
+            return await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    ws.terminate();
+                    reject(new Error('Hot Reload: WebSocket timeout'));
+                }, 2000);
+
+                ws.on('open', () => {
+                    console.log('DSPManager: Sending Hot Reload config via WebSocket...');
+                    ws.send(JSON.stringify({ "SetConfigJson": JSON.stringify(configJson) }));
+                });
+
+                ws.on('message', (data) => {
+                    const msg = JSON.parse(data);
+                    if (msg.SetConfigJson) {
+                        if (msg.SetConfigJson.result === 'Ok') {
+                            console.log('DSPManager: Config pushed, sending Reload...');
+                            ws.send('"Reload"');
+                        } else {
+                            clearTimeout(timeout);
+                            ws.close();
+                            reject(new Error(`SetConfigJson failed: ${msg.SetConfigJson.result}`));
+                        }
+                    } else if (msg.Reload) {
+                        clearTimeout(timeout);
+                        ws.close();
+                        if (msg.Reload.result === 'Ok') {
+                            console.log('DSPManager: Hot Reload successful!');
+                            resolve(true);
+                        } else {
+                            reject(new Error(`Reload failed: ${msg.Reload.result}`));
+                        }
+                    }
+                });
+
+                ws.on('error', (err) => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+            });
+        } catch (err) {
+            console.error('DSPManager: Hot Reload failed:', err.message);
+            return false;
         }
     }
 }

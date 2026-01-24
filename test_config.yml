@@ -1,0 +1,30 @@
+
+devices:
+  samplerate: 44100
+  chunksize: 4096
+  capture:
+    type: CoreAudio
+    device: "BlackHole 2ch"
+    channels: 2
+    format: FLOAT32LE
+  playback:
+    type: CoreAudio
+    device: "D50 III"
+    channels: 2
+    format: S32LE
+
+filters:
+  preamp:
+    type: Gain
+    parameters:
+      gain: 0
+
+pipeline:
+  - type: Filter
+    channels: [0]
+    names:
+      - preamp
+  - type: Filter
+    channels: [1]
+    names:
+      - preamp

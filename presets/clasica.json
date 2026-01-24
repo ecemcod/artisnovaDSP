@@ -1,0 +1,55 @@
+{
+  "name": "Clasica",
+  "description": "Imported from txt",
+  "filters": [
+    {
+      "id": "33f4uhjz8",
+      "type": "Peaking",
+      "freq": 95,
+      "gain": -5.5,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "007lrimdz",
+      "type": "Highshelf",
+      "freq": 10000,
+      "gain": 2,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "lr9df9btk",
+      "type": "Lowshelf",
+      "freq": 60,
+      "gain": 2.5,
+      "q": 0.707,
+      "enabled": true
+    },
+    {
+      "id": "51hg0xpok",
+      "type": "Peaking",
+      "freq": 250,
+      "gain": 1,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "i0wgk9at2",
+      "type": "Peaking",
+      "freq": 1200,
+      "gain": -1,
+      "q": 1,
+      "enabled": true
+    },
+    {
+      "id": "kxx3o2hb1",
+      "type": "Peaking",
+      "freq": 5000,
+      "gain": 1.5,
+      "q": 0.9,
+      "enabled": true
+    }
+  ],
+  "preamp": -3
+}

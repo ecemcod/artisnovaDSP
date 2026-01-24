@@ -142,6 +142,7 @@ function App() {
     style?: string;
     device?: string;
   }>({ state: 'unknown', track: '', artist: '', position: 0, duration: 0 });
+  const [isTransitioning, setIsTransitioning] = useState(false);
   const [lyrics, setLyrics] = useState<string | null>(null);
   const [queue, setQueue] = useState<{ track: string; artist: string; album?: string; artworkUrl?: string }[]>([]);
   const [backend, setBackend] = useState<'local' | 'raspi'>('local');
@@ -925,8 +926,13 @@ function App() {
   }, [nowPlaying.track, nowPlaying.artist, nowPlaying.album, nowPlaying.artworkUrl, nowPlaying.state, nowPlaying.position, nowPlaying.duration, mediaSource]);
 
   const handleStart = async () => {
-    try { await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth }); await checkStatus(); }
+    setIsTransitioning(true);
+    try {
+      await axios.post(`${API_URL}/start`, { directConfig: { filters, preamp }, sampleRate, bitDepth });
+      await checkStatus();
+    }
     catch (err: any) { alert("Start Failed: " + (err.response?.data?.error || err.message)); }
+    finally { setIsTransitioning(false); }
   };
 
   const handleMediaControl = async (action: string, params: any = {}) => {
@@ -944,6 +950,7 @@ function App() {
 
 
   const handleBypass = async () => {
+    setIsTransitioning(true);
     try {
       if (isBypass) {
         // Exit bypass - return to normal DSP mode
@@ -955,12 +962,17 @@ function App() {
       await checkStatus();
     }
     catch (err: any) { alert("Bypass Toggle Failed: " + (err.response?.data?.error || err.message)); }
+    finally { setIsTransitioning(false); }
   };
 
   const handleSave = async () => {
-    const name = prompt("Preset Name:", selectedPreset?.replace('.txt', '') || "New Preset");
+    const name = prompt("Preset Name:", selectedPreset?.replace('.txt', '').replace('.json', '') || "New Preset");
     if (!name) return;
-    try { await axios.post(`${API_URL}/presets`, { name, filters, preamp }); loadPresets(); setSelectedPreset(name.endsWith('.txt') ? name : name + '.txt'); }
+    try {
+      const res = await axios.post(`${API_URL}/presets`, { name, filters, preamp });
+      await loadPresets();
+      if (res.data.id) setSelectedPreset(res.data.id);
+    }
     catch { alert('Save failed'); }
   };
 
@@ -1216,7 +1228,7 @@ function App() {
                       else handleNewPreset();
                     }} className="bg-themed-deep border border-themed-medium rounded-lg px-2.5 py-2 text-[11px] text-accent-primary font-black outline-none transition-colors hover:border-accent-primary min-w-[110px] md:min-w-[160px]">
                       <option value="">+ New</option>
-                      {presets.map(p => <option key={p} value={p}>{p.replace('.txt', '')}</option>)}
+                      {presets.map(p => <option key={p} value={p}>{p.replace('.txt', '').replace('.json', '')}</option>)}
                     </select>
                     <button onClick={handleSave} className="p-2 bg-themed-deep border border-themed-medium text-themed-muted hover:text-accent-primary hover:border-accent-primary rounded-lg transition-all shrink-0" title="Save Preset"><Save size={15} /></button>
 
@@ -1240,23 +1252,33 @@ function App() {
                 <div className="flex flex-col">
                   <span className="text-[8px] text-themed-muted font-black uppercase tracking-[0.2em] mb-1.5">DSP Engine</span>
                   <div className="flex items-center gap-2">
-                    {!isRunning ? (
-                      <button onClick={handleStart} className="w-18 md:w-24 py-2 bg-accent-primary text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">START</button>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <button onClick={handleStart} className="w-18 md:w-24 py-2 bg-accent-warning text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all" title="Restart DSP Engine">RESTART</button>
-                        {/* Separator */}
-                        <div className="w-px h-6 bg-themed-medium mx-1" />
-                        {/* Bypass Toggle */}
-                        <button
-                          onClick={handleBypass}
-                          className={`w-18 md:w-24 py-2 ${isBypass ? 'bg-amber-500 ring-2 ring-amber-400/50' : 'bg-amber-600/60 hover:bg-amber-600'} text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all`}
-                          title={isBypass ? "Exit Bypass Mode" : "Enter Bypass Mode"}
-                        >
-                          {isBypass ? '● BYP' : 'BYPASS'}
-                        </button>
-                      </div>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {(!isRunning && !isTransitioning) ? (
+                        <button onClick={handleStart} className="w-18 md:w-24 py-2 bg-accent-primary text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">START</button>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={handleStart}
+                            disabled={isTransitioning}
+                            className={`w-18 md:w-24 py-2 ${isTransitioning ? 'bg-themed-medium cursor-not-allowed opacity-50' : 'bg-accent-warning'} text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all`}
+                            title="Restart DSP Engine"
+                          >
+                            {isTransitioning ? 'WAIT...' : 'RESTART'}
+                          </button>
+                          {/* Separator */}
+                          <div className="w-px h-6 bg-themed-medium mx-1" />
+                          {/* Bypass Toggle */}
+                          <button
+                            onClick={handleBypass}
+                            disabled={isTransitioning}
+                            className={`w-18 md:w-24 py-2 ${isTransitioning ? 'bg-themed-medium cursor-not-allowed opacity-50' : isBypass ? 'bg-amber-500 ring-2 ring-amber-400/50' : 'bg-amber-600/60 hover:bg-amber-600'} text-white rounded-lg font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all`}
+                            title={isBypass ? "Exit Bypass Mode" : "Enter Bypass Mode"}
+                          >
+                            {isTransitioning ? '● ● ●' : isBypass ? '● BYP' : 'BYPASS'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
