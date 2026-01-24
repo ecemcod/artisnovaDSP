@@ -731,6 +731,34 @@ async function getArtistInfo(artist, album) {
         } catch { return null; }
     };
 
+    // Helper to fetch bio from Wikipedia
+    const fetchWikipediaBio = async (name) => {
+        try {
+            // First search for the exact page title
+            const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name + ' (musician)')}&format=json&origin=*`;
+            const searchRes = await axios.get(searchUrl, { timeout: 4000 });
+            let title = searchRes.data?.query?.search?.[0]?.title;
+
+            if (!title) {
+                // Try without (musician) if search fails
+                const searchUrlSimple = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name)}&format=json&origin=*`;
+                const searchResSimple = await axios.get(searchUrlSimple, { timeout: 4000 });
+                title = searchResSimple.data?.query?.search?.[0]?.title;
+            }
+
+            if (title) {
+                const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles=${encodeURIComponent(title)}&format=json&origin=*`;
+                const extractRes = await axios.get(extractUrl, { timeout: 4000 });
+                const pages = extractRes.data?.query?.pages;
+                const pageId = Object.keys(pages)[0];
+                return pages[pageId]?.extract || null;
+            }
+        } catch (e) {
+            console.warn('Wikipedia Bio Fetch failed:', e.message);
+        }
+        return null;
+    };
+
     try {
         console.log(`Artist Info: Searching for "${artist}"...`);
         let adbArtist = await fetchAudioDB(artist);
@@ -747,7 +775,9 @@ async function getArtistInfo(artist, album) {
         }
 
         if (adbArtist) {
-            return {
+            console.log(`Artist Info: Found on AudioDB: ${adbArtist.strArtist}`);
+            const res = {
+                name: adbArtist.strArtist || artist,
                 bio: adbArtist.strBiographyEN || null,
                 formed: adbArtist.intFormedYear || 'Unknown',
                 origin: adbArtist.strCountry || 'Unknown',
@@ -757,9 +787,30 @@ async function getArtistInfo(artist, album) {
                 image: adbArtist.strArtistThumb || null,
                 source: 'TheAudioDB'
             };
+            console.log('Artist Info: Returning Result:', JSON.stringify(res).substring(0, 200));
+            return res;
         }
 
-        // 2. Fallback: MusicBrainz (Metadata only, synthetic bio)
+        // 2. Wikipedia Fallback for Bio
+        console.log(`Artist Info: AudioDB FAILED for "${artist}". Trying Wikipedia...`);
+        const wikiBio = await fetchWikipediaBio(artist);
+        if (wikiBio) {
+            // Still need to get origin/formed from MusicBrainz or similar if we want a complete record
+            const mbArtist = await fetchMusicBrainz(artist);
+            const res = {
+                name: mbArtist?.name || artist,
+                bio: wikiBio,
+                formed: mbArtist ? (mbArtist['life-span']?.begin || 'Unknown') : 'Unknown',
+                origin: mbArtist ? (mbArtist.country || 'Unknown') : 'Unknown',
+                tags: mbArtist?.tags?.map(t => t.name).slice(0, 5) || [],
+                image: null,
+                source: 'Wikipedia'
+            };
+            console.log('Artist Info: Returning Wikipedia Result:', JSON.stringify(res).substring(0, 200));
+            return res;
+        }
+
+        // 3. Fallback: MusicBrainz (Metadata only, synthetic bio)
         let mbArtist = await fetchMusicBrainz(artist);
         if (!mbArtist && (artist.includes('/') || artist.includes(',') || artist.toLowerCase().includes('feat.'))) {
             const firstArtist = artist.split(/(?:\/|,|feat\.)/i)[0].trim();
@@ -772,7 +823,8 @@ async function getArtistInfo(artist, album) {
                 : [];
             const formed = mbArtist['life-span'] ? (mbArtist['life-span'].begin || 'Unknown') : 'Unknown';
 
-            return {
+            const res = {
+                name: mbArtist.name || artist,
                 // Synthetic Bio to force frontend display
                 bio: `${mbArtist.name || artist} is an artist from ${mbArtist.country || 'Unknown'} formed in ${formed}. Genres: ${tags.join(', ')}.`,
                 formed: formed,
@@ -781,12 +833,15 @@ async function getArtistInfo(artist, album) {
                 image: null,
                 source: 'MusicBrainz'
             };
+            console.log('Artist Info: Returning MusicBrainz Result:', JSON.stringify(res).substring(0, 200));
+            return res;
         }
     } catch (e) {
         console.warn(`Artist Info: API fetch failed for "${artist}":`, e.message);
     }
 
     return {
+        name: artist,
         bio: null,
         formed: '-',
         origin: '-',
@@ -800,17 +855,21 @@ async function getAlbumInfo(artist, album) {
     if (!artist || !album) return null;
 
     // Normalize names to improve AudioDB matching
-    const cleanStr = (s) => s.replace(/\s+/g, ' ').trim();
+    const cleanStr = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
     const normalizeArtistName = (name) => {
+        if (!name) return [];
         // Handle "Artist A / Artist B" or "Artist A & Artist B"
         const parts = name.split(/[;\/&]| and /i);
         return parts.map(p => cleanStr(p));
     };
     const normalizeAlbumName = (name) => {
+        if (!name) return '';
         return cleanStr(name
             .replace(/\s*\(\d{4}\)\s*$/g, '') // Strip trailing year in parentheses (e.g. "(1973)")
-            .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version)\)\s*$/i, '')
-            .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition)\]\s*$/i, ''));
+            .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version|Radio Edit|Edit|Gold Edition|Remix|Remixes|EP|Single)\)\s*$/i, '')
+            .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition|EP|Single)\]\s*$/i, '')
+            .split(' - ')[0] // Optional: take only part before dash if it's long? No, usually dash is part of title.
+        );
     };
 
     const artistVariants = [artist, ...normalizeArtistName(artist)];
@@ -888,11 +947,67 @@ async function getAlbumInfo(artist, album) {
         console.warn(`Album Info: Album-only AudioDB search failed for "${album}"`, e.message);
     }
 
-    console.log(`AlbumInfo: TheAudioDB FAILED for "${artist}" - "${album}". Trying MusicBrainz fallback...`);
+    console.log(`AlbumInfo: TheAudioDB FAILED for "${artist}" - "${album}". Trying Discogs fallback...`);
+    const discogsResult = await getAlbumInfoFromDiscogs(artist, album);
+    if (discogsResult) return discogsResult;
+
+    console.log(`AlbumInfo: Discogs FAILED for "${artist}" - "${album}". Trying MusicBrainz fallback...`);
     const mbResult = await getAlbumInfoFromMusicBrainz(artist, album);
     if (mbResult) return mbResult;
 
     console.log(`AlbumInfo: All sources FAILED for "${artist}" - "${album}" (normalized: "${normalizedA}")`);
+    return null;
+}
+
+// Helper: Get Album Info (Discogs)
+async function getAlbumInfoFromDiscogs(artist, album) {
+    try {
+        console.log(`Discogs: Searching for "${album}" by "${artist}"...`);
+        // Use release_title and artist for more targeted search
+        const searchUrl = `https://api.discogs.com/database/search?release_title=${encodeURIComponent(album)}&artist=${encodeURIComponent(artist)}&type=release&per_page=1`;
+
+        // Note: Discogs requires a User-Agent and ideally an API key, but simple search might work or we use a generic one
+        const searchRes = await axios.get(searchUrl, {
+            headers: { 'User-Agent': 'ArtisNova/1.2.1 +https://github.com/mcouceiro/artisnova' },
+            timeout: 5000
+        });
+
+        console.log(`Discogs: Search response status: ${searchRes.status}, Results count: ${searchRes.data?.results?.length}`);
+        const release = searchRes.data?.results?.[0];
+        if (release) {
+            console.log(`AlbumInfo: Discogs found match "${release.title}" (ID: ${release.id})`);
+
+            // Get full release details for tracklist
+            const detailsUrl = `https://api.discogs.com/releases/${release.id}`;
+            const detailsRes = await axios.get(detailsUrl, {
+                headers: { 'User-Agent': 'ArtisNova/1.2.1' },
+                timeout: 5000
+            });
+
+            const data = detailsRes.data;
+            if (data) {
+                const tracklist = data.tracklist?.map((t, idx) => ({
+                    number: idx + 1,
+                    title: t.title,
+                    duration: t.duration || '--:--',
+                    disc: 1
+                })) || [];
+
+                return {
+                    title: data.title,
+                    date: data.year || data.released?.substring(0, 4) || release.year || 'Unknown',
+                    label: data.labels?.[0]?.name || 'Unknown Label',
+                    type: 'Album',
+                    trackCount: tracklist.length,
+                    tracklist: tracklist,
+                    artwork: data.images?.[0]?.resource_url || release.thumb || null,
+                    source: 'Discogs'
+                };
+            }
+        }
+    } catch (err) {
+        console.warn('Discogs Album Fetch failed:', err.message);
+    }
     return null;
 }
 
@@ -1371,11 +1486,19 @@ app.get('/api/media/info', async (req, res) => {
 app.get('/api/media/artist-info', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const { artist, album } = req.query;
+    console.log(`API: Request for artist-info: artist="${artist}", album="${album}"`);
     try {
         const info = await getArtistInfo(artist, album);
         const albumInfo = await getAlbumInfo(artist, album);
-        res.json({ artist: info, album: albumInfo, source: info.source });
+        const finalResponse = {
+            artist: info,
+            album: albumInfo,
+            source: albumInfo?.source || info.source || 'MusicBrainz'
+        };
+        console.log(`API: Sending response for artist-info:`, JSON.stringify(finalResponse).substring(0, 300));
+        res.json(finalResponse);
     } catch (e) {
+        console.error('API Error in artist-info:', e.message);
         res.status(500).json({ error: e.message });
     }
 });
