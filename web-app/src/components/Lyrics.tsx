@@ -23,7 +23,7 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
     return (
 
         <div className="flex-1 min-w-0 min-h-0 bg-themed-panel border border-themed-medium rounded-xl overflow-hidden shadow-2xl flex flex-col h-full animate-in slide-in-from-right duration-500">
-            <div className="p-4 bg-white/5 border-b border-themed-subtle flex items-center justify-between" style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}>
+            <div className="p-4 bg-white/5 border-b border-themed-subtle flex items-center justify-between">
                 <span className="text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] header-text">Lyrics</span>
                 <div className="flex gap-1">
                     <div className="w-1.5 h-1.5 rounded-full bg-accent-primary shadow-[0_0_8px_var(--glow-cyan)]" />
@@ -34,7 +34,6 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
             <div
                 ref={scrollRef}
                 className="flex-1 overflow-y-auto px-6 md:px-32 py-12 custom-scrollbar relative"
-                style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}
             >
 
                 {!lyrics || lyrics === "[INSTRUMENTAL]" ? (
@@ -51,11 +50,11 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
                     <>
                         <div className="absolute top-0 left-0 w-full h-16 bg-gradient-to-b from-themed-panel to-transparent pointer-events-none z-10" />
 
-                        <div className="space-y-10">
+                        <div className="space-y-1">
                             {lyrics.split('\n').map((line, i) => (
                                 <p
                                     key={i}
-                                    className={`text-xl md:text-3xl font-black leading-tight transition-all duration-300 text-center tracking-tight ${line.trim() ? 'text-themed-primary/60 hover:text-themed-primary hover:scale-105' : 'h-8'
+                                    className={`text-xl md:text-3xl font-black leading-none transition-all duration-300 text-center tracking-tight ${line.trim() ? 'text-themed-primary/60 hover:text-themed-primary hover:scale-105' : 'h-4'
                                         }`}
                                 >
                                     {line}
@@ -70,7 +69,7 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
             </div>
 
             <div className="p-4 bg-themed-deep/50 border-t border-themed-subtle text-[9px] text-themed-muted font-black text-center uppercase tracking-widest">
-                Synced via LrcLib
+                Enhanced via Qobuz + LrcLib
             </div>
         </div>
     );

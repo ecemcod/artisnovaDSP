@@ -113,6 +113,12 @@ class RoonController {
                                 }
 
                                 this.zones.set(z.zone_id, combinedZone);
+                                
+                                // Notify status change for any zone change, especially state changes
+                                if (z.zone_id === this.activeZoneId) {
+                                    console.log(`RoonController: Active zone state changed, notifying status`);
+                                    this._notifyStatus();
+                                }
                             });
                         }
                         if (data.zones_removed) {

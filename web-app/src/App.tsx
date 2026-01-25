@@ -5,6 +5,7 @@ import PEQEditor from './components/PEQEditor';
 import VisualizationPage from './components/VisualizationPage';
 import { SimpleNavigationProvider } from './components/SimpleNavigationProvider';
 import { SimpleMusicNavigationView } from './components/SimpleMusicNavigationView';
+import ArtistInfo from './components/ArtistInfo';
 import { createPortal } from 'react-dom';
 import {
   Panel,
@@ -14,7 +15,8 @@ import {
 import PlayQueue from './components/PlayQueue';
 import Lyrics from './components/Lyrics';
 import History from './components/History';
-import ArtistInfo from './components/ArtistInfo';
+import { ErrorBoundary } from './components/ErrorBoundary';
+// import { DebugComponent } from './components/DebugComponent';
 import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
@@ -106,6 +108,29 @@ const BACKENDS = {
 type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization' | 'navigation';
 
 function App() {
+  // Add global error handlers
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      console.error('Global JavaScript Error:', event.error);
+      console.error('Error message:', event.message);
+      console.error('Error filename:', event.filename);
+      console.error('Error line:', event.lineno);
+      console.error('Error column:', event.colno);
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error('Unhandled Promise Rejection:', event.reason);
+    };
+
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, []);
+
   return (
     <SimpleNavigationProvider>
       <AppContent />
@@ -114,6 +139,15 @@ function App() {
 }
 
 function AppContent() {
+  // Wrap the entire component in error boundary
+  return (
+    <ErrorBoundary>
+      <AppContentInner />
+    </ErrorBoundary>
+  );
+}
+
+function AppContentInner() {
   const [presets, setPresets] = useState<string[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
   const [filters, setFilters] = useState<FilterParam[]>([]);
@@ -504,39 +538,56 @@ function AppContent() {
   };
 
   const selectZone = async (zoneId: string, source: 'apple' | 'roon' | 'lms') => {
-    const targetZone = mediaZones.find(z => z.id === zoneId && z.source === source);
-
-    // Optimistic UI update
-    setMediaZones(prev => prev.map(z => ({
-      ...z,
-      active: z.id === zoneId && z.source === source
-    })));
-
+    console.log('selectZone called:', { zoneId, source });
+    
     try {
+      const targetZone = mediaZones.find(z => z.id === zoneId && z.source === source);
+      console.log('targetZone found:', targetZone);
+
+      // Optimistic UI update
+      setMediaZones(prev => prev.map(z => ({
+        ...z,
+        active: z.id === zoneId && z.source === source
+      })));
+
       if (source === 'apple') {
+        console.log('Setting media source to apple');
         setMediaSource('apple');
         setBackend('local');
       } else if (source === 'roon') {
+        console.log('Setting media source to roon, saving zone:', zoneId);
         AppStorage.setItem('artisNovaDSP_lastRoonZone', zoneId);
         setMediaSource('roon');
 
         // Context Awareness: Switch DSP backend based on Roon zone mapping
         if (targetZone) {
           const mappedBackend = fullZoneConfig?.zones?.[targetZone.name] || fullZoneConfig?.defaults?.dspBackend || 'local';
+          console.log('Setting backend to:', mappedBackend);
           setBackend(mappedBackend as 'local' | 'raspi');
         }
 
+        console.log('Making API call to select Roon zone');
         await axios.post(`${API_URL}/media/roon/select`, { zoneId });
       } else if (source === 'lms') {
+        console.log('Setting media source to lms');
         setMediaSource('lms');
         setBackend('raspi'); // LMS is always on the Pi
         await axios.post(`${API_URL}/media/lms/select`, { playerId: zoneId });
       }
+      
+      console.log('Clearing lyrics and fetching media zones');
       setLyrics(null);
       fetchMediaZones();
+      
+      console.log('Fetching now playing data');
       setTimeout(fetchNowPlaying, 100);
       setTimeout(fetchNowPlaying, 500);
-    } catch { }
+      
+      console.log('selectZone completed successfully');
+    } catch (error) {
+      console.error('Error in selectZone:', error);
+      // Don't throw the error, just log it
+    }
   };
 
   // WebSocket for instantaneous updates
@@ -1420,75 +1471,115 @@ function AppContent() {
 
   // Main layout
   const renderLayout = () => {
-    const mobile = isMobile();
-    if (mobile) {
-      switch (activeMode) {
-        case 'playback': return renderNowPlaying();
-        case 'processing': return renderProcessingTools();
-        case 'lyrics': return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
-        case 'info': return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
-        case 'navigation': return <SimpleMusicNavigationView nowPlaying={nowPlaying} />;
-        case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
-        case 'history': return <History />;
-        case 'visualization': return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
-        default: return renderNowPlaying();
+    console.log('renderLayout called with activeMode:', activeMode);
+    
+    try {
+      const mobile = isMobile();
+      console.log('Mobile detected:', mobile);
+      
+      if (mobile) {
+        console.log('Rendering mobile layout for mode:', activeMode);
+        switch (activeMode) {
+          case 'playback': 
+            console.log('Rendering mobile playback');
+            return renderNowPlaying();
+          case 'processing': 
+            console.log('Rendering mobile processing');
+            return renderProcessingTools();
+          case 'lyrics': 
+            console.log('Rendering mobile lyrics');
+            return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
+          case 'info': 
+            console.log('Rendering mobile info with ArtistInfo');
+            return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
+          case 'navigation': 
+            console.log('Rendering mobile navigation with SimpleMusicNavigationView');
+            return <SimpleMusicNavigationView />;
+          case 'queue': 
+            console.log('Rendering mobile queue');
+            return <PlayQueue queue={queue} mediaSource={mediaSource} />;
+          case 'history': 
+            console.log('Rendering mobile history');
+            return <History />;
+          case 'visualization': 
+            console.log('Rendering mobile visualization');
+            return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
+          default: 
+            console.log('Rendering mobile default (playback)');
+            return renderNowPlaying();
+        }
       }
-    }
-    if (activeMode === 'playback') {
+      
+      console.log('Rendering desktop layout for mode:', activeMode);
+      
+      if (activeMode === 'playback') {
+        console.log('Rendering desktop playback mode');
+        return (
+          <div className="h-full flex flex-col md:flex-row min-h-0 gap-6 md:gap-10 p-4 md:p-8 bg-themed-deep">
+            <div className="flex-[2] min-h-0 flex flex-col">
+              {renderNowPlaying()}
+            </div>
+            <div ref={secondaryContainerRef} className="flex-1 min-w-[300px] max-w-sm hidden lg:flex flex-col">
+              <PlayQueue queue={queue} mediaSource={mediaSource} />
+            </div>
+          </div>
+        );
+      }
+
+      // Visualization - Fullscreen mode (no split panel)
+      if (activeMode === 'visualization') {
+        console.log('Rendering desktop visualization mode');
+        return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
+      }
+
+      // Navigation - Fullscreen mode (no split panel)
+      if (activeMode === 'navigation') {
+        console.log('Rendering desktop navigation mode with SimpleMusicNavigationView');
+        return <SimpleMusicNavigationView />;
+      }
+
+      console.log('Rendering desktop panel layout');
       return (
-        <div className="h-full flex flex-col md:flex-row min-h-0 gap-6 md:gap-10 p-4 md:p-8 bg-themed-deep">
-          <div className="flex-[2] min-h-0 flex flex-col">
-            {renderNowPlaying()}
-          </div>
-          <div ref={secondaryContainerRef} className="flex-1 min-w-[300px] max-w-sm hidden lg:flex flex-col">
-            <PlayQueue queue={queue} mediaSource={mediaSource} />
-          </div>
+        <Group orientation="horizontal" className="h-full w-full" onLayoutChange={onLayoutChange}>
+          <Panel defaultSize={panelSizes[0]} minSize={30} id="now-playing">
+            <div
+              className="h-full w-full cursor-pointer"
+              onClick={(e) => {
+                // Don't navigate if clicking on buttons, inputs, or signal path elements
+                const target = e.target as HTMLElement;
+                const clickedInteractive = target.closest('button, input, a, [role="button"], .signal-path-popover');
+                if (!clickedInteractive) {
+                  setActiveMode('playback');
+                }
+              }}
+            >
+              {renderNowPlaying()}
+            </div>
+          </Panel>
+          <Separator className="w-1 bg-themed-deep hover:bg-accent-primary/20 cursor-col-resize mx-0.5 rounded-full flex items-center justify-center transition-colors">
+            <div className="w-1 h-12 bg-themed-medium rounded-full" />
+          </Separator>
+          <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
+            <div ref={secondaryContainerRef} className="h-full w-full flex flex-col p-4 lg:p-6">
+              {/* 3. LYRICS/QUEUE/HISTORY/PROCESSING - Based on activeMode */}
+              {activeMode === 'processing' && renderProcessingTools()}
+              {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
+              {activeMode === 'info' && <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />}
+              {activeMode === 'queue' && <PlayQueue queue={queue} mediaSource={mediaSource} />}
+              {activeMode === 'history' && <History />}
+            </div>
+          </Panel>
+        </Group>
+      );
+    } catch (error) {
+      console.error('Error in renderLayout:', error);
+      return (
+        <div className="p-8 bg-red-100 border border-red-300 rounded-lg">
+          <h2 className="text-xl font-bold text-red-800 mb-4">Layout Error</h2>
+          <p className="text-red-700">Error rendering layout: {error instanceof Error ? error.message : 'Unknown error'}</p>
         </div>
       );
     }
-
-    // Visualization - Fullscreen mode (no split panel)
-    if (activeMode === 'visualization') {
-      return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
-    }
-
-    // Navigation - Fullscreen mode (no split panel)
-    if (activeMode === 'navigation') {
-      return <SimpleMusicNavigationView nowPlaying={nowPlaying} />;
-    }
-
-    return (
-      <Group orientation="horizontal" className="h-full w-full" onLayoutChange={onLayoutChange}>
-        <Panel defaultSize={panelSizes[0]} minSize={30} id="now-playing">
-          <div
-            className="h-full w-full cursor-pointer"
-            onClick={(e) => {
-              // Don't navigate if clicking on buttons, inputs, or signal path elements
-              const target = e.target as HTMLElement;
-              const clickedInteractive = target.closest('button, input, a, [role="button"], .signal-path-popover');
-              if (!clickedInteractive) {
-                setActiveMode('playback');
-              }
-            }}
-          >
-            {renderNowPlaying()}
-          </div>
-        </Panel>
-        <Separator className="w-1 bg-themed-deep hover:bg-accent-primary/20 cursor-col-resize mx-0.5 rounded-full flex items-center justify-center transition-colors">
-          <div className="w-1 h-12 bg-themed-medium rounded-full" />
-        </Separator>
-        <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
-          <div ref={secondaryContainerRef} className="h-full w-full flex flex-col p-4 lg:p-6">
-            {/* 3. LYRICS/QUEUE/HISTORY/PROCESSING - Based on activeMode */}
-            {activeMode === 'processing' && renderProcessingTools()}
-            {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
-            {activeMode === 'info' && <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />}
-            {activeMode === 'queue' && <PlayQueue queue={queue} mediaSource={mediaSource} />}
-            {activeMode === 'history' && <History />}
-          </div>
-        </Panel>
-      </Group>
-    );
   };
 
   return (

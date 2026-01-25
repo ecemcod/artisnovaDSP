@@ -1,22 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { Disc, Calendar, Grid, List, Play, ExternalLink } from 'lucide-react';
+import { AlbumArtwork } from './ProgressiveImage';
 import SkeletonLoader from './SkeletonLoader';
-
-interface Album {
-  id: string;
-  title: string;
-  year: string;
-  type: 'album' | 'single' | 'ep' | 'compilation';
-  artworkUrl?: string;
-  trackCount?: number;
-  label?: string;
-  genres?: string[];
-}
+import { musicDataProvider, type UnifiedAlbum } from '../utils/MusicDataProvider';
 
 interface ArtistDiscographyProps {
   artistName: string;
-  onAlbumClick?: (album: Album) => void;
+  onAlbumClick?: (album: UnifiedAlbum) => void;
   className?: string;
 }
 
@@ -25,7 +15,7 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
   onAlbumClick,
   className = '' 
 }) => {
-  const [albums, setAlbums] = useState<Album[]>([]);
+  const [albums, setAlbums] = useState<UnifiedAlbum[]>([]);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [filterType, setFilterType] = useState<'all' | 'album' | 'single' | 'ep'>('all');
@@ -37,10 +27,8 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
     const fetchDiscography = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`/api/music/artist/discography`, {
-          params: { artist: artistName }
-        });
-        setAlbums(response.data.albums || []);
+        const results = await musicDataProvider.searchAlbums('', artistName, 50);
+        setAlbums(results);
       } catch (error) {
         console.error('Error fetching discography:', error);
         setAlbums([]);
@@ -57,11 +45,13 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
     .sort((a, b) => {
       switch (sortBy) {
         case 'year':
-          return parseInt(b.year) - parseInt(a.year);
+          const yearA = parseInt(a.year || '0');
+          const yearB = parseInt(b.year || '0');
+          return yearB - yearA;
         case 'title':
           return a.title.localeCompare(b.title);
         case 'type':
-          return a.type.localeCompare(b.type);
+          return (a.type || '').localeCompare(b.type || '');
         default:
           return 0;
       }
@@ -87,17 +77,13 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
         >
           {/* Album Artwork */}
           <div className="aspect-square mb-3 relative overflow-hidden rounded-lg bg-themed-deep">
-            {album.artworkUrl ? (
-              <img
-                src={album.artworkUrl}
-                alt={album.title}
-                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center">
-                <Disc className="w-8 h-8 text-themed-muted" />
-              </div>
-            )}
+            <AlbumArtwork
+              src={album.artworkUrl}
+              album={album.title}
+              artist={artistName}
+              size="medium"
+              className="w-full h-full group-hover:scale-105 transition-transform duration-300"
+            />
             
             {/* Hover Overlay */}
             <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">
@@ -105,8 +91,8 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
             </div>
 
             {/* Type Badge */}
-            <div className={`absolute top-2 right-2 px-2 py-1 rounded text-xs font-bold uppercase tracking-wider ${getTypeColor(album.type)}`}>
-              {album.type}
+            <div className={`absolute top-2 right-2 px-2 py-1 rounded text-xs font-bold uppercase tracking-wider ${getTypeColor(album.type || 'album')}`}>
+              {album.type || 'album'}
             </div>
           </div>
 
@@ -116,7 +102,7 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
               {album.title}
             </h3>
             <div className="flex items-center justify-between text-xs text-themed-muted">
-              <span>{album.year}</span>
+              <span>{album.year || 'Unknown'}</span>
               {album.trackCount && (
                 <span>{album.trackCount} tracks</span>
               )}
@@ -139,19 +125,13 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
           className="group cursor-pointer bg-white/5 rounded-lg p-4 hover:bg-white/10 transition-all duration-300 border border-themed-subtle hover:border-accent-primary/50 flex items-center gap-4"
         >
           {/* Album Artwork */}
-          <div className="w-16 h-16 flex-shrink-0 rounded-lg overflow-hidden bg-themed-deep">
-            {album.artworkUrl ? (
-              <img
-                src={album.artworkUrl}
-                alt={album.title}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center">
-                <Disc className="w-6 h-6 text-themed-muted" />
-              </div>
-            )}
-          </div>
+          <AlbumArtwork
+            src={album.artworkUrl}
+            album={album.title}
+            artist={artistName}
+            size="small"
+            className="w-16 h-16 flex-shrink-0"
+          />
 
           {/* Album Info */}
           <div className="flex-1 min-w-0">
@@ -159,22 +139,22 @@ const ArtistDiscography: React.FC<ArtistDiscographyProps> = ({
               <h3 className="font-bold text-themed-primary group-hover:text-accent-primary transition-colors truncate">
                 {album.title}
               </h3>
-              <div className={`px-2 py-1 rounded text-xs font-bold uppercase tracking-wider ${getTypeColor(album.type)}`}>
-                {album.type}
+              <div className={`px-2 py-1 rounded text-xs font-bold uppercase tracking-wider ${getTypeColor(album.type || 'album')}`}>
+                {album.type || 'album'}
               </div>
             </div>
-            <div className="flex items-center gap-4 text-sm text-themed-muted">
-              <span className="flex items-center gap-1">
-                <Calendar className="w-4 h-4" />
-                {album.year}
-              </span>
-              {album.trackCount && (
-                <span>{album.trackCount} tracks</span>
-              )}
-              {album.label && (
-                <span className="truncate">{album.label}</span>
-              )}
-            </div>
+              <div className="flex items-center gap-4 text-sm text-themed-muted">
+                <span className="flex items-center gap-1">
+                  <Calendar className="w-4 h-4" />
+                  {album.year || 'Unknown'}
+                </span>
+                {album.trackCount && (
+                  <span>{album.trackCount} tracks</span>
+                )}
+                {album.label && (
+                  <span className="truncate">{album.label}</span>
+                )}
+              </div>
           </div>
 
           {/* Action Button */}

@@ -1,46 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Disc, Calendar, Music, User, Building, Clock, Star } from 'lucide-react';
 import { useNavigation } from './NavigationProvider';
-
-interface Album {
-  id: string;
-  title: string;
-  mbid?: string;
-  artist_name?: string;
-  artist_id?: string;
-  release_date?: string;
-  release_type?: string;
-  label_name?: string;
-  label_id?: string;
-  catalog_number?: string;
-  artwork_url?: string;
-  track_count?: number;
-  tracks?: Track[];
-  credits?: Credit[];
-  genres?: string[];
-  sources?: DataSource[];
-  quality_score?: number;
-}
-
-interface Track {
-  id: string;
-  position: number;
-  title: string;
-  duration?: number;
-  credits?: Credit[];
-}
-
-interface Credit {
-  id: string;
-  name: string;
-  role: string;
-  instruments?: string[];
-}
-
-interface DataSource {
-  name: string;
-  weight: number;
-}
+import { AlbumArtwork } from './ProgressiveImage';
+import { musicDataProvider, type UnifiedAlbum } from '../utils/MusicDataProvider';
 
 interface EnhancedAlbumViewProps {
   albumId: string;
@@ -51,7 +13,7 @@ export const EnhancedAlbumView: React.FC<EnhancedAlbumViewProps> = ({
   albumId, 
   className = '' 
 }) => {
-  const [album, setAlbum] = useState<Album | null>(null);
+  const [album, setAlbum] = useState<UnifiedAlbum | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
@@ -66,11 +28,10 @@ export const EnhancedAlbumView: React.FC<EnhancedAlbumViewProps> = ({
       setLoading(true);
       setError(null);
       
-      const response = await fetch(`/api/music/album/${encodeURIComponent(albumId)}?includeTracks=true&includeCredits=true`);
-      if (!response.ok) throw new Error('Failed to load album data');
+      const albumData = await musicDataProvider.getAlbumDetails(albumId);
+      if (!albumData) throw new Error('Album not found');
       
-      const data = await response.json();
-      setAlbum(data);
+      setAlbum(albumData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -79,14 +40,14 @@ export const EnhancedAlbumView: React.FC<EnhancedAlbumViewProps> = ({
   };
 
   const handleArtistClick = () => {
-    if (album?.artist_id) {
-      navigate('artist', album.artist_id, { name: album.artist_name }, album.artist_name);
+    if (album?.artist_name) {
+      navigate('artist', album.artist_name, { name: album.artist_name }, album.artist_name);
     }
   };
 
   const handleLabelClick = () => {
-    if (album?.label_id) {
-      navigate('label', album.label_id, { name: album.label_name }, album.label_name);
+    if (album?.label_name) {
+      navigate('label', album.label_name, { name: album.label_name }, album.label_name);
     }
   };
 
@@ -170,25 +131,26 @@ export const EnhancedAlbumView: React.FC<EnhancedAlbumViewProps> = ({
     <div className={className}>
       {/* Compact Album Header */}
       <div className="flex items-start gap-6 p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-        {/* Album Artwork */}
-        <div className="w-32 h-32 flex-shrink-0">
-          {album.artwork_url ? (
-            <img
-              src={album.artwork_url}
-              alt={album.title}
-              className="w-full h-full rounded-lg object-cover shadow-md"
-            />
-          ) : (
-            <div className="w-full h-full bg-gray-100 rounded-lg flex items-center justify-center">
-              <Disc className="w-12 h-12 text-gray-400" />
-            </div>
-          )}
-        </div>
+        <AlbumArtwork
+          src={album.artwork_url}
+          album={album.title}
+          artist={album.artist_name || 'Unknown Artist'}
+          size="medium"
+          className="w-32 h-32 flex-shrink-0 shadow-md"
+        />
 
         {/* Album Info */}
         <div className="flex-1 min-w-0 space-y-4">
           <div className="space-y-2">
-            <h1 className="text-3xl font-bold text-gray-900 truncate">{album.title}</h1>
+            <div className="flex items-center space-x-3">
+              <h1 className="text-3xl font-bold text-gray-900 truncate">{album.title}</h1>
+              {album.source === 'qobuz' && (
+                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                  <span className="w-2 h-2 bg-blue-600 rounded-full mr-1"></span>
+                  Qobuz Premium
+                </span>
+              )}
+            </div>
             {album.artist_name && (
               <button
                 onClick={handleArtistClick}

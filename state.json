@@ -10,8 +10,6 @@
   "lastOptions": {
     "sampleRate": 96000,
     "bypass": true,
-    "presetName": "BYPASS",
-    "format": "S32LE",
-    "isFallback": true
+    "presetName": "BYPASS"
   }
 }

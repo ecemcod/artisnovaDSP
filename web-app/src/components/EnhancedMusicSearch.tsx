@@ -1,27 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, X, User, Disc, Clock, Loader } from 'lucide-react';
 import { ProgressiveImage } from './ProgressiveImage';
+import { musicDataProvider, type UnifiedArtist, type UnifiedAlbum } from '../utils/MusicDataProvider';
 
 interface SearchResult {
-  artists: Array<{
-    id: string;
-    name: string;
-    image_url?: string;
-    country?: string;
-    type?: string;
-  }>;
-  albums: Array<{
-    id: string;
-    title: string;
-    artist_name?: string;
-    artwork_url?: string;
-    release_date?: string;
-  }>;
+  artists: UnifiedArtist[];
+  albums: UnifiedAlbum[];
 }
 
 interface EnhancedMusicSearchProps {
-  onArtistSelect?: (artistId: string, artistData: any) => void;
-  onAlbumSelect?: (albumId: string, albumData: any) => void;
+  onArtistSelect?: (artistId: string, artistData: UnifiedArtist) => void;
+  onAlbumSelect?: (albumId: string, albumData: UnifiedAlbum) => void;
   placeholder?: string;
   className?: string;
 }
@@ -79,11 +68,8 @@ export const EnhancedMusicSearch: React.FC<EnhancedMusicSearchProps> = ({
 
     setLoading(true);
     try {
-      const response = await fetch(`/api/music/search?q=${encodeURIComponent(searchQuery)}&limit=8`);
-      if (response.ok) {
-        const data = await response.json();
-        setResults(data);
-      }
+      const data = await musicDataProvider.search(searchQuery, 8);
+      setResults(data);
     } catch (error) {
       console.error('Search error:', error);
       setResults({ artists: [], albums: [] });
@@ -116,14 +102,14 @@ export const EnhancedMusicSearch: React.FC<EnhancedMusicSearchProps> = ({
     performSearch(searchQuery);
   };
 
-  const handleArtistClick = (artist: any) => {
+  const handleArtistClick = (artist: UnifiedArtist) => {
     setQuery('');
     setShowResults(false);
     handleSearch(artist.name);
     onArtistSelect?.(artist.name, artist);
   };
 
-  const handleAlbumClick = (album: any) => {
+  const handleAlbumClick = (album: UnifiedAlbum) => {
     setQuery('');
     setShowResults(false);
     handleSearch(album.title);
@@ -236,11 +222,22 @@ export const EnhancedMusicSearch: React.FC<EnhancedMusicSearchProps> = ({
                         {artist.name}
                       </p>
                       <div className="flex items-center space-x-2 text-xs text-gray-500">
+                        {artist.source === 'qobuz' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                            Qobuz
+                          </span>
+                        )}
                         {artist.type && <span>{artist.type}</span>}
                         {artist.country && (
                           <>
                             {artist.type && <span>•</span>}
                             <span>{artist.country}</span>
+                          </>
+                        )}
+                        {artist.albums_count && (
+                          <>
+                            <span>•</span>
+                            <span>{artist.albums_count} albums</span>
                           </>
                         )}
                       </div>
@@ -276,6 +273,11 @@ export const EnhancedMusicSearch: React.FC<EnhancedMusicSearchProps> = ({
                         {album.title}
                       </p>
                       <div className="flex items-center space-x-2 text-xs text-gray-500">
+                        {album.source === 'qobuz' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                            Qobuz
+                          </span>
+                        )}
                         {album.artist_name && <span>by {album.artist_name}</span>}
                         {album.release_date && (
                           <>

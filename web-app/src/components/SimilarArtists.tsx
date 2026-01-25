@@ -1,18 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { Users, ArrowRight, Star, ExternalLink } from 'lucide-react';
 import SkeletonLoader from './SkeletonLoader';
-
-interface SimilarArtist {
-  id: string;
-  name: string;
-  similarity: number;
-  genres?: string[];
-  artworkUrl?: string;
-  description?: string;
-  listeners?: number;
-  playcount?: number;
-}
+import { musicDataProvider, type UnifiedArtist } from '../utils/MusicDataProvider';
 
 interface SimilarArtistsProps {
   artistName: string;
@@ -27,7 +16,7 @@ const SimilarArtists: React.FC<SimilarArtistsProps> = ({
   className = '',
   maxItems = 12
 }) => {
-  const [similarArtists, setSimilarArtists] = useState<SimilarArtist[]>([]);
+  const [similarArtists, setSimilarArtists] = useState<UnifiedArtist[]>([]);
   const [loading, setLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
@@ -37,10 +26,13 @@ const SimilarArtists: React.FC<SimilarArtistsProps> = ({
     const fetchSimilarArtists = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`/api/music/artist/similar`, {
-          params: { artist: artistName }
-        });
-        setSimilarArtists(response.data.artists || []);
+        // Use search to find similar artists (simplified approach)
+        const results = await musicDataProvider.searchArtists(artistName, 20);
+        // Filter out the exact match and take the rest as "similar"
+        const similar = results.filter(artist => 
+          artist.name.toLowerCase() !== artistName.toLowerCase()
+        );
+        setSimilarArtists(similar);
       } catch (error) {
         console.error('Error fetching similar artists:', error);
         setSimilarArtists([]);
@@ -54,14 +46,15 @@ const SimilarArtists: React.FC<SimilarArtistsProps> = ({
 
   const displayedArtists = showAll ? similarArtists : similarArtists.slice(0, maxItems);
 
-  const getSimilarityColor = (similarity: number) => {
-    if (similarity >= 0.8) return 'text-green-400';
-    if (similarity >= 0.6) return 'text-yellow-400';
-    if (similarity >= 0.4) return 'text-orange-400';
+  const getSimilarityColor = (weight: number = 0.5) => {
+    if (weight >= 0.8) return 'text-green-400';
+    if (weight >= 0.6) return 'text-yellow-400';
+    if (weight >= 0.4) return 'text-orange-400';
     return 'text-red-400';
   };
 
-  const formatNumber = (num: number) => {
+  const formatNumber = (num?: number) => {
+    if (!num) return '0';
     if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
     if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
     return num.toString();
@@ -131,7 +124,7 @@ const SimilarArtists: React.FC<SimilarArtistsProps> = ({
               <div className="absolute top-2 right-2 bg-black/80 backdrop-blur-sm rounded-full px-2 py-1 flex items-center gap-1">
                 <Star className={`w-3 h-3 ${getSimilarityColor(artist.similarity)}`} />
                 <span className={`text-xs font-bold ${getSimilarityColor(artist.similarity)}`}>
-                  {Math.round(artist.similarity * 100)}%
+                  {Math.round((artist.similarity || 0.5) * 100)}%
                 </span>
               </div>
 
@@ -150,12 +143,12 @@ const SimilarArtists: React.FC<SimilarArtistsProps> = ({
               {/* Genres */}
               {artist.genres && artist.genres.length > 0 && (
                 <div className="flex flex-wrap gap-1">
-                  {artist.genres.slice(0, 2).map((genre, index) => (
+                  {artist.genres.slice(0, 2).map((genre: any, index) => (
                     <span
                       key={index}
                       className="px-2 py-1 bg-themed-deep rounded text-xs text-themed-muted"
                     >
-                      {genre}
+                      {typeof genre === 'string' ? genre : genre.name || 'Unknown Genre'}
                     </span>
                   ))}
                   {artist.genres.length > 2 && (

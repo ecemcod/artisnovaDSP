@@ -36,11 +36,26 @@ const DiscogsConnector = require('./connectors/DiscogsConnector');
 const LastFmConnector = require('./connectors/LastFmConnector');
 const iTunesConnector = require('./connectors/iTunesConnector');
 const WikipediaConnector = require('./connectors/WikipediaConnector');
+const QobuzConnector = require('./connectors/QobuzConnector');
 
 // Initialize Music Info Manager with the raw SQLite database connection
 const musicInfoManager = new MusicInfoManager(db.db); // Use db.db to get the raw SQLite connection
 
+// Load Qobuz configuration if available
+let qobuzConfig = {};
+try {
+    if (fs.existsSync('./qobuz-config.json')) {
+        qobuzConfig = JSON.parse(fs.readFileSync('./qobuz-config.json', 'utf8'));
+        console.log('Server: Loaded Qobuz configuration');
+    } else {
+        console.log('Server: No Qobuz configuration found, using defaults');
+    }
+} catch (error) {
+    console.warn('Server: Error loading Qobuz configuration:', error.message);
+}
+
 // Register data source connectors
+musicInfoManager.registerConnector('qobuz', new QobuzConnector(qobuzConfig));
 musicInfoManager.registerConnector('musicbrainz', new MusicBrainzConnector());
 musicInfoManager.registerConnector('discogs', new DiscogsConnector());
 musicInfoManager.registerConnector('lastfm', new LastFmConnector());
@@ -1532,21 +1547,60 @@ app.get('/api/media/info', async (req, res) => {
                     if (!info.artworkUrl) info.artworkUrl = cached.artwork;
                     if (info.artist === 'Unknown Artist' && cached.artist) info.artist = cached.artist;
                 } else {
-                    // BACKGROUND ENRICHMENT: Trigger fetch in background and return immediate current info
+                    // ENHANCED ENRICHMENT: Use MusicInfoManager with Qobuz priority
                     (async () => {
                         try {
-                            console.log(`Enrichment (Background): Fetching metadata for "${cacheKey}"...`);
-                            const [albumData, artistData] = await Promise.all([
-                                getAlbumInfo(info.artist, info.album),
-                                getArtistInfo(info.artist, info.album)
+                            console.log(`Enhanced Enrichment: Fetching metadata for "${cacheKey}" with Qobuz priority...`);
+                            
+                            // Use enhanced MusicInfoManager for better data
+                            const [enhancedArtistData, enhancedAlbumData] = await Promise.all([
+                                musicInfoManager.getArtistInfo(info.artist).catch(() => null),
+                                musicInfoManager.getAlbumInfo(info.album, info.artist).catch(() => null)
                             ]);
 
-                            let year = albumData?.date || '';
-                            let style = (artistData?.tags || []).find(t => t.toLowerCase() !== 'music') || '';
-                            let artwork = albumData?.artwork || '';
-                            const realArtist = albumData?.artist || artistData?.name || null;
+                            let year = '';
+                            let style = '';
+                            let artwork = '';
+                            let realArtist = null;
 
-                            // Fallback to iTunes for artwork if missing or potentially broken (e.g. from MusicBrainz)
+                            // Priority 1: Enhanced album data (includes Qobuz)
+                            if (enhancedAlbumData) {
+                                year = enhancedAlbumData.release_date ? new Date(enhancedAlbumData.release_date).getFullYear().toString() : '';
+                                artwork = enhancedAlbumData.artwork_url || '';
+                                realArtist = enhancedAlbumData.artist_name || null;
+                                
+                                // Get genres from enhanced album data
+                                if (enhancedAlbumData.genres && enhancedAlbumData.genres.length > 0) {
+                                    const genre = enhancedAlbumData.genres[0];
+                                    style = typeof genre === 'string' ? genre : (genre.name || genre);
+                                }
+                            }
+
+                            // Priority 2: Enhanced artist data (includes Qobuz)
+                            if (enhancedArtistData && !style) {
+                                if (enhancedArtistData.genres && enhancedArtistData.genres.length > 0) {
+                                    const genre = enhancedArtistData.genres[0];
+                                    style = typeof genre === 'string' ? genre : (genre.name || genre);
+                                }
+                                if (!realArtist) {
+                                    realArtist = enhancedArtistData.name || null;
+                                }
+                            }
+
+                            // Fallback: Original enrichment methods
+                            if (!year || !style || !artwork) {
+                                const [albumData, artistData] = await Promise.all([
+                                    getAlbumInfo(info.artist, info.album),
+                                    getArtistInfo(info.artist, info.album)
+                                ]);
+
+                                if (!year) year = albumData?.date || '';
+                                if (!style) style = (artistData?.tags || []).find(t => t.toLowerCase() !== 'music') || '';
+                                if (!artwork) artwork = albumData?.artwork || '';
+                                if (!realArtist) realArtist = albumData?.artist || artistData?.name || null;
+                            }
+
+                            // Final fallback to iTunes for artwork if still missing
                             if (!artwork || artwork.includes('coverartarchive.org')) {
                                 const itunesArtwork = await getArtworkFromITunes(realArtist || info.artist, info.album);
                                 if (itunesArtwork) artwork = itunesArtwork;
@@ -1561,7 +1615,8 @@ app.get('/api/media/info', async (req, res) => {
                                     metadataCache.set(`${realArtist}-${info.album}`, metadata);
                                 }
 
-                                console.log(`Enrichment (Background): Success for "${cacheKey}" -> Year: ${year || '?'}, Style: ${style || '?'}, Artist: ${realArtist || '?'}, Artwork: ${artwork ? 'YES' : 'NO'}`);
+                                const sourceInfo = enhancedAlbumData?.sources?.[0]?.name || enhancedArtistData?.sources?.[0]?.name || 'fallback';
+                                console.log(`Enhanced Enrichment: Success for "${cacheKey}" -> Year: ${year || '?'}, Style: ${style || '?'}, Artist: ${realArtist || '?'}, Artwork: ${artwork ? 'YES' : 'NO'}, Source: ${sourceInfo}`);
 
                                 const updatedInfo = { ...info };
                                 if (year) updatedInfo.year = year;
@@ -1573,7 +1628,7 @@ app.get('/api/media/info', async (req, res) => {
                                 broadcast('metadata_update', { source: 'roon', info: updatedInfo });
                             }
                         } catch (e) {
-                            console.warn('Metadata enrichment background task failed:', e.message);
+                            console.warn('Enhanced metadata enrichment background task failed:', e.message);
                         }
                     })();
                 }
@@ -1624,7 +1679,7 @@ app.get('/api/media/info', async (req, res) => {
             info.artworkUrl = `/api/media/artwork?h=${trackHash}`;
         }
 
-        // ALWAYS attempt metadata enrichment for Year/Style regardless of artwork
+        // ENHANCED metadata enrichment for Apple Music with Qobuz priority
         const cacheKey = `${info.artist}-${info.album}`;
         if (info.artist && info.album && (!info.year || !info.style)) {
             if (metadataCache.has(cacheKey)) {
@@ -1634,13 +1689,53 @@ app.get('/api/media/info', async (req, res) => {
                 if (!info.artworkUrl && cached.artwork) info.artworkUrl = cached.artwork;
             } else {
                 try {
-                    const data = await getAlbumInfo(info.artist, info.album);
-                    if (data) {
-                        if (!info.year) info.year = data.date;
-                        if (!info.artworkUrl) info.artworkUrl = data.artwork;
-                        metadataCache.set(cacheKey, { artwork: data.artwork, year: data.date });
+                    // Priority 1: Enhanced MusicInfoManager with Qobuz
+                    const [enhancedArtistData, enhancedAlbumData] = await Promise.all([
+                        musicInfoManager.getArtistInfo(info.artist).catch(() => null),
+                        musicInfoManager.getAlbumInfo(info.album, info.artist).catch(() => null)
+                    ]);
+
+                    let year = '';
+                    let style = '';
+                    let artwork = '';
+
+                    // Get data from enhanced sources (Qobuz priority)
+                    if (enhancedAlbumData) {
+                        year = enhancedAlbumData.release_date ? new Date(enhancedAlbumData.release_date).getFullYear().toString() : '';
+                        artwork = enhancedAlbumData.artwork_url || '';
+                        
+                        if (enhancedAlbumData.genres && enhancedAlbumData.genres.length > 0) {
+                            const genre = enhancedAlbumData.genres[0];
+                            style = typeof genre === 'string' ? genre : (genre.name || genre);
+                        }
                     }
-                } catch (e) { }
+
+                    if (enhancedArtistData && !style) {
+                        if (enhancedArtistData.genres && enhancedArtistData.genres.length > 0) {
+                            const genre = enhancedArtistData.genres[0];
+                            style = typeof genre === 'string' ? genre : (genre.name || genre);
+                        }
+                    }
+
+                    // Fallback to original method
+                    if (!year || !artwork) {
+                        const data = await getAlbumInfo(info.artist, info.album);
+                        if (data) {
+                            if (!year) year = data.date;
+                            if (!artwork) artwork = data.artwork;
+                        }
+                    }
+
+                    // Apply enhanced data
+                    if (!info.year && year) info.year = year;
+                    if (!info.style && style) info.style = style;
+                    if (!info.artworkUrl && artwork) info.artworkUrl = artwork;
+                    
+                    // Cache the enhanced metadata
+                    metadataCache.set(cacheKey, { artwork, year, style });
+                } catch (e) {
+                    console.warn('Enhanced Apple Music metadata enrichment failed:', e.message);
+                }
             }
         }
 
@@ -1660,23 +1755,238 @@ app.get('/api/media/info', async (req, res) => {
     }
 });
 
+// Test endpoint to verify logging
+app.get('/api/test-logging', (req, res) => {
+    console.log('TEST: Logging is working correctly');
+    res.json({ message: 'Logging test successful', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/media/artist-info', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const { artist, album } = req.query;
     console.log(`API: Request for artist-info: artist="${artist}", album="${album}"`);
+    
     try {
-        const info = await getArtistInfo(artist, album);
-        const albumInfo = await getAlbumInfo(artist, album);
+        // Get Qobuz connector directly
+        const qobuzConnector = musicInfoManager.connectors.get('qobuz');
+        
+        let qobuzArtistData = null;
+        let qobuzAlbumData = null;
+        
+        if (qobuzConnector) {
+            console.log('API: Using Qobuz connector directly for fresh data');
+            
+            // Get artist data from Qobuz
+            if (artist) {
+                try {
+                    const artistResults = await qobuzConnector.searchArtist(artist, 3);
+                    if (artistResults.length > 0) {
+                        const firstArtist = artistResults[0];
+                        console.log(`API: Found Qobuz artist: ${firstArtist.name} (ID: ${firstArtist.qobuz_id})`);
+                        
+                        // Try to get full artist details (may fail without user auth)
+                        let fullArtistData = null;
+                        try {
+                            fullArtistData = await qobuzConnector.getArtist(firstArtist.qobuz_id);
+                        } catch (error) {
+                            console.log('API: Full artist details not available (requires user auth)');
+                        }
+                        
+                        if (fullArtistData) {
+                            qobuzArtistData = {
+                                name: fullArtistData.name,
+                                biography: fullArtistData.biography,
+                                image_url: fullArtistData.image_url,
+                                albums_count: fullArtistData.albums_count,
+                                genres: fullArtistData.genres,
+                                similar_artists: fullArtistData.similar_artists,
+                                qobuz_id: fullArtistData.qobuz_id,
+                                source: 'qobuz'
+                            };
+                            console.log(`API: Artist biography found: ${fullArtistData.biography ? 'YES' : 'NO'}`);
+                        } else {
+                            // Use search result data and enhance with additional info
+                            qobuzArtistData = {
+                                name: firstArtist.name,
+                                image_url: firstArtist.image_url,
+                                albums_count: firstArtist.albums_count,
+                                qobuz_id: firstArtist.qobuz_id,
+                                source: 'qobuz',
+                                // Add some basic info we can derive
+                                biography: null, // Will be filled by fallback
+                                genres: [], // Will be filled by fallback
+                                activeYears: null, // Will be filled by fallback
+                                tags: null // Will be filled by fallback
+                            };
+                            console.log('API: Using search result data, will enhance with fallback sources');
+                        }
+                    }
+                } catch (error) {
+                    console.log('API: Qobuz artist search failed:', error.message);
+                }
+            }
+            
+            // Get album data from Qobuz with full details including TiVo description
+            if (album && artist) {
+                try {
+                    const albumResults = await qobuzConnector.searchAlbum(album, artist, 3);
+                    if (albumResults.length > 0) {
+                        const firstAlbum = albumResults[0];
+                        console.log(`API: Found Qobuz album: ${firstAlbum.title} (ID: ${firstAlbum.qobuz_id})`);
+                        
+                        // Get full album details including description
+                        const fullAlbumData = await qobuzConnector.getAlbum(firstAlbum.qobuz_id);
+                        if (fullAlbumData) {
+                            qobuzAlbumData = {
+                                title: fullAlbumData.title,
+                                artist_name: fullAlbumData.artist_name,
+                                artwork_url: fullAlbumData.artwork_url,
+                                release_date: fullAlbumData.release_date,
+                                label_name: fullAlbumData.label_name,
+                                track_count: fullAlbumData.track_count,
+                                description: fullAlbumData.description, // TiVo review!
+                                credits: fullAlbumData.credits,
+                                tracks: fullAlbumData.tracks,
+                                qobuz_id: fullAlbumData.qobuz_id,
+                                source: 'qobuz'
+                            };
+                            console.log(`API: Album description found: ${fullAlbumData.description ? 'YES' : 'NO'}`);
+                            console.log(`API: Description length: ${fullAlbumData.description?.length || 0}`);
+                        }
+                    }
+                } catch (error) {
+                    console.log('API: Qobuz album search failed:', error.message);
+                }
+            }
+        }
+        
+        // Enhanced logic: Combine Qobuz data with fallback sources for complete info
+        if (qobuzArtistData || qobuzAlbumData) {
+            console.log('API: Got Qobuz data, checking if enhancement needed');
+            
+            // If we have Qobuz artist data but missing biography, enhance with fallback
+            if (qobuzArtistData && !qobuzArtistData.biography) {
+                console.log('API: Qobuz artist data missing biography, enhancing with fallback sources');
+                try {
+                    // Try getArtistInfo function first (AudioDB + Wikipedia)
+                    const fallbackArtistInfo = await getArtistInfo(artist, album);
+                    
+                    if (fallbackArtistInfo && fallbackArtistInfo.bio) {
+                        // Merge Qobuz data (image, ID, albums_count) with fallback biography
+                        qobuzArtistData = {
+                            ...qobuzArtistData,
+                            biography: fallbackArtistInfo.bio,
+                            activeYears: fallbackArtistInfo.formed,
+                            tags: fallbackArtistInfo.tags ? fallbackArtistInfo.tags.join(', ') : null,
+                            country: fallbackArtistInfo.origin || fallbackArtistInfo.country,
+                            artistUrl: null // AudioDB doesn't provide Wikipedia URLs
+                        };
+                        console.log(`API: Enhanced Qobuz artist with AudioDB biography: ${qobuzArtistData.biography ? 'YES (' + qobuzArtistData.biography.length + ' chars)' : 'NO'}`);
+                    } else {
+                        // Fallback to MusicInfoManager
+                        const musicInfoResult = await musicInfoManager.getArtistInfo(artist).catch(() => null);
+                        if (musicInfoResult && (musicInfoResult.biography || musicInfoResult.bio)) {
+                            qobuzArtistData = {
+                                ...qobuzArtistData,
+                                biography: musicInfoResult.biography || musicInfoResult.bio,
+                                activeYears: musicInfoResult.activeYears || musicInfoResult.formed,
+                                tags: musicInfoResult.tags,
+                                country: musicInfoResult.country,
+                                artistUrl: musicInfoResult.artistUrl
+                            };
+                            console.log(`API: Enhanced Qobuz artist with MusicInfoManager: ${qobuzArtistData.biography ? 'YES' : 'NO'}`);
+                        }
+                    }
+                } catch (error) {
+                    console.log('API: Failed to enhance Qobuz artist data:', error.message);
+                }
+            }
+            
+            const response = {
+                artist: qobuzArtistData,
+                album: qobuzAlbumData,
+                source: 'Qobuz Enhanced'
+            };
+            return res.json(response);
+        }
+        
+        // Fallback to MusicInfoManager
+        console.log('API: Falling back to MusicInfoManager');
+        const [artistInfo, albumInfo] = await Promise.all([
+            artist ? musicInfoManager.getArtistInfo(artist).catch(() => null) : null,
+            (album && artist) ? musicInfoManager.getAlbumInfo(album, artist).catch(() => null) : null
+        ]);
+
+        // Final fallback to original methods
+        let fallbackArtistInfo = null;
+        let fallbackAlbumInfo = null;
+        
+        if (!artistInfo && artist) {
+            fallbackArtistInfo = await getArtistInfo(artist, album);
+        }
+        
+        if (!albumInfo && album && artist) {
+            fallbackAlbumInfo = await getAlbumInfo(artist, album);
+        }
+
         const finalResponse = {
-            artist: info,
-            album: albumInfo,
-            source: albumInfo?.source || info.source || 'MusicBrainz'
+            artist: artistInfo || fallbackArtistInfo,
+            album: albumInfo || fallbackAlbumInfo,
+            source: 'MusicBrainz'
         };
-        console.log(`API: Sending response for artist-info:`, JSON.stringify(finalResponse).substring(0, 300));
+        
         res.json(finalResponse);
     } catch (e) {
         console.error('API Error in artist-info:', e.message);
         res.status(500).json({ error: e.message });
+    }
+});
+
+// Test endpoint for Qobuz direct access
+app.get('/api/test-qobuz-direct', async (req, res) => {
+    const { artist, album } = req.query;
+    console.log(`TEST: Direct Qobuz test for "${artist}" - "${album}"`);
+    
+    try {
+        const qobuzConnector = musicInfoManager.connectors.get('qobuz');
+        if (!qobuzConnector) {
+            return res.json({ error: 'Qobuz connector not found' });
+        }
+        
+        // Test artist search
+        const artistResults = await qobuzConnector.searchArtist(artist, 3);
+        console.log(`TEST: Qobuz artist search returned ${artistResults.length} results`);
+        
+        let artistDetails = null;
+        if (artistResults.length > 0) {
+            const firstArtist = artistResults[0];
+            console.log(`TEST: Getting full artist details for ID ${firstArtist.qobuz_id}`);
+            artistDetails = await qobuzConnector.getArtist(firstArtist.qobuz_id);
+        }
+        
+        // Test album search
+        const albumResults = await qobuzConnector.searchAlbum(album, artist, 3);
+        console.log(`TEST: Qobuz album search returned ${albumResults.length} results`);
+        
+        let albumDetails = null;
+        if (albumResults.length > 0) {
+            const firstAlbum = albumResults[0];
+            console.log(`TEST: Getting full album details for ID ${firstAlbum.qobuz_id}`);
+            albumDetails = await qobuzConnector.getAlbum(firstAlbum.qobuz_id);
+        }
+        
+        res.json({
+            qobuzConnectorFound: true,
+            artistSearchResults: artistResults.length,
+            albumSearchResults: albumResults.length,
+            artistDetails: artistDetails ? 'Found' : 'Not found',
+            albumDetails: albumDetails ? 'Found' : 'Not found',
+            albumHasDescription: albumDetails?.description ? 'Yes' : 'No',
+            albumHasCredits: albumDetails?.credits?.length > 0 ? 'Yes' : 'No'
+        });
+    } catch (error) {
+        console.error('TEST: Qobuz direct test failed:', error.message);
+        res.json({ error: error.message });
     }
 });
 
@@ -1819,7 +2129,8 @@ app.get('/api/music/search', async (req, res) => {
         
         const options = {
             limit: parseInt(req.query.limit) || 10,
-            sources: req.query.sources ? req.query.sources.split(',') : undefined
+            sources: req.query.sources ? req.query.sources.split(',') : undefined,
+            artist: req.query.artist // Pass artist parameter for album searches
         };
         
         let results = {};
@@ -2070,7 +2381,7 @@ app.get('/api/music/artist/discography', async (req, res) => {
             artworkUrl: album.artwork_url,
             trackCount: album.track_count,
             label: album.label_name,
-            genres: album.genres || []
+            genres: (album.genres || []).map(g => typeof g === 'string' ? g : (g.name || g))
         })) || [];
 
         res.json({ 
@@ -2102,7 +2413,7 @@ app.get('/api/music/artist/similar', async (req, res) => {
             id: artist.id || artist.mbid || artist.name.replace(/\s+/g, '-').toLowerCase(),
             name: artist.name,
             similarity: artist.similarity_score || 0.5,
-            genres: artist.genres || [],
+            genres: (artist.genres || []).map(g => typeof g === 'string' ? g : (g.name || g)),
             artworkUrl: artist.image_url,
             description: artist.biography ? artist.biography.substring(0, 200) + '...' : undefined,
             listeners: artist.listeners,
@@ -2270,11 +2581,28 @@ app.get('/api/hostname', (req, res) => {
 });
 
 app.get('/api/media/lyrics', async (req, res) => {
-    const { track, artist } = req.query;
+    const { track, artist, album } = req.query;
     try {
-        const lyrics = await getLyricsFromLrcLib(track, artist);
-        res.json(lyrics || { error: 'Lyrics not found' });
+        // Use enhanced MusicInfoManager for lyrics with Qobuz priority
+        const lyricsResult = await musicInfoManager.getLyrics(track, artist, album);
+        
+        if (lyricsResult && lyricsResult.lyrics) {
+            // Convert to expected format
+            const result = {
+                plain: lyricsResult.lyrics,
+                synced: lyricsResult.synchronized ? lyricsResult.lyrics : null,
+                instrumental: false,
+                source: lyricsResult.source,
+                weight: lyricsResult.weight
+            };
+            res.json(result);
+        } else {
+            // Fallback to LrcLib if no Qobuz lyrics
+            const lyrics = await getLyricsFromLrcLib(track, artist);
+            res.json(lyrics || { error: 'Lyrics not found' });
+        }
     } catch (e) {
+        console.error('Enhanced API Error in lyrics:', e.message);
         res.status(500).json({ error: 'Failed to fetch lyrics' });
     }
 });

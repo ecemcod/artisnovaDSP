@@ -3,6 +3,7 @@ import { useSimpleNavigation } from './SimpleNavigationProvider';
 import { Home, Music, User, ArrowLeft, Star, Calendar, MapPin, Disc, Tag, ExternalLink } from 'lucide-react';
 import { ProgressiveImage } from './ProgressiveImage';
 import { EnhancedMusicSearch } from './EnhancedMusicSearch';
+import { musicDataProvider, type UnifiedArtist } from '../utils/MusicDataProvider';
 
 interface NowPlayingInfo {
   track?: string;
@@ -21,8 +22,9 @@ interface SimpleMusicNavigationViewProps {
 
 export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps> = ({ className = '', nowPlaying }) => {
   const { state, navigate, goHome } = useSimpleNavigation();
-  const [artistData, setArtistData] = useState<any>(null);
+  const [artistData, setArtistData] = useState<UnifiedArtist | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   console.log('SimpleMusicNavigationView: Rendering', { 
     currentView: state.currentView, 
@@ -40,13 +42,22 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
   const loadArtistData = async (artistId: string) => {
     try {
       setLoading(true);
-      const response = await fetch(`/api/music/artist/${encodeURIComponent(artistId)}?includeAlbums=true&includeSimilar=true`);
-      if (response.ok) {
-        const data = await response.json();
+      setError(null);
+      const data = await musicDataProvider.getArtistDetails(artistId);
+      if (data) {
         setArtistData(data);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error loading artist data:', error);
+      setError(error.message || 'Failed to load artist data');
+      // Set a fallback artist data to prevent crashes
+      setArtistData({
+        id: artistId,
+        name: artistId,
+        source: 'error',
+        weight: 0,
+        genres: []
+      });
     } finally {
       setLoading(false);
     }
@@ -91,6 +102,31 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
                     <div className="h-4 bg-gray-200 rounded w-48"></div>
                   </div>
                 </div>
+              </div>
+            </div>
+          );
+        }
+
+        if (error) {
+          return (
+            <div className="space-y-6">
+              <div className="flex items-center space-x-4 mb-6">
+                <button
+                  onClick={goHome}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+                <h1 className="text-2xl font-bold text-gray-900">Error Loading Artist</h1>
+              </div>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-6">
+                <p className="text-red-800 mb-4">{error}</p>
+                <button
+                  onClick={() => state.currentId && loadArtistData(state.currentId)}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  Retry
+                </button>
               </div>
             </div>
           );
@@ -165,16 +201,16 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
                   </div>
 
                   {/* Genres - Compact */}
-                  {artistData?.genres && artistData.genres.length > 0 && (
+                  {artistData?.genres && Array.isArray(artistData.genres) && artistData.genres.length > 0 && (
                     <div>
                       <div className="text-sm font-medium text-gray-900 mb-2">Genres:</div>
                       <div className="flex flex-wrap gap-1">
-                        {artistData.genres.slice(0, 4).map((genre: any) => (
+                        {artistData.genres.slice(0, 4).map((genre: any, index: number) => (
                           <span
-                            key={genre.name || genre}
+                            key={`${typeof genre === 'string' ? genre : genre.name || genre.id || index}`}
                             className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium"
                           >
-                            {genre.name || genre}
+                            {typeof genre === 'string' ? genre : genre.name || 'Unknown Genre'}
                           </span>
                         ))}
                         {artistData.genres.length > 4 && (
@@ -229,22 +265,22 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
                 )}
 
                 {/* Albums Preview */}
-                {artistData?.albums && artistData.albums.length > 0 && (
+                {artistData?.albums && Array.isArray(artistData.albums) && artistData.albums.length > 0 && (
                   <div className="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
                     <h3 className="text-xl font-semibold text-gray-900 mb-4">Recent Albums</h3>
                     <div className="space-y-4">
-                      {artistData.albums.slice(0, 6).map((album: any) => (
-                        <div key={album.id} className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-50 transition-colors">
+                      {artistData.albums.slice(0, 6).map((album: any, index: number) => (
+                        <div key={`${album.id || album.title}-${index}`} className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-50 transition-colors">
                           <div className="w-12 h-12 bg-gray-100 rounded-lg overflow-hidden flex-shrink-0">
                             <ProgressiveImage
                               src={album.artwork_url}
-                              alt={album.title}
+                              alt={album.title || 'Album'}
                               className="w-full h-full object-cover"
                               fallbackType="album"
                             />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <h4 className="font-medium text-gray-900 truncate">{album.title}</h4>
+                            <h4 className="font-medium text-gray-900 truncate">{album.title || 'Unknown Album'}</h4>
                             <div className="flex items-center gap-2 text-sm text-gray-500">
                               {album.release_date && (
                                 <span>{new Date(album.release_date).getFullYear()}</span>
@@ -270,13 +306,13 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
                 <div className="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
                   <h3 className="text-lg font-semibold text-gray-900 mb-4">Quick Stats</h3>
                   <div className="space-y-3">
-                    {artistData?.albums && (
+                    {artistData?.albums && Array.isArray(artistData.albums) && (
                       <div className="flex justify-between items-center py-2">
                         <span className="text-gray-600">Albums</span>
                         <span className="font-semibold text-gray-900">{artistData.albums.length}</span>
                       </div>
                     )}
-                    {artistData?.genres && (
+                    {artistData?.genres && Array.isArray(artistData.genres) && (
                       <div className="flex justify-between items-center py-2">
                         <span className="text-gray-600">Genres</span>
                         <span className="font-semibold text-gray-900">{artistData.genres.length}</span>
@@ -302,16 +338,16 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
                 </div>
 
                 {/* All Genres */}
-                {artistData?.genres && artistData.genres.length > 4 && (
+                {artistData?.genres && Array.isArray(artistData.genres) && artistData.genres.length > 4 && (
                   <div className="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
                     <h3 className="text-lg font-semibold text-gray-900 mb-4">All Genres</h3>
                     <div className="flex flex-wrap gap-2">
-                      {artistData.genres.map((genre: any) => (
+                      {artistData.genres.map((genre: any, index: number) => (
                         <span
-                          key={genre.name || genre}
+                          key={`${typeof genre === 'string' ? genre : genre.name || genre.id || index}`}
                           className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium"
                         >
-                          {genre.name || genre}
+                          {typeof genre === 'string' ? genre : genre.name || 'Unknown Genre'}
                         </span>
                       ))}
                     </div>
@@ -319,17 +355,17 @@ export const SimpleMusicNavigationView: React.FC<SimpleMusicNavigationViewProps>
                 )}
 
                 {/* Data Sources */}
-                {artistData?.sources && artistData.sources.length > 0 && (
+                {artistData?.sources && Array.isArray(artistData.sources) && artistData.sources.length > 0 && (
                   <div className="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
                     <h3 className="text-lg font-semibold text-gray-900 mb-4">Data Sources</h3>
                     <div className="space-y-2">
                       {artistData.sources.map((source: any, index: number) => (
-                        <div key={index} className="flex items-center justify-between text-sm">
-                          <span className="text-gray-600">{source.source_name}</span>
+                        <div key={`${source.source_name || source.name}-${index}`} className="flex items-center justify-between text-sm">
+                          <span className="text-gray-600">{source.source_name || source.name || 'Unknown'}</span>
                           <div className="w-16 bg-gray-200 rounded-full h-2">
                             <div 
                               className="bg-blue-600 h-2 rounded-full" 
-                              style={{ width: `${(source.weight || 0.5) * 100}%` }}
+                              style={{ width: `${((source.weight || 0.5) * 100)}%` }}
                             ></div>
                           </div>
                         </div>

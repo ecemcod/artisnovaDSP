@@ -146,7 +146,7 @@ const History = () => {
     };
 
     return (
-        <div className="flex-1 flex flex-col h-full bg-themed-deep overflow-hidden p-6 pt-14 md:pt-20" style={{ paddingLeft: 'var(--mobile-sidebar-gap)' }}>
+        <div className="flex-1 flex flex-col h-full bg-themed-deep overflow-hidden p-6 pt-14 md:pt-20">
             {/* Header & Controls */}
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-8 gap-4 shrink-0">
                 <div>
@@ -363,18 +363,9 @@ const StatsCard = ({ title, icon, data, color, formatter }: { title: string; ico
 
     return (
         <div className="relative bg-themed-panel border border-themed-medium rounded-xl p-6 shadow-lg flex flex-col h-[400px] animate-in fade-in zoom-in duration-300 overflow-hidden">
-            {/* Background Image Overlay */}
-            {topImage && (
-                <div
-                    className="absolute inset-0 z-0 bg-cover bg-center transition-all duration-1000"
-                    style={{ backgroundImage: `url(${topImage})`, filter: 'blur(3px) brightness(0.25) grayscale(0.5)' }}
-                />
-            )}
-            {/* Dark gradient overlay to ensure text legibility */}
-            {topImage && (
-                <div className="absolute inset-0 z-0 bg-gradient-to-b from-themed-panel/80 to-themed-panel/95" />
-            )}
-
+            {/* Subtle background pattern instead of full image */}
+            <div className="absolute inset-0 z-0 bg-gradient-to-br from-themed-panel to-themed-deep opacity-50" />
+            
             <div className="relative z-10 flex items-center gap-3 mb-6 pb-4 border-b border-themed-subtle">
                 <div className={`p-2 rounded-lg bg-white/5 ${color} backdrop-blur-md`}>
                     {icon}

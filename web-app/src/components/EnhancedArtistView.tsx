@@ -1,25 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { User, Music } from 'lucide-react';
 import { useNavigation } from './NavigationProvider';
+import { ArtistImage } from './ProgressiveImage';
 import ArtistDiscography from './ArtistDiscography';
 import SimilarArtists from './SimilarArtists';
-
-interface Artist {
-  id: string;
-  name: string;
-  mbid?: string;
-  biography?: string;
-  country?: string;
-  begin_date?: string;
-  end_date?: string;
-  type?: string;
-  image_url?: string;
-  genres?: string[];
-  albums?: Album[];
-  similar_artists?: SimilarArtist[];
-  sources?: DataSource[];
-  quality_score?: number;
-}
+import { musicDataProvider, type UnifiedArtist } from '../utils/MusicDataProvider';
 
 interface Album {
   id: string;
@@ -29,18 +14,6 @@ interface Album {
   track_count?: number;
   artist?: string;
   year?: number;
-}
-
-interface SimilarArtist {
-  id: string;
-  name: string;
-  similarity_score: number;
-  image_url?: string;
-}
-
-interface DataSource {
-  name: string;
-  weight: number;
 }
 
 interface NowPlayingInfo {
@@ -64,7 +37,7 @@ export const EnhancedArtistView: React.FC<EnhancedArtistViewProps> = ({
   className = '',
   nowPlaying
 }) => {
-  const [artist, setArtist] = useState<Artist | null>(null);
+  const [artist, setArtist] = useState<UnifiedArtist | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'discography' | 'similar'>('overview');
@@ -103,27 +76,16 @@ export const EnhancedArtistView: React.FC<EnhancedArtistViewProps> = ({
       setLoading(true);
       setError(null);
       
-      // Try to get artist by exact ID
-      console.log('EnhancedArtistView: Fetching artist data from API...');
-      const response = await fetch(`/api/music/artist/${encodeURIComponent(artistId)}?includeAlbums=true&includeSimilar=true`);
+      // Use MusicDataProvider to get artist details
+      console.log('EnhancedArtistView: Fetching artist data via MusicDataProvider...');
+      const artistData = await musicDataProvider.getArtistDetails(artistId);
       
-      console.log('EnhancedArtistView: Response status:', response.status);
-      
-      if (!response.ok) {
-        console.log('EnhancedArtistView: API response not OK, status:', response.status);
-        const errorText = await response.text();
-        console.log('EnhancedArtistView: Error response:', errorText);
-        throw new Error(`Artist "${artistId}" not found (${response.status})`);
+      if (!artistData) {
+        throw new Error(`Artist "${artistId}" not found`);
       }
       
-      const data = await response.json();
-      console.log('EnhancedArtistView: Received data:', data);
-      
-      if (!data) {
-        throw new Error(`No data returned for artist "${artistId}"`);
-      }
-      
-      setArtist(data);
+      console.log('EnhancedArtistView: Received data:', artistData);
+      setArtist(artistData);
       console.log('EnhancedArtistView: Artist data set successfully');
     } catch (err) {
       console.error('EnhancedArtistView: Error loading artist data:', err);
@@ -283,23 +245,24 @@ export const EnhancedArtistView: React.FC<EnhancedArtistViewProps> = ({
     <div className={className}>
       {/* Compact Hero Section with Artist Info */}
       <div className="flex items-start gap-6 p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="w-32 h-32 flex-shrink-0">
-          {artist.image_url ? (
-            <img
-              src={artist.image_url}
-              alt={artist.name}
-              className="w-full h-full object-cover rounded-lg shadow-md"
-            />
-          ) : (
-            <div className="w-full h-full bg-gray-100 rounded-lg flex items-center justify-center">
-              <User className="w-12 h-12 text-gray-400" />
-            </div>
-          )}
-        </div>
+        <ArtistImage
+          src={artist.image_url}
+          name={artist.name}
+          size="medium"
+          className="w-32 h-32 flex-shrink-0 shadow-md"
+        />
         
         <div className="flex-1 min-w-0 space-y-4">
           <div className="space-y-2">
-            <h1 className="text-3xl font-bold text-gray-900 truncate">{artist.name}</h1>
+            <div className="flex items-center space-x-3">
+              <h1 className="text-3xl font-bold text-gray-900 truncate">{artist.name}</h1>
+              {artist.source === 'qobuz' && (
+                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                  <span className="w-2 h-2 bg-blue-600 rounded-full mr-1"></span>
+                  Qobuz Premium
+                </span>
+              )}
+            </div>
             {nowPlaying && nowPlaying.artist === artistId && (
               <div className="flex items-center space-x-2 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium w-fit">
                 <div className="w-2 h-2 bg-green-600 rounded-full animate-pulse"></div>
@@ -325,13 +288,13 @@ export const EnhancedArtistView: React.FC<EnhancedArtistViewProps> = ({
               <div>
                 <div className="text-sm font-medium text-gray-900 mb-2">Genres:</div>
                 <div className="flex flex-wrap gap-1">
-                  {artist.genres.slice(0, 4).map((genre) => (
+                  {artist.genres.slice(0, 4).map((genre: any, index) => (
                     <button
-                      key={genre}
-                      onClick={() => handleGenreClick(genre)}
+                      key={typeof genre === 'string' ? genre : genre.name || index}
+                      onClick={() => handleGenreClick(typeof genre === 'string' ? genre : genre.name)}
                       className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium hover:bg-blue-200 transition-colors"
                     >
-                      {genre}
+                      {typeof genre === 'string' ? genre : genre.name || 'Unknown Genre'}
                     </button>
                   ))}
                   {artist.genres.length > 4 && (
@@ -530,13 +493,13 @@ export const EnhancedArtistView: React.FC<EnhancedArtistViewProps> = ({
             <div className="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900 mb-4">All Genres</h3>
               <div className="flex flex-wrap gap-2">
-                {artist.genres.map((genre) => (
+                {artist.genres.map((genre: any, index) => (
                   <button
-                    key={genre}
-                    onClick={() => handleGenreClick(genre)}
+                    key={typeof genre === 'string' ? genre : genre.name || index}
+                    onClick={() => handleGenreClick(typeof genre === 'string' ? genre : genre.name)}
                     className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium hover:bg-blue-200 transition-colors"
                   >
-                    {genre}
+                    {typeof genre === 'string' ? genre : genre.name || 'Unknown Genre'}
                   </button>
                 ))}
               </div>

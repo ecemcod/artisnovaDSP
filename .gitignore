@@ -4,6 +4,8 @@ server.key
 server.cert
 .env
 .DS_Store
+qobuz-config.json
+qobuz-credentials.txt
 
 # Dependencies
 node_modules/

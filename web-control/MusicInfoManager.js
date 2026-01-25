@@ -20,15 +20,17 @@ class MusicInfoManager {
         // Data source connectors (to be implemented in Phase 2)
         this.connectors = new Map();
         
-        // Quality scoring weights
+        // Quality scoring weights - Qobuz as absolute priority for everything
         this.sourceWeights = {
-            'musicbrainz': 0.9,
-            'discogs': 0.8,
-            'lastfm': 0.7,
-            'itunes': 0.6,
-            'spotify': 0.6,
-            'wikipedia': 0.5,
-            'theaudiodb': 0.4
+            'qobuz': 1.0,       // Maximum priority for Qobuz (all data types)
+            'musicbrainz': 0.75, // Reduced priority
+            'discogs': 0.65,     // Reduced priority
+            'lastfm': 0.55,      // Reduced priority
+            'itunes': 0.35,      // Much lower priority
+            'spotify': 0.45,     // Reduced priority
+            'wikipedia': 0.3,    // Lower priority
+            'theaudiodb': 0.25,  // Lowest priority
+            'lrclib': 0.4        // For lyrics fallback
         };
     }
 
@@ -213,17 +215,57 @@ class MusicInfoManager {
         const sources = [];
         const results = [];
 
-        // Collect data from all available connectors
+        // Define priority order with Qobuz first
+        const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
+        
+        // Get ordered connectors based on priority
+        const orderedConnectors = [];
+        for (const sourceName of priorityOrder) {
+            if (this.connectors.has(sourceName)) {
+                orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
+            }
+        }
+        
+        // Add any remaining connectors not in priority list
         for (const [sourceName, connector] of this.connectors) {
+            if (!priorityOrder.includes(sourceName)) {
+                orderedConnectors.push([sourceName, connector]);
+            }
+        }
+
+        // Collect data from connectors in priority order
+        for (const [sourceName, connector] of orderedConnectors) {
             try {
                 console.log(`MusicInfoManager: Querying ${sourceName} for artist "${query}"`);
                 const data = await connector.searchArtist(query);
                 if (data && data.length > 0) {
+                    let artistData = data[0]; // Take best match
+                    
+                    // If this is Qobuz, get full artist details including biography
+                    if (sourceName === 'qobuz' && connector.getArtist && artistData.qobuz_id) {
+                        console.log(`MusicInfoManager: Getting full Qobuz artist details for ID "${artistData.qobuz_id}"`);
+                        try {
+                            const fullArtistData = await connector.getArtist(artistData.qobuz_id);
+                            if (fullArtistData) {
+                                artistData = fullArtistData; // Use full data instead of search result
+                                console.log(`MusicInfoManager: Enhanced artist data obtained from Qobuz`);
+                            }
+                        } catch (error) {
+                            console.warn(`MusicInfoManager: Failed to get full Qobuz artist details:`, error.message);
+                        }
+                    }
+                    
                     results.push({
                         source: sourceName,
-                        data: data[0], // Take best match
+                        data: artistData,
                         weight: this.sourceWeights[sourceName] || 0.5
                     });
+                    
+                    // If Qobuz returns data, prioritize it heavily
+                    if (sourceName === 'qobuz' && data.length > 0) {
+                        console.log(`MusicInfoManager: Qobuz data found for "${query}", prioritizing`);
+                        break; // Stop searching other sources if Qobuz has data
+                    }
                 }
             } catch (error) {
                 console.warn(`MusicInfoManager: ${sourceName} failed for artist "${query}":`, error.message);
@@ -243,8 +285,26 @@ class MusicInfoManager {
         const sources = [];
         const results = [];
 
-        // Collect data from all available connectors
+        // Define priority order with Qobuz first
+        const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
+        
+        // Get ordered connectors based on priority
+        const orderedConnectors = [];
+        for (const sourceName of priorityOrder) {
+            if (this.connectors.has(sourceName)) {
+                orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
+            }
+        }
+        
+        // Add any remaining connectors not in priority list
         for (const [sourceName, connector] of this.connectors) {
+            if (!priorityOrder.includes(sourceName)) {
+                orderedConnectors.push([sourceName, connector]);
+            }
+        }
+
+        // Collect data from connectors in priority order
+        for (const [sourceName, connector] of orderedConnectors) {
             try {
                 console.log(`MusicInfoManager: Querying ${sourceName} for album "${query}" by "${artistName || 'unknown'}"`);
                 const data = await connector.searchAlbum ? 
@@ -252,11 +312,33 @@ class MusicInfoManager {
                     await connector.searchRelease(query, artistName);
                 
                 if (data && data.length > 0) {
+                    let albumData = data[0]; // Take best match
+                    
+                    // If this is Qobuz, get full album details including description and credits
+                    if (sourceName === 'qobuz' && connector.getAlbum && albumData.qobuz_id) {
+                        console.log(`MusicInfoManager: Getting full Qobuz album details for ID "${albumData.qobuz_id}"`);
+                        try {
+                            const fullAlbumData = await connector.getAlbum(albumData.qobuz_id);
+                            if (fullAlbumData) {
+                                albumData = fullAlbumData; // Use full data instead of search result
+                                console.log(`MusicInfoManager: Enhanced album data obtained from Qobuz`);
+                            }
+                        } catch (error) {
+                            console.warn(`MusicInfoManager: Failed to get full Qobuz album details:`, error.message);
+                        }
+                    }
+                    
                     results.push({
                         source: sourceName,
-                        data: data[0], // Take best match
+                        data: albumData,
                         weight: this.sourceWeights[sourceName] || 0.5
                     });
+                    
+                    // If Qobuz returns data, prioritize it heavily
+                    if (sourceName === 'qobuz' && data.length > 0) {
+                        console.log(`MusicInfoManager: Qobuz album data found for "${query}", prioritizing`);
+                        break; // Stop searching other sources if Qobuz has data
+                    }
                 }
             } catch (error) {
                 console.warn(`MusicInfoManager: ${sourceName} failed for album "${query}":`, error.message);
@@ -609,14 +691,16 @@ class MusicInfoManager {
         
         // Exact match first
         for (const result of results) {
-            if (result.name.toLowerCase() === queryLower) {
+            const resultName = result.name || result.title || '';
+            if (resultName.toLowerCase() === queryLower) {
                 return result;
             }
         }
         
         // Starts with match
         for (const result of results) {
-            if (result.name.toLowerCase().startsWith(queryLower)) {
+            const resultName = result.name || result.title || '';
+            if (resultName.toLowerCase().startsWith(queryLower)) {
                 return result;
             }
         }
@@ -732,8 +816,8 @@ class MusicInfoManager {
                 try {
                     console.log(`MusicInfoManager: Searching ${sourceName} for albums matching "${query}"`);
                     const sourceResults = await (connector.searchAlbum ? 
-                        connector.searchAlbum(options.artist, query, { limit }) :
-                        connector.searchRelease(options.artist, query, { limit }));
+                        connector.searchAlbum(query, options.artist, limit) :
+                        connector.searchRelease(query, options.artist, limit));
                     
                     if (sourceResults && sourceResults.length > 0) {
                         results.push(...sourceResults.map(result => ({
@@ -1010,6 +1094,73 @@ class MusicInfoManager {
         }
 
         return result.sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
+    }
+
+    // Get lyrics with Qobuz priority
+    async getLyrics(trackTitle, artistName, albumName = null) {
+        const cacheKey = `lyrics:${trackTitle}:${artistName}:${albumName || ''}`;
+        
+        try {
+            // Check cache first
+            const cached = await this.cacheRepo.get(cacheKey);
+            if (cached) {
+                console.log(`MusicInfoManager: Cache hit for lyrics "${trackTitle}"`);
+                return cached.data;
+            }
+
+            console.log(`MusicInfoManager: Fetching lyrics for "${trackTitle}" by "${artistName}"`);
+            
+            // Priority order: Qobuz first, then others
+            const priorityOrder = ['qobuz', 'lrclib', 'lastfm', 'spotify'];
+            
+            for (const sourceName of priorityOrder) {
+                const connector = this.connectors.get(sourceName);
+                if (!connector) continue;
+
+                try {
+                    console.log(`MusicInfoManager: Trying ${sourceName} for lyrics`);
+                    
+                    let lyrics = null;
+                    
+                    if (sourceName === 'qobuz') {
+                        // First try to find the track to get its ID
+                        const trackResults = await connector.searchTrack(trackTitle, artistName, albumName, 5);
+                        if (trackResults && trackResults.length > 0) {
+                            const track = trackResults[0];
+                            lyrics = await connector.getLyrics(track.qobuz_id);
+                        }
+                    } else if (connector.getLyrics) {
+                        lyrics = await connector.getLyrics(trackTitle, artistName);
+                    }
+                    
+                    if (lyrics && lyrics.lyrics) {
+                        const result = {
+                            lyrics: lyrics.lyrics,
+                            source: sourceName,
+                            synchronized: lyrics.synchronized || false,
+                            weight: this.sourceWeights[sourceName] || 0.5
+                        };
+                        
+                        // Cache the result
+                        await this.cacheRepo.set(cacheKey, result, 24 * 60 * 60); // 24 hours
+                        
+                        console.log(`MusicInfoManager: Found lyrics from ${sourceName}`);
+                        return result;
+                    }
+                } catch (error) {
+                    console.warn(`MusicInfoManager: ${sourceName} lyrics failed:`, error.message);
+                }
+            }
+
+            // No lyrics found
+            const emptyResult = { lyrics: null, source: 'none' };
+            await this.cacheRepo.set(cacheKey, emptyResult, 60 * 60); // Cache for 1 hour
+            return emptyResult;
+
+        } catch (error) {
+            console.error(`MusicInfoManager: Error getting lyrics for "${trackTitle}":`, error);
+            return { lyrics: null, source: 'error', error: error.message };
+        }
     }
 
     // Clear specific cache entry

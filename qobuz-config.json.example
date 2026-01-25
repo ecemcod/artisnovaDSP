@@ -1,0 +1,8 @@
+{
+  "appId": "your_qobuz_app_id_here",
+  "appSecret": "your_qobuz_app_secret_here",
+  "userAuthToken": "optional_user_auth_token_for_authenticated_requests",
+  "baseURL": "https://www.qobuz.com/api.json/0.2",
+  "timeout": 10000,
+  "rateLimit": 500
+}
