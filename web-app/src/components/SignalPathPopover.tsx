@@ -93,8 +93,8 @@ const SignalPathPopover: React.FC<SignalPathPopoverProps> = ({ isOpen, onClose, 
     return (
         <div
             ref={popoverRef}
-            style={{ ...style, backgroundColor: '#000000', opacity: 1 }}
-            className="border border-themed-medium rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.9)] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200"
+            style={{ ...style, opacity: 1 }}
+            className="border border-themed-medium rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.9)] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200 bg-black/80 backdrop-blur-md"
         >
             {/* Header */}
             <div className="px-3 py-2 border-b border-themed-subtle flex items-center bg-[#111]">

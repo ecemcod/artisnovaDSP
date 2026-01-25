@@ -3,6 +3,8 @@ import axios from 'axios';
 import FilterGraph from './components/FilterGraph';
 import PEQEditor from './components/PEQEditor';
 import VisualizationPage from './components/VisualizationPage';
+import { SimpleNavigationProvider } from './components/SimpleNavigationProvider';
+import { SimpleMusicNavigationView } from './components/SimpleMusicNavigationView';
 import { createPortal } from 'react-dom';
 import {
   Panel,
@@ -17,12 +19,13 @@ import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk, Gauge, Power, X, ExternalLink, BookOpen
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk, Gauge, Power, X, ExternalLink, BookOpen, Navigation
 } from 'lucide-react';
 import './index.css';
 import './App.css';
 import { parseRewFile } from './utils/rewParser';
 import { AppStorage } from './utils/storage';
+import { extractDominantColor, generateDynamicBackgroundCSS } from './utils/colorExtractor';
 
 // Use current hostname to support access from any device on the local network
 const API_HOST = window.location.hostname;
@@ -66,6 +69,7 @@ const resolveArtworkUrl = (url?: string | null, retryKey?: number) => {
 
 // Dark background color options
 const BACKGROUND_COLORS = [
+  { id: 'dynamic', name: 'Dynamic Album', color: 'dynamic' }, // Nueva opción dinámica
   { id: 'noir', name: 'Midnight Noir', color: '#08080a' },
   { id: 'crimson', name: 'Crimson Shadow', color: '#2a0a0a' },
   { id: 'cobalt', name: 'Cobalt Night', color: '#0a0e2a' },
@@ -88,7 +92,7 @@ interface SavedConfig {
   sampleRate: number | null;
   bitDepth: number;
   selectedPreset: string | null;
-  activeMode?: 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization';
+  activeMode?: 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization' | 'navigation';
   backend?: 'local' | 'raspi';
   bypass?: boolean;
   bgColor?: BgColorId;
@@ -99,9 +103,17 @@ const BACKENDS = {
   raspi: { name: 'Raspberry Pi', wsUrl: 'ws://raspberrypi.local:1234' }
 } as const;
 
-type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization';
+type LayoutMode = 'playback' | 'processing' | 'lyrics' | 'info' | 'queue' | 'history' | 'visualization' | 'navigation';
 
 function App() {
+  return (
+    <SimpleNavigationProvider>
+      <AppContent />
+    </SimpleNavigationProvider>
+  );
+}
+
+function AppContent() {
   const [presets, setPresets] = useState<string[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
   const [filters, setFilters] = useState<FilterParam[]>([]);
@@ -158,6 +170,7 @@ function App() {
     const saved = AppStorage.getItem(BG_COLOR_STORAGE_KEY);
     return (saved as BgColorId) || 'noir';
   });
+  const [dynamicBgColor, setDynamicBgColor] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaZones, setMediaZones] = useState<{ id: string, name: string, active: boolean, state: string, source: 'apple' | 'roon' | 'lms' }[]>([]);
   const [mediaSource, setMediaSource] = useState<'apple' | 'roon' | 'lms'>(() => {
@@ -173,6 +186,7 @@ function App() {
   const secondaryContainerRef = useRef<HTMLDivElement>(null);
   const [isDspManaged, setIsDspManaged] = useState(false);
   const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false); // New: Artwork Modal State
+  const [artworkRetryKey, setArtworkRetryKey] = useState(0);
   const isSeeking = useRef(false);
   const mediaSourceRef = useRef(mediaSource);
 
@@ -296,11 +310,55 @@ function App() {
   useEffect(() => {
     const selectedColor = BACKGROUND_COLORS.find(c => c.id === bgColor);
     if (selectedColor) {
-      document.documentElement.style.setProperty('--bg-app', selectedColor.color);
-      document.body.style.backgroundColor = selectedColor.color;
+      if (bgColor === 'dynamic' && dynamicBgColor) {
+        // Usar color dinámico extraído de la portada
+        document.documentElement.style.setProperty('--bg-app', dynamicBgColor);
+        document.body.style.backgroundColor = dynamicBgColor;
+        
+        // Aplicar CSS personalizado para colores dinámicos
+        const dynamicCSS = generateDynamicBackgroundCSS(dynamicBgColor);
+        let styleElement = document.getElementById('dynamic-bg-styles');
+        if (!styleElement) {
+          styleElement = document.createElement('style');
+          styleElement.id = 'dynamic-bg-styles';
+          document.head.appendChild(styleElement);
+        }
+        styleElement.textContent = `:root { ${dynamicCSS} }`;
+      } else if (selectedColor.color !== 'dynamic') {
+        // Usar color fijo seleccionado
+        document.documentElement.style.setProperty('--bg-app', selectedColor.color);
+        document.body.style.backgroundColor = selectedColor.color;
+        
+        // Limpiar estilos dinámicos
+        const styleElement = document.getElementById('dynamic-bg-styles');
+        if (styleElement) {
+          styleElement.remove();
+        }
+      }
       AppStorage.setItem(BG_COLOR_STORAGE_KEY, bgColor);
     }
-  }, [bgColor]);
+  }, [bgColor, dynamicBgColor]);
+
+  // Extract dynamic color from album artwork
+  useEffect(() => {
+    if (bgColor === 'dynamic' && nowPlaying.artworkUrl) {
+      const artworkUrl = resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey);
+      if (artworkUrl) {
+        extractDominantColor(artworkUrl)
+          .then(color => {
+            if (color) {
+              console.log('Extracted dynamic color:', color);
+              setDynamicBgColor(color);
+            }
+          })
+          .catch(err => {
+            console.error('Failed to extract color:', err);
+            // Fallback to default dark color
+            setDynamicBgColor('#08080a');
+          });
+      }
+    }
+  }, [bgColor, nowPlaying.artworkUrl, artworkRetryKey]);
 
   useEffect(() => {
     console.log("Artis Nova DSP v1.2.2 - Loading Layout...");
@@ -753,14 +811,32 @@ function App() {
         setBackend(res.data.backend as 'local' | 'raspi');
       }
 
-      // AUTO-SOURCE TOGGLE
-      if (res.data.zone && mediaSource !== 'roon') {
-        axios.get(`${API_URL}/media/info?source=roon`).then(r => {
-          if (r.data.state === 'playing') {
-            console.log(`App: Auto-switching media source to ROON`);
-            setMediaSource('roon');
-          }
-        }).catch(() => { });
+      // ENHANCED AUTO-SOURCE TOGGLE: Check both zone and direct Roon status
+      if (mediaSource !== 'roon') {
+        // Check if there's an active Roon zone
+        const hasActiveRoonZone = res.data.zone && res.data.zone !== 'Camilla';
+        
+        if (hasActiveRoonZone) {
+          console.log(`App: Detected active Roon zone "${res.data.zone}", checking playback status...`);
+          axios.get(`${API_URL}/media/info?source=roon`).then(r => {
+            if (r.data.state === 'playing') {
+              console.log(`App: Auto-switching media source to ROON (zone: ${res.data.zone})`);
+              setMediaSource('roon');
+            } else {
+              console.log(`App: Roon zone active but not playing (state: ${r.data.state})`);
+            }
+          }).catch(err => {
+            console.error('App: Failed to check Roon status:', err.message);
+          });
+        } else {
+          // Also check if Roon is playing even without zone info
+          axios.get(`${API_URL}/media/info?source=roon`).then(r => {
+            if (r.data.state === 'playing') {
+              console.log(`App: Auto-switching media source to ROON (direct detection)`);
+              setMediaSource('roon');
+            }
+          }).catch(() => { });
+        }
       }
 
       // SYNC ACTIVE ZONE
@@ -833,8 +909,6 @@ function App() {
     }
     catch (err: any) { alert("Load Failed: " + (err.response?.data?.error || err.message)); }
   };
-
-  const [artworkRetryKey, setArtworkRetryKey] = useState(0);
 
   const handleArtworkError = () => {
     if (artworkRetryKey < 10) {
@@ -999,7 +1073,7 @@ function App() {
   // Render Now Playing - Immersive Redesign
   const renderNowPlaying = () => {
     return (
-      <div ref={nowPlayingContainerRef} className="h-full w-full relative overflow-clip group flex flex-col">
+      <div ref={nowPlayingContainerRef} className="h-screen w-full relative overflow-clip group flex flex-col">
         {/* 1. Background - Dynamic "Solid" Color - Tinted by selected Bg Color */}
         <div className="absolute inset-0 z-0 overflow-hidden" style={{ backgroundColor: 'var(--bg-app)' }}>
           {/* Subtle radial gradient for depth */}
@@ -1016,14 +1090,18 @@ function App() {
         </div>
 
         {/* 2. Content Layer */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar pt-8 relative z-20 flex flex-col now-playing-header">
+        <div className="flex-1 overflow-y-auto custom-scrollbar py-4 md:py-8 relative z-20 flex flex-col now-playing-header">
 
-          {/* Main Content Container - Vertically Centered */}
-          <div className="w-full max-w-lg mx-auto flex flex-col justify-center flex-1 min-h-0">
+          {/* Main Content Container - Vertically Centered with Dynamic Sizing */}
+          <div className="w-full max-w-lg mx-auto flex flex-col justify-center flex-1 min-h-0 px-4">
 
-            {/* Artwork - Responsive Size */}
+            {/* Artwork - Dynamic Size Based on Available Height */}
             <div
-              className="aspect-square w-full max-w-[380px] mx-auto mb-8 relative group/art now-playing-artwork"
+              className="aspect-square w-full mx-auto mb-4 md:mb-8 relative group/art now-playing-artwork"
+              style={{ 
+                maxWidth: 'min(90vw, min(70vh, 500px))',
+                width: 'min(90vw, min(70vh, 500px))'
+              }}
               onClick={() => setIsArtworkModalOpen(true)}
             >
               <div className="absolute inset-0 bg-black/40 rounded-2xl transform translate-y-2 blur-xl opacity-50" />
@@ -1042,36 +1120,30 @@ function App() {
             </div>
 
             {/* Track Info & Actions - Centered */}
-            <div className="w-full flex flex-col items-center text-center mb-6 px-2 now-playing-info">
+            <div className="w-full flex flex-col items-center text-center mb-4 md:mb-6 px-2 now-playing-info">
               <div className="w-full relative">
                 <div className="flex items-center justify-center gap-4 mb-2">
-                  <h2 className="text-xl md:text-3xl font-bold text-white leading-tight line-clamp-2">{nowPlaying.track || 'Not Playing'}</h2>
+                  <h2 className="text-display font-display font-bold text-white leading-tight line-clamp-2 tracking-tight">{nowPlaying.track || 'Not Playing'}</h2>
                   <button
                     ref={signalBtnRef}
                     onClick={(e) => {
                       setSignalAnchorRect(e.currentTarget.getBoundingClientRect());
                       setSignalPathOpen(!signalPathOpen);
                     }}
-                    style={{
-                      backgroundColor: '#000000',
-                      color: '#ffffff',
-                      borderColor: '#000000',
-                      borderWidth: '2px',
-                      borderStyle: 'solid'
-                    }}
                     className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all shadow-xl active:scale-90`}
+                    style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                     title="Signal Path"
                   >
-                    <Asterisk size={16} strokeWidth={3} style={{ color: '#ffffff' }} />
+                    <Asterisk size={16} strokeWidth={3} />
                   </button>
                 </div>
                 <div className="flex flex-col items-center justify-center">
-                  <p className="text-xl md:text-3xl text-white/60 font-medium line-clamp-1 mb-10 max-w-[90vw]">
-                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'} {nowPlaying.year ? `(${nowPlaying.year})` : ''}</span> — {nowPlaying.artist || 'Not Connected'}
+                  <p className="text-headline font-body text-white/70 font-medium line-clamp-1 mb-6 md:mb-10 max-w-[90vw] tracking-wide">
+                    <span className="font-semibold text-white/85 font-serif">{nowPlaying.album || 'No Album Info'} {nowPlaying.year ? `(${nowPlaying.year})` : ''}</span> — <span className="font-display font-medium">{nowPlaying.artist || 'Not Connected'}</span>
                   </p>
                   {nowPlaying.style && (
-                    <div className="mt-4 animate-in fade-in slide-in-from-top-1 duration-500">
-                      <span className="inline-block px-10 py-1.5 rounded-full bg-white text-black text-[10px] font-black uppercase border border-white/20 shadow-xl backdrop-blur-md">
+                    <div className="mt-2 md:mt-4 animate-in fade-in slide-in-from-top-1 duration-500">
+                      <span className="inline-block px-6 md:px-10 py-1.5 rounded-full bg-white text-black text-caption font-black uppercase border border-white/20 shadow-xl backdrop-blur-md tracking-widest">
                         {nowPlaying.style}
                       </span>
                     </div>
@@ -1084,7 +1156,7 @@ function App() {
             {/* Controls Section - Floating, narrower width */}
             <div className="w-full max-w-[280px] mx-auto">
               {/* Progress Bar */}
-              <div className="w-full mx-auto mb-6 now-playing-progress">
+              <div className="w-full mx-auto mb-4 md:mb-6 now-playing-progress">
                 <div className="relative h-4 w-full bg-gray-800/80 rounded-full cursor-pointer border-2 border-white/30">
                   {/* Progress fill */}
                   <div
@@ -1117,25 +1189,25 @@ function App() {
               </div>
 
               {/* Transport Controls */}
-              <div className="flex items-center justify-center gap-6 mb-8 now-playing-controls">
+              <div className="flex items-center justify-center gap-6 mb-4 md:mb-8 now-playing-controls">
                 <button
                   onClick={() => handleMediaControl('prev')}
                   className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                  style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+                  style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                 >
                   <SkipBack size={20} fill="currentColor" />
                 </button>
                 <button
                   onClick={() => handleMediaControl('playpause')}
                   className="rounded-full p-3 hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl"
-                  style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+                  style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                 >
                   {nowPlaying.state === 'playing' ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
                 </button>
                 <button
                   onClick={() => handleMediaControl('next')}
                   className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                  style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+                  style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                 >
                   <SkipForward size={20} fill="currentColor" />
                 </button>
@@ -1355,6 +1427,7 @@ function App() {
         case 'processing': return renderProcessingTools();
         case 'lyrics': return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
         case 'info': return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
+        case 'navigation': return <SimpleMusicNavigationView nowPlaying={nowPlaying} />;
         case 'queue': return <PlayQueue queue={queue} mediaSource={mediaSource} />;
         case 'history': return <History />;
         case 'visualization': return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
@@ -1377,6 +1450,11 @@ function App() {
     // Visualization - Fullscreen mode (no split panel)
     if (activeMode === 'visualization') {
       return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
+    }
+
+    // Navigation - Fullscreen mode (no split panel)
+    if (activeMode === 'navigation') {
+      return <SimpleMusicNavigationView nowPlaying={nowPlaying} />;
     }
 
     return (
@@ -1423,9 +1501,9 @@ function App() {
         ref={menuButtonRef}
         onClick={() => setMenuOpen(!menuOpen)}
         className="fixed top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] z-50 p-3 rounded-xl shadow-xl hover:opacity-80 transition-all active:scale-95"
-        style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
       >
-        <Menu size={20} style={{ color: '#ffffff' }} />
+        <Menu size={20} />
       </button>
 
       {/* DROPDOWN MENU */}
@@ -1433,8 +1511,7 @@ function App() {
         <div
           ref={sideMenuRef}
           onMouseDown={() => setMenuActivity(Date.now())}
-          className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] z-50 border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300"
-          style={{ backgroundColor: '#000000' }}
+          className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] z-50 border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300 bg-black/80 backdrop-blur-md"
         >
 
           {menuView === 'main' ? (
@@ -1464,13 +1541,13 @@ function App() {
                 <div className="p-2">
                   <div className="px-3 pt-1 pb-2 text-[9px] text-themed-muted font-black uppercase tracking-[0.2em]">Device</div>
                   <div className="flex gap-2 px-1">
-                    <button onClick={() => setBackend('local')} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${backend === 'local' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'local' ? '#000000' : 'transparent', color: '#ffffff' }}>
+                    <button onClick={() => setBackend('local')} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all text-white ${backend === 'local' ? 'bg-white/20 border border-white/30' : 'bg-black/20 border border-white/10 hover:bg-white/10'}`}>
                       <Monitor size={14} /><span className="text-[11px] font-black truncate max-w-[100px]">{hostname}</span>
-                      {backend === 'local' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
+                      {backend === 'local' && <Check size={10} strokeWidth={4} />}
                     </button>
-                    <button onClick={() => raspiOnline && setBackend('raspi')} disabled={!raspiOnline} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all ${!raspiOnline ? 'opacity-30 cursor-not-allowed bg-themed-deep border border-themed-medium text-themed-muted' : backend === 'raspi' ? 'border border-accent-primary/20' : 'bg-themed-deep border border-themed-medium text-themed-muted hover:border-themed-secondary'}`} style={{ backgroundColor: backend === 'raspi' ? '#000000' : 'transparent', color: '#ffffff' }}>
+                    <button onClick={() => raspiOnline && setBackend('raspi')} disabled={!raspiOnline} className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all text-white ${!raspiOnline ? 'opacity-30 cursor-not-allowed bg-black/20 border border-white/10' : backend === 'raspi' ? 'bg-white/20 border border-white/30' : 'bg-black/20 border border-white/10 hover:bg-white/10'}`}>
                       <Server size={14} /><span className="text-[11px] font-black">RPi</span>
-                      {backend === 'raspi' && <Check size={10} strokeWidth={4} style={{ color: '#ffffff' }} />}
+                      {backend === 'raspi' && <Check size={10} strokeWidth={4} />}
                     </button>
                   </div>
                   <div className="mx-4 border-t border-themed-subtle my-2" />
@@ -1529,6 +1606,18 @@ function App() {
                       <span className="text-sm font-black">Music Info</span>
                     </div>
                     {activeMode === 'info' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                  </button>
+
+                  <button
+                    onClick={() => { setActiveMode('navigation'); setMenuOpen(false); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'navigation' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
+                    style={activeMode === 'navigation' ? { backgroundColor: 'white', color: 'black' } : {}}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Navigation size={16} style={activeMode === 'navigation' ? { color: 'black' } : { color: '#606080' }} />
+                      <span className="text-sm font-black">Music Explorer</span>
+                    </div>
+                    {activeMode === 'navigation' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
 
                   <button
@@ -1594,7 +1683,17 @@ function App() {
                   className="w-full flex items-center justify-between px-3 py-3 rounded-lg transition-all hover:bg-white/10 text-white bg-black/40 border border-white/5"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-5 h-5 rounded-sm border shadow-lg border-white/40" style={{ backgroundColor: BACKGROUND_COLORS.find(c => c.id === bgColor)?.color || '#000000' }} />
+                    <div 
+                      className="w-5 h-5 rounded-sm border shadow-lg border-white/40" 
+                      style={{ 
+                        backgroundColor: bgColor === 'dynamic' && dynamicBgColor 
+                          ? dynamicBgColor 
+                          : BACKGROUND_COLORS.find(c => c.id === bgColor)?.color || '#000000',
+                        backgroundImage: bgColor === 'dynamic' && !dynamicBgColor 
+                          ? 'linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4)' 
+                          : 'none'
+                      }} 
+                    />
                     <span className="text-sm font-black">Background Color</span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1799,7 +1898,14 @@ function App() {
                       <div className="flex items-center gap-3">
                         <div
                           className={`w-6 h-6 rounded-sm border transition-all ${bgColor === colorObj.id ? 'border-white/80 scale-110 shadow-[0_0_10px_rgba(255,255,255,0.3)]' : 'border-white/20'}`}
-                          style={{ backgroundColor: colorObj.color }}
+                          style={{ 
+                            backgroundColor: colorObj.id === 'dynamic' 
+                              ? (dynamicBgColor || '#08080a')
+                              : colorObj.color,
+                            backgroundImage: colorObj.id === 'dynamic' && !dynamicBgColor
+                              ? 'linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4)'
+                              : 'none'
+                          }}
                         />
                         <span className={`text-sm font-bold ${bgColor === colorObj.id ? 'text-accent-primary' : 'text-themed-secondary'}`}>
                           {colorObj.name}
@@ -1836,10 +1942,10 @@ function App() {
           ref={sourceButtonRef}
           onClick={() => setSourcePopoverOpen(!sourcePopoverOpen)}
           className="group p-4 rounded-full shadow-xl active:scale-95 transition-all"
-          style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+          style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
           title="Direct Source"
         >
-          <Cast size={24} style={{ color: '#ffffff' }} />
+          <Cast size={24} />
         </button>
 
         {sourcePopoverOpen && (

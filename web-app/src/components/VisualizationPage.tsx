@@ -61,21 +61,21 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                     <button
                         onClick={() => handleTransport('prev')}
                         className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                        style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+                        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                     >
                         <SkipBack size={20} fill="currentColor" />
                     </button>
                     <button
                         onClick={() => handleTransport('playpause')}
                         className="rounded-full p-3 hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl"
-                        style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+                        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                     >
                         {nowPlaying.state === 'playing' ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
                     </button>
                     <button
                         onClick={() => handleTransport('next')}
                         className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                        style={{ backgroundColor: '#000000', color: '#ffffff', border: 'none', outline: 'none' }}
+                        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
                     >
                         <SkipForward size={20} fill="currentColor" />
                     </button>

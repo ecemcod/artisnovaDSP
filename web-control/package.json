@@ -4,7 +4,9 @@
   "description": "Web control for CamillaDSP",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "jest",
+    "test:properties": "jest test/properties.test.js"
   },
   "dependencies": {
     "axios": "^1.13.2",
@@ -20,6 +22,8 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "fast-check": "^4.5.3",
+    "jest": "^30.2.0",
     "pm2": "^6.0.14"
   }
 }
