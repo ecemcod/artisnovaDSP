@@ -21,7 +21,7 @@ import SignalPathPopover from './components/SignalPathPopover';
 import type { FilterParam } from './types';
 import {
   Play, Save, Zap, SkipBack, SkipForward, Pause,
-  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk, Gauge, Power, X, ExternalLink, BookOpen, Navigation
+  Music, Activity, MessageCircle, Server, Monitor, Menu, ChevronRight, ChevronLeft, Check, Volume2, RefreshCcw, Cast, Upload, Settings, Asterisk, Gauge, Power, X, ExternalLink, BookOpen
 } from 'lucide-react';
 import './index.css';
 import './App.css';
@@ -32,7 +32,7 @@ import { extractDominantColor, generateDynamicBackgroundCSS } from './utils/colo
 // Use current hostname to support access from any device on the local network
 const API_HOST = window.location.hostname;
 const PROTOCOL = window.location.protocol;
-const API_BASE = `${PROTOCOL}//${API_HOST}:3000`;
+const API_BASE = `${PROTOCOL}//${API_HOST}:3001`;
 const API_URL = `${API_BASE}/api`;
 
 // Device detection
@@ -195,7 +195,12 @@ function AppContentInner() {
   const [raspiOnline, setRaspiOnline] = useState(false);
   const [activeMode, setActiveMode] = useState<LayoutMode>(() => {
     const saved = AppStorage.getItem('artisNovaDSP_activeMode');
-    return (saved as LayoutMode) || 'processing';
+    const savedMode = saved as LayoutMode;
+    // Temporarily redirect 'navigation' mode to 'processing' until Music Explorer is ready
+    if (savedMode === 'navigation') {
+      return 'processing';
+    }
+    return savedMode || 'processing';
   });
   const [panelSizes, setPanelSizes] = useState<number[]>([55, 45]);
   const [isLayoutLoaded, setIsLayoutLoaded] = useState(false);
@@ -219,8 +224,54 @@ function AppContentInner() {
   const nowPlayingContainerRef = useRef<HTMLDivElement>(null);
   const secondaryContainerRef = useRef<HTMLDivElement>(null);
   const [isDspManaged, setIsDspManaged] = useState(false);
-  const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false); // New: Artwork Modal State
+  const [, setIsTrackChanging] = useState(false);
   const [artworkRetryKey, setArtworkRetryKey] = useState(0);
+  const burstPollingRef = useRef<number | null>(null);
+  // Debug function to force lyrics fetch (uncomment when debugging)
+  // const debugForceLyricsFetch = () => {
+  //   console.log('DEBUG: Forcing lyrics fetch for current track');
+  //   // Clear cache
+  //   lastPanelData.current.lyrics = { track: '', artist: '', lyrics: null };
+  //   setLyrics(null);
+  //   // Force fetch
+  //   if (nowPlaying.track && nowPlaying.artist) {
+  //     fetchLyrics(nowPlaying.track, nowPlaying.artist, nowPlaying.device);
+  //   }
+  // };
+
+  // Cache system to prevent unnecessary panel refreshes
+  const lastPanelData = useRef({
+    lyrics: { track: '', artist: '', lyrics: null as string | null },
+    artistInfo: { artist: '', album: '' },
+    queue: { lastUpdate: 0, data: [] as any[] }
+  });
+
+  // Burst polling when track changes are detected - BALANCED for stability
+  const startBurstPolling = () => {
+    if (burstPollingRef.current) return; // Already burst polling
+
+    console.log('App: Starting BALANCED burst polling for track change');
+    setIsTrackChanging(true);
+
+    let attempts = 0;
+    const maxAttempts = 8; // Reduced from 12 to 8 attempts (4 seconds total)
+
+    burstPollingRef.current = setInterval(() => {
+      console.log(`App: Balanced burst poll attempt ${attempts + 1}/${maxAttempts}`);
+      fetchNowPlayingRef.current();
+      attempts++;
+
+      if (attempts >= maxAttempts) {
+        console.log('App: Ending balanced burst polling');
+        if (burstPollingRef.current) {
+          clearInterval(burstPollingRef.current);
+          burstPollingRef.current = null;
+        }
+        setIsTrackChanging(false);
+      }
+    }, 250) as unknown as number; // Reduced from 500ms to 250ms for ultra-fast response
+  };
+  const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false); // New: Artwork Modal State
   const isSeeking = useRef(false);
   const mediaSourceRef = useRef(mediaSource);
 
@@ -348,7 +399,7 @@ function AppContentInner() {
         // Usar color dinámico extraído de la portada
         document.documentElement.style.setProperty('--bg-app', dynamicBgColor);
         document.body.style.backgroundColor = dynamicBgColor;
-        
+
         // Aplicar CSS personalizado para colores dinámicos
         const dynamicCSS = generateDynamicBackgroundCSS(dynamicBgColor);
         let styleElement = document.getElementById('dynamic-bg-styles');
@@ -362,7 +413,7 @@ function AppContentInner() {
         // Usar color fijo seleccionado
         document.documentElement.style.setProperty('--bg-app', selectedColor.color);
         document.body.style.backgroundColor = selectedColor.color;
-        
+
         // Limpiar estilos dinámicos
         const styleElement = document.getElementById('dynamic-bg-styles');
         if (styleElement) {
@@ -373,15 +424,15 @@ function AppContentInner() {
     }
   }, [bgColor, dynamicBgColor]);
 
-  // Extract dynamic color from album artwork
+  // Extract dynamic color from album artwork (Always available for components that need it)
   useEffect(() => {
-    if (bgColor === 'dynamic' && nowPlaying.artworkUrl) {
+    if (nowPlaying.artworkUrl) {
       const artworkUrl = resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey);
       if (artworkUrl) {
         extractDominantColor(artworkUrl)
           .then(color => {
             if (color) {
-              console.log('Extracted dynamic color:', color);
+              // console.log('Extracted dynamic color:', color);
               setDynamicBgColor(color);
             }
           })
@@ -392,7 +443,7 @@ function AppContentInner() {
           });
       }
     }
-  }, [bgColor, nowPlaying.artworkUrl, artworkRetryKey]);
+  }, [nowPlaying.artworkUrl, artworkRetryKey]);
 
   useEffect(() => {
     console.log("Artis Nova DSP v1.2.2 - Loading Layout...");
@@ -510,7 +561,7 @@ function AppContentInner() {
   // Periodic polling for zones when popover or menu is open
   useEffect(() => {
     if ((menuOpen || sourcePopoverOpen)) {
-      const interval = setInterval(fetchMediaZones, 5000);
+      const interval = setInterval(fetchMediaZones, 3000); // Reduced from 5000ms to 3000ms for faster zone updates
       return () => clearInterval(interval);
     }
   }, [menuOpen, sourcePopoverOpen]);
@@ -539,7 +590,7 @@ function AppContentInner() {
 
   const selectZone = async (zoneId: string, source: 'apple' | 'roon' | 'lms') => {
     console.log('selectZone called:', { zoneId, source });
-    
+
     try {
       const targetZone = mediaZones.find(z => z.id === zoneId && z.source === source);
       console.log('targetZone found:', targetZone);
@@ -574,15 +625,15 @@ function AppContentInner() {
         setBackend('raspi'); // LMS is always on the Pi
         await axios.post(`${API_URL}/media/lms/select`, { playerId: zoneId });
       }
-      
+
       console.log('Clearing lyrics and fetching media zones');
       setLyrics(null);
       fetchMediaZones();
-      
+
       console.log('Fetching now playing data');
       setTimeout(fetchNowPlaying, 100);
       setTimeout(fetchNowPlaying, 500);
-      
+
       console.log('selectZone completed successfully');
     } catch (error) {
       console.error('Error in selectZone:', error);
@@ -590,30 +641,84 @@ function AppContentInner() {
     }
   };
 
-  // WebSocket for instantaneous updates
+  // WebSocket for instantaneous updates - ULTRA-STABLE connection
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 3; // Limit reconnection attempts
 
     const connect = () => {
+      // Don't attempt if we've exceeded max attempts
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        console.log('App: Max WebSocket reconnection attempts reached. Waiting 5 minutes before retry...');
+        setTimeout(() => {
+          reconnectAttempts = 0; // Reset attempts after long delay
+          connect();
+        }, 300000); // 5 minutes
+        return;
+      }
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.hostname}:3000`;
-      console.log('App: Connecting to metadata WebSocket:', wsUrl);
+      console.log(`App: Connecting to metadata WebSocket (attempt ${reconnectAttempts + 1}):`, wsUrl);
+
       ws = new WebSocket(wsUrl);
+
       ws.onopen = () => {
-        console.log('App: Metadata WebSocket connected');
+        console.log('App: Metadata WebSocket connected successfully');
         wsConnectedRef.current = true;
+        reconnectAttempts = 0; // Reset attempts on successful connection
       };
 
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
+          console.log('App: WebSocket message received:', message.type);
           if (message.type === 'metadata_update') {
             // SYNC CHECK: Use Ref for current media source to be up to date
             const currentSource = mediaSourceRef.current;
             if (message.data?.source === currentSource || !message.data?.source) {
-              console.log(`App: Relevant WS update (${message.data?.source || 'unknown'}). Fetching.`);
+              console.log(`App: Relevant WS update (${message.data?.source || 'unknown'}). Updating STATE immediately.`);
+
+              // INSTANT UPDATE: Use the data directly from WebSocket
+              if (message.data?.info) {
+                const newData = message.data.info;
+
+                setNowPlaying(prev => {
+                  // Detect track change
+                  const trackChanged = newData.track !== prev.track || newData.artist !== prev.artist;
+
+                  if (trackChanged) {
+                    console.log(`App: INSTANT Update - Track changed to "${newData.track}"`);
+                    // Reset lyrics on track change
+                    setLyrics(null);
+                    setArtworkRetryKey(0);
+
+                    // Trigger lyrics fetch (redundant w/ server-side automation but good safety)
+                    setTimeout(() => {
+                      fetchLyrics(newData.track, newData.artist, newData.device);
+                    }, 100);
+                  }
+
+                  return {
+                    ...prev,
+                    ...newData,
+                    // Ensure defaults
+                    state: newData.state || 'unknown',
+                    track: newData.track || '',
+                    artist: newData.artist || '',
+                    album: newData.album || '',
+                    position: newData.position || 0,
+                    duration: newData.duration || 0
+                  };
+                });
+              }
+
+              // Still fetch to sync perfectly, but we are already visually updated
+              // Reduced aggression since we have data
               fetchNowPlayingRef.current();
+
               if (message.data?.source === 'roon') {
                 fetchMediaZones(); // Refresh zones when Roon update happens
               }
@@ -627,13 +732,21 @@ function AppContentInner() {
       };
 
       ws.onclose = () => {
-        console.log('App: Metadata WebSocket closed. Reconnecting...');
+        console.log('App: Metadata WebSocket closed. Implementing ULTRA-STABLE reconnection...');
         wsConnectedRef.current = false;
-        reconnectTimeout = setTimeout(connect, 3000);
+        reconnectAttempts++;
+
+        // ULTRA-CONSERVATIVE reconnection with exponential backoff
+        const baseDelay = 2000; // Start with 2 seconds
+        const backoffDelay = Math.min(baseDelay * Math.pow(2, reconnectAttempts - 1), 30000); // Max 30s
+
+        console.log(`App: Will reconnect in ${backoffDelay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+        reconnectTimeout = setTimeout(connect, backoffDelay);
       };
 
       ws.onerror = (err) => {
         console.warn('App: Metadata WebSocket error:', err);
+        wsConnectedRef.current = false;
       };
     };
 
@@ -651,6 +764,7 @@ function AppContentInner() {
       isFetchingRef.current = true;
       // ALWAYS use the latest ref for the source to avoid stale closure fetches
       const currentSource = mediaSourceRef.current;
+      console.log(`App: Fetching now playing from ${currentSource}...`);
       const res = await axios.get(`${API_URL}/media/info?source=${currentSource}`, { timeout: 3000 });
       if (res.data && !res.data.error) {
         // STRICT SOURCE FILTER: Discard if source doesn't match current selection
@@ -661,8 +775,19 @@ function AppContentInner() {
         }
 
         // TRACK CHANGE: Full update
-        if (res.data.track !== nowPlaying.track) {
-          console.log(`App: Track changed to "${res.data.track}". Full state update.`);
+        if (res.data.track !== nowPlaying.track || res.data.artist !== nowPlaying.artist) {
+          console.log(`App: Track changed from "${nowPlaying.track}" by "${nowPlaying.artist}" to "${res.data.track}" by "${res.data.artist}". Full state update.`);
+
+          // Clear lyrics immediately when track changes to prevent showing wrong lyrics
+          setLyrics(null);
+
+          // CLEAR lyrics cache on track change to force fresh fetch
+          lastPanelData.current.lyrics = {
+            track: '',
+            artist: '',
+            lyrics: null
+          };
+
           setNowPlaying(prev => ({
             ...prev,
             ...res.data,
@@ -675,7 +800,11 @@ function AppContentInner() {
           }));
           nowPlayingTrackRef.current = res.data.track; // Update Ref immediately for fetchLyrics
           setArtworkRetryKey(0); // Reset retry on track change
-          fetchLyrics(res.data.track, res.data.artist, res.data.device);
+
+          // Fetch lyrics with a small delay to ensure track info is stable
+          setTimeout(() => {
+            fetchLyrics(res.data.track, res.data.artist, res.data.device);
+          }, 100);
         } else {
           // SAME TRACK: Only update dynamic fields (position, state, signalPath)
           setNowPlaying(prev => {
@@ -689,6 +818,7 @@ function AppContentInner() {
 
             if (!stateChanged && !posChanged && !pathChanged && !artworkChanged && !yearChanged && !styleChanged) return prev;
 
+            console.log(`App: Same track, updating dynamic fields - state: ${stateChanged}, pos: ${posChanged}, path: ${pathChanged}`);
             return {
               ...prev,
               state: res.data.state,
@@ -706,7 +836,7 @@ function AppContentInner() {
         }
       }
     } catch (err: any) {
-      // console.warn('App: Fetch NowPlaying failed:', err.message);
+      console.warn('App: Fetch NowPlaying failed:', err.message);
     } finally {
       isFetchingRef.current = false;
     }
@@ -718,15 +848,18 @@ function AppContentInner() {
   }, [fetchNowPlaying]);
 
   useEffect(() => {
+    console.log('App: Starting STABLE now playing polling loop');
     fetchNowPlayingRef.current();
     const interval = setInterval(() => {
       // Only poll if WebSocket is disconnected to minimize traffic and conflicts
       if (!wsConnectedRef.current) {
+        console.log('App: Polling now playing (WebSocket disconnected)');
         fetchNowPlayingRef.current();
-      } else if (Math.random() < 0.05) { // Occasional sync even if WS is on
+      } else if (Math.random() < 0.1) { // Reduced from 25% to 10% for stability
+        console.log('App: Occasional sync poll');
         fetchNowPlayingRef.current();
       }
-    }, 2000);
+    }, 1500); // Increased from 800ms to 1500ms for stability
     return () => clearInterval(interval);
   }, []); // Static interval
 
@@ -738,31 +871,57 @@ function AppContentInner() {
 
     // Race condition protection: Capture current track to validate response later
     const requestedTrack = track;
+    const requestedArtist = artist;
+
+    // SIMPLIFIED: Only skip if we have lyrics AND it's the exact same track
+    const currentTrackKey = `${track}-${artist}`;
+    const lastLyricsData = lastPanelData.current.lyrics;
+    const lastTrackKey = `${lastLyricsData.track}-${lastLyricsData.artist}`;
+
+    // Only skip if: same track AND we have lyrics AND lyrics are currently displayed
+    if (currentTrackKey === lastTrackKey && lastLyricsData.lyrics !== null && lyrics === lastLyricsData.lyrics) {
+      console.log(`App: SKIPPING lyrics fetch - already have and displaying lyrics for "${track}" by "${artist}"`);
+      return;
+    }
+
     // Safety: If track matches device name, it's a Roon metadata artifact (e.g. AirPlay stream)
     if (device && track === device) {
       console.log('Skipping lyrics: Track equals Device name (Metadata artifact)');
       setLyrics(null);
       return;
     }
+
     try {
       console.log(`App: Fetching lyrics for "${track}" by "${artist}"...`);
       const res = await axios.get(`${API_URL}/media/lyrics`, { params: { track, artist } });
 
-      // Only update if we are still on the same track
-      if (requestedTrack !== nowPlayingTrackRef.current) {
-        console.log(`App: Lyrics received for "${requestedTrack}" but current track migrated to "${nowPlayingTrackRef.current}". Ignoring.`);
+      // Only update if we are still on the same track AND artist
+      if (requestedTrack !== nowPlayingTrackRef.current || requestedArtist !== nowPlaying.artist) {
+        console.log(`App: Lyrics received for "${requestedTrack}" by "${requestedArtist}" but current track migrated to "${nowPlayingTrackRef.current}" by "${nowPlaying.artist}". Ignoring.`);
         return;
       }
 
-      if (res.data.instrumental) {
-        setLyrics("[INSTRUMENTAL]");
-      } else {
-        setLyrics(res.data.plain || null);
-      }
-    } catch {
+      const lyricsResult = res.data.instrumental ? "[INSTRUMENTAL]" : (res.data.plain || null);
+      setLyrics(lyricsResult);
+
+      // Update cache
+      lastPanelData.current.lyrics = {
+        track: requestedTrack,
+        artist: requestedArtist,
+        lyrics: lyricsResult
+      };
+
+      console.log(`App: Lyrics ${lyricsResult ? 'found' : 'not found'} for "${track}" by "${artist}"`);
+    } catch (error) {
+      console.error(`App: Error fetching lyrics for "${track}" by "${artist}":`, error);
       // Only clear if we failed for the actual current track
-      if (requestedTrack === nowPlaying.track) {
+      if (requestedTrack === nowPlaying.track && requestedArtist === nowPlaying.artist) {
         setLyrics(null);
+        lastPanelData.current.lyrics = {
+          track: requestedTrack,
+          artist: requestedArtist,
+          lyrics: null
+        };
       }
     }
   };
@@ -824,7 +983,19 @@ function AppContentInner() {
   const fetchQueue = async () => {
     try {
       const res = await axios.get(`${API_URL}/media/queue?source=${mediaSource}`);
-      setQueue(res.data.queue || []);
+      const newQueue = res.data.queue || [];
+
+      // Only update if queue actually changed
+      const currentQueueStr = JSON.stringify(queue);
+      const newQueueStr = JSON.stringify(newQueue);
+
+      if (currentQueueStr !== newQueueStr) {
+        console.log('App: Queue changed, updating');
+        setQueue(newQueue);
+        lastPanelData.current.queue = { lastUpdate: Date.now(), data: newQueue };
+      } else {
+        console.log('App: Queue unchanged, skipping update');
+      }
     } catch { }
   };
 
@@ -866,7 +1037,7 @@ function AppContentInner() {
       if (mediaSource !== 'roon') {
         // Check if there's an active Roon zone
         const hasActiveRoonZone = res.data.zone && res.data.zone !== 'Camilla';
-        
+
         if (hasActiveRoonZone) {
           console.log(`App: Detected active Roon zone "${res.data.zone}", checking playback status...`);
           axios.get(`${API_URL}/media/info?source=roon`).then(r => {
@@ -933,9 +1104,9 @@ function AppContentInner() {
     checkStatus();
     fetchQueue();
     fetchMediaZones();
-    const statusInterval = setInterval(checkStatus, 3000); // 3s for status is enough
-    const queueInterval = setInterval(fetchQueue, 10000); // 10s for queue
-    const zoneInterval = setInterval(fetchMediaZones, 15000); // 15s for zones pool as backup
+    const statusInterval = setInterval(checkStatus, 2500); // Increased from 1500ms to 2500ms for stability
+    const queueInterval = setInterval(fetchQueue, 10000); // Increased from 6000ms to 10000ms
+    const zoneInterval = setInterval(fetchMediaZones, 15000); // Increased from 10000ms to 15000ms
     return () => {
       clearInterval(statusInterval);
       clearInterval(queueInterval);
@@ -964,7 +1135,7 @@ function AppContentInner() {
   const handleArtworkError = () => {
     if (artworkRetryKey < 10) {
       console.log(`App: Artwork load failed (attempt ${artworkRetryKey + 1}). Retrying in 1s...`);
-      setTimeout(() => setArtworkRetryKey(prev => prev + 1), 1000);
+      setTimeout(() => setArtworkRetryKey((prev: number) => prev + 1), 1000);
     } else {
       console.warn('App: Artwork load failed after 10 retries.');
     }
@@ -1062,11 +1233,21 @@ function AppContentInner() {
 
   const handleMediaControl = async (action: string, params: any = {}) => {
     try {
+      console.log(`App: Media control action: ${action}`);
       await axios.post(`${API_URL}/media/${action}`, { ...params, source: mediaSource });
+
+      // Start burst polling for track changes
+      if (action === 'next' || action === 'prev' || action === 'playpause') {
+        console.log('App: Starting burst polling after media control');
+        startBurstPolling();
+      }
+
       // Immediate optimistic update or fetch
-      setTimeout(fetchNowPlaying, 100);
+      console.log('App: Triggering immediate fetch after media control');
+      setTimeout(fetchNowPlaying, 50); // Very fast first attempt
       if (action === 'next' || action === 'prev') {
-        setTimeout(fetchNowPlaying, 500); // Second attempt for slower metadata updates
+        setTimeout(fetchNowPlaying, 300); // Second attempt for slower metadata updates
+        setTimeout(fetchNowPlaying, 800); // Third attempt to be sure
       }
     }
     catch (err: any) { alert("Control Failed: " + (err.response?.data?.error || err.message)); }
@@ -1149,7 +1330,7 @@ function AppContentInner() {
             {/* Artwork - Dynamic Size Based on Available Height */}
             <div
               className="aspect-square w-full mx-auto mb-4 md:mb-8 relative group/art now-playing-artwork"
-              style={{ 
+              style={{
                 maxWidth: 'min(90vw, min(70vh, 500px))',
                 width: 'min(90vw, min(70vh, 500px))'
               }}
@@ -1239,7 +1420,7 @@ function AppContentInner() {
                 </div>
               </div>
 
-              {/* Transport Controls */}
+
               <div className="flex items-center justify-center gap-6 mb-4 md:mb-8 now-playing-controls">
                 <button
                   onClick={() => handleMediaControl('prev')}
@@ -1472,46 +1653,46 @@ function AppContentInner() {
   // Main layout
   const renderLayout = () => {
     console.log('renderLayout called with activeMode:', activeMode);
-    
+
     try {
       const mobile = isMobile();
       console.log('Mobile detected:', mobile);
-      
+
       if (mobile) {
         console.log('Rendering mobile layout for mode:', activeMode);
         switch (activeMode) {
-          case 'playback': 
+          case 'playback':
             console.log('Rendering mobile playback');
             return renderNowPlaying();
-          case 'processing': 
+          case 'processing':
             console.log('Rendering mobile processing');
             return renderProcessingTools();
-          case 'lyrics': 
+          case 'lyrics':
             console.log('Rendering mobile lyrics');
             return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
-          case 'info': 
+          case 'info':
             console.log('Rendering mobile info with ArtistInfo');
             return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
-          case 'navigation': 
+          case 'navigation':
             console.log('Rendering mobile navigation with SimpleMusicNavigationView');
             return <SimpleMusicNavigationView />;
-          case 'queue': 
+          case 'queue':
             console.log('Rendering mobile queue');
             return <PlayQueue queue={queue} mediaSource={mediaSource} />;
-          case 'history': 
+          case 'history':
             console.log('Rendering mobile history');
             return <History />;
-          case 'visualization': 
+          case 'visualization':
             console.log('Rendering mobile visualization');
-            return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
-          default: 
+            return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} dynamicColor={dynamicBgColor} />;
+          default:
             console.log('Rendering mobile default (playback)');
             return renderNowPlaying();
         }
       }
-      
+
       console.log('Rendering desktop layout for mode:', activeMode);
-      
+
       if (activeMode === 'playback') {
         console.log('Rendering desktop playback mode');
         return (
@@ -1529,7 +1710,7 @@ function AppContentInner() {
       // Visualization - Fullscreen mode (no split panel)
       if (activeMode === 'visualization') {
         console.log('Rendering desktop visualization mode');
-        return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} />;
+        return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} dynamicColor={dynamicBgColor} />;
       }
 
       // Navigation - Fullscreen mode (no split panel)
@@ -1560,7 +1741,7 @@ function AppContentInner() {
             <div className="w-1 h-12 bg-themed-medium rounded-full" />
           </Separator>
           <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
-            <div ref={secondaryContainerRef} className="h-full w-full flex flex-col p-4 lg:p-6">
+            <div ref={secondaryContainerRef} className="h-full w-full flex flex-col pt-8 px-4 pb-4 lg:pt-10 lg:px-6 lg:pb-6">
               {/* 3. LYRICS/QUEUE/HISTORY/PROCESSING - Based on activeMode */}
               {activeMode === 'processing' && renderProcessingTools()}
               {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
@@ -1591,8 +1772,16 @@ function AppContentInner() {
       <button
         ref={menuButtonRef}
         onClick={() => setMenuOpen(!menuOpen)}
-        className="fixed top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] z-50 p-3 rounded-xl shadow-xl hover:opacity-80 transition-all active:scale-95"
-        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
+        className="fixed top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] p-3 rounded-xl shadow-xl hover:opacity-80 transition-all active:scale-95"
+        style={{
+          backgroundColor: 'transparent',
+          color: 'white',
+          border: 'none',
+          outline: 'none',
+          zIndex: 2147483647, // Maximum z-index value
+          position: 'fixed',
+          isolation: 'isolate'
+        }}
       >
         <Menu size={20} />
       </button>
@@ -1602,7 +1791,12 @@ function AppContentInner() {
         <div
           ref={sideMenuRef}
           onMouseDown={() => setMenuActivity(Date.now())}
-          className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] z-50 border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300 bg-black/80 backdrop-blur-md"
+          className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300 bg-black/80 backdrop-blur-md"
+          style={{
+            zIndex: 2147483647, // Maximum z-index value
+            position: 'fixed',
+            isolation: 'isolate'
+          }}
         >
 
           {menuView === 'main' ? (
@@ -1699,6 +1893,7 @@ function AppContentInner() {
                     {activeMode === 'info' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
 
+                  {/* Music Explorer - Temporarily hidden until fully functional
                   <button
                     onClick={() => { setActiveMode('navigation'); setMenuOpen(false); }}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'navigation' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
@@ -1710,6 +1905,7 @@ function AppContentInner() {
                     </div>
                     {activeMode === 'navigation' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
                   </button>
+                  */}
 
                   <button
                     onClick={() => { setActiveMode('queue'); setMenuOpen(false); }}
@@ -1774,16 +1970,16 @@ function AppContentInner() {
                   className="w-full flex items-center justify-between px-3 py-3 rounded-lg transition-all hover:bg-white/10 text-white bg-black/40 border border-white/5"
                 >
                   <div className="flex items-center gap-3">
-                    <div 
-                      className="w-5 h-5 rounded-sm border shadow-lg border-white/40" 
-                      style={{ 
-                        backgroundColor: bgColor === 'dynamic' && dynamicBgColor 
-                          ? dynamicBgColor 
+                    <div
+                      className="w-5 h-5 rounded-sm border shadow-lg border-white/40"
+                      style={{
+                        backgroundColor: bgColor === 'dynamic' && dynamicBgColor
+                          ? dynamicBgColor
                           : BACKGROUND_COLORS.find(c => c.id === bgColor)?.color || '#000000',
-                        backgroundImage: bgColor === 'dynamic' && !dynamicBgColor 
-                          ? 'linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4)' 
+                        backgroundImage: bgColor === 'dynamic' && !dynamicBgColor
+                          ? 'linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4)'
                           : 'none'
-                      }} 
+                      }}
                     />
                     <span className="text-sm font-black">Background Color</span>
                   </div>
@@ -1989,8 +2185,8 @@ function AppContentInner() {
                       <div className="flex items-center gap-3">
                         <div
                           className={`w-6 h-6 rounded-sm border transition-all ${bgColor === colorObj.id ? 'border-white/80 scale-110 shadow-[0_0_10px_rgba(255,255,255,0.3)]' : 'border-white/20'}`}
-                          style={{ 
-                            backgroundColor: colorObj.id === 'dynamic' 
+                          style={{
+                            backgroundColor: colorObj.id === 'dynamic'
                               ? (dynamicBgColor || '#08080a')
                               : colorObj.color,
                             backgroundImage: colorObj.id === 'dynamic' && !dynamicBgColor

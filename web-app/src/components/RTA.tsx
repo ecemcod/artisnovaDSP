@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
+import { lightenColor } from '../utils/colorExtractor';
 
-export type RTASkin = 'blue' | 'red' | 'traffic' | 'soft' | 'neon' | 'sunset' | 'forest' | 'ocean' | 'gold' | 'cyber';
+export type RTASkin = 'blue' | 'red' | 'traffic' | 'soft' | 'neon' | 'sunset' | 'forest' | 'ocean' | 'gold' | 'cyber' | 'dynamic';
 
 interface Props {
     isRunning: boolean;
@@ -8,6 +9,7 @@ interface Props {
     skin?: RTASkin;
     isAsymmetric?: boolean;
     isFrozen?: boolean;
+    customColor?: string | null;
 }
 
 const PALETTES: Record<RTASkin, string[]> = {
@@ -26,7 +28,7 @@ const PALETTES: Record<RTASkin, string[]> = {
 const FREQUENCIES = [20, 25, 31, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, '1k', '1.2k', '1.6k', '2k', '2.5k', '3.1k', '4k', '5k', '6.3k', '8k', '10k', '12.5k', '16k', '20k'];
 const DEFAULT_BANDS = 31;
 
-const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, isFrozen = false }) => {
+const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, isFrozen = false, customColor }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const isFrozenRef = useRef(isFrozen);
@@ -59,15 +61,14 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, 
         const connect = () => {
             if (isCleaningUp) return;
 
-            let url = 'ws://localhost:3000';
-            if (typeof window !== 'undefined') {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                if (window.location.port !== '5173') {
-                    url = `${protocol}//${window.location.host}`;
-                }
-            }
+            // In development (port 3000), Vite's WS proxy doesn't work reliably
+            // Connect directly to the backend on port 3001
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const isDev = window.location.port === '3000';
+            const host = isDev ? `${window.location.hostname}:3001` : window.location.host;
+            const url = `${protocol}//${host}/ws`;
 
-            console.log('RTA: Connecting to WebSocket:', url);
+            console.log(`RTA: Connecting to ${isDev ? 'backend' : 'proxy'}: ${url}`);
             const ws = new WebSocket(url);
             wsRef.current = ws;
 
@@ -124,7 +125,19 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, 
 
             const w = canvasRef.current.width;
             const h = canvasRef.current.height;
-            const colors = PALETTES[skin] || PALETTES.blue;
+            let colors = PALETTES[skin] || PALETTES.blue;
+
+            if (skin === 'dynamic' && customColor) {
+                // Generate dynamic gradient: Base (Bottom) -> Lighter (Top)
+                colors = [
+                    customColor,
+                    lightenColor(customColor, 0.3),
+                    lightenColor(customColor, 0.6)
+                ];
+            } else if (skin === 'dynamic') {
+                // Fallback if no color provided
+                colors = PALETTES.blue;
+            }
 
             ctx.clearRect(0, 0, w, h);
 
@@ -173,7 +186,7 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, 
 
         animationId = requestAnimationFrame(draw);
         return () => cancelAnimationFrame(animationId);
-    }, [isRunning, skin, isAsymmetric]);
+    }, [isRunning, skin, isAsymmetric, customColor]);
 
     return (
         <div className="w-full h-full flex flex-col pt-4 md:pt-8">

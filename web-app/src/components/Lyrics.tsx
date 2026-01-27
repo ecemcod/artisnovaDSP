@@ -50,11 +50,11 @@ const Lyrics: React.FC<Props> = ({ lyrics, trackInfo }) => {
                     <>
                         <div className="absolute top-0 left-0 w-full h-16 bg-gradient-to-b from-themed-panel to-transparent pointer-events-none z-10" />
 
-                        <div className="space-y-1">
+                        <div className="space-y-0">
                             {lyrics.split('\n').map((line, i) => (
                                 <p
                                     key={i}
-                                    className={`text-xl md:text-3xl font-black leading-none transition-all duration-300 text-center tracking-tight ${line.trim() ? 'text-themed-primary/60 hover:text-themed-primary hover:scale-105' : 'h-4'
+                                    className={`text-xl md:text-3xl font-black leading-[0.8] transition-all duration-300 text-center tracking-tight ${line.trim() ? 'text-themed-primary/60 hover:text-themed-primary hover:scale-105' : 'h-2'
                                         }`}
                                 >
                                     {line}

@@ -92,3 +92,38 @@
 .now-playing-artwork:active {
   transform: scale(0.98);
 }
+/* Menu z-index fix - ensure menu appears above all other elements */
+.fixed[style*="z-index: 2147483647"] {
+  z-index: 2147483647 !important;
+  position: fixed !important;
+  isolation: isolate !important;
+}
+
+/* Ensure menu button and dropdown are always on top */
+button[style*="z-index: 2147483647"],
+div[style*="z-index: 2147483647"] {
+  z-index: 2147483647 !important;
+  position: fixed !important;
+  isolation: isolate !important;
+}
+
+/* Override any conflicting z-index values */
+.now-playing-header,
+.now-playing-artwork,
+.now-playing-info,
+.now-playing-progress,
+.now-playing-controls,
+.now-playing-badge {
+  z-index: auto !important;
+  position: relative !important;
+}
+
+/* Ensure panels don't interfere with menu */
+.react-resizable-panel {
+  z-index: auto !important;
+}
+
+/* Ensure artwork modal is below menu but above everything else */
+.artwork-modal {
+  z-index: 99999 !important;
+}

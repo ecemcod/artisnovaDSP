@@ -10,7 +10,7 @@ devices:
     type: CoreAudio
     device: D50 III
     channels: 2
-    format: FLOAT32LE
+    format: S32LE
 filters:
   volume:
     type: Gain

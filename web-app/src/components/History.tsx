@@ -49,12 +49,12 @@ const History = () => {
         // Initial fetch
         fetchHistory(1);
 
-        // Polling for dynamic updates (every 30s)
+        // Polling for dynamic updates (every 20s instead of 30s)
         const interval = setInterval(() => {
             fetchStats();
             // Only refresh list if on first page to prevent scroll jumping
             if (page === 1) fetchHistory(1, true);
-        }, 30000);
+        }, 20000); // Reduced from 30000ms to 20000ms for faster history updates
 
         return () => clearInterval(interval);
     }, [page, range]);
@@ -77,7 +77,7 @@ const History = () => {
         try {
             const limit = 50;
             const res = await axios.get(`${API_URL}/history/list?page=${pageNum}&limit=${limit}`);
-            const newItems = res.data.items;
+            const newItems = res.data?.items || [];
 
             if (pageNum === 1) {
                 setHistoryItems(newItems);
@@ -365,7 +365,7 @@ const StatsCard = ({ title, icon, data, color, formatter }: { title: string; ico
         <div className="relative bg-themed-panel border border-themed-medium rounded-xl p-6 shadow-lg flex flex-col h-[400px] animate-in fade-in zoom-in duration-300 overflow-hidden">
             {/* Subtle background pattern instead of full image */}
             <div className="absolute inset-0 z-0 bg-gradient-to-br from-themed-panel to-themed-deep opacity-50" />
-            
+
             <div className="relative z-10 flex items-center gap-3 mb-6 pb-4 border-b border-themed-subtle">
                 <div className={`p-2 rounded-lg bg-white/5 ${color} backdrop-blur-md`}>
                     {icon}

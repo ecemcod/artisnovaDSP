@@ -37,6 +37,8 @@ const LastFmConnector = require('./connectors/LastFmConnector');
 const iTunesConnector = require('./connectors/iTunesConnector');
 const WikipediaConnector = require('./connectors/WikipediaConnector');
 const QobuzConnector = require('./connectors/QobuzConnector');
+const LrcLibConnector = require('./connectors/LrcLibConnector');
+const SpotifyConnector = require('./connectors/SpotifyConnector');
 
 // Initialize Music Info Manager with the raw SQLite database connection
 const musicInfoManager = new MusicInfoManager(db.db); // Use db.db to get the raw SQLite connection
@@ -61,6 +63,8 @@ musicInfoManager.registerConnector('discogs', new DiscogsConnector());
 musicInfoManager.registerConnector('lastfm', new LastFmConnector());
 musicInfoManager.registerConnector('itunes', new iTunesConnector());
 musicInfoManager.registerConnector('wikipedia', new WikipediaConnector());
+musicInfoManager.registerConnector('lrclib', new LrcLibConnector());
+musicInfoManager.registerConnector('spotify', new SpotifyConnector());
 
 const app = express();
 app.use(cors());
@@ -210,10 +214,10 @@ async function updatePlaybackHistory() {
     }
 }
 
-// Start history tracking loop (every 5 seconds)
-setInterval(updatePlaybackHistory, 5000);
+// Start history tracking loop (every 800ms - ultra-responsive for track changes)
+setInterval(updatePlaybackHistory, 800);
 
-const PORT = 3000;
+const PORT = 3001;
 const CAMILLA_ROOT = path.resolve(__dirname, '..'); // camilla dir
 const PRESETS_DIR = path.join(CAMILLA_ROOT, 'presets');
 const ZONE_CONFIG_PATH = path.join(__dirname, 'zone-config.json');
@@ -441,7 +445,7 @@ app.post('/api/internal/sync-zone', (req, res) => {
 function getDspForZone(zoneName) {
     // Always use local backend
     return DSP_BACKENDS.local.manager;
-    
+
     // let backendId = 'local'; // default
 
     // // Check manual override first
@@ -1217,135 +1221,18 @@ async function getArtworkFromITunes(artist, album) {
 console.log('Server: History DB module loaded');
 
 
-// Lyrics Utilities
-// Simple in-memory cache for lyrics to avoid spamming the API
-const lyricsCache = new Map();
 const metadataCache = new Map();
 let loggedRoonRaw = false; // Global flag for one-time detailed log // New: Metadata Cache for Album/Year enrichment
 
-async function fetchLyrics(url, params) {
-    try {
-        const response = await axios.get(url, {
-            params,
-            timeout: 5000,
-            headers: {
-                'User-Agent': 'ArtisNova/1.2.1 (contact: artisnova@example.com)'
-            }
-        });
-        return response.data;
-    } catch (e) {
-        if (e.response && e.response.status === 404) {
-            console.log(`Lyrics: API 404 for ${url} with params: ${JSON.stringify(params)}`);
-            return null;
-        }
-        console.error(`Lyrics: API Error (${e.response?.status}) for ${url}:`, e.message);
-        return null; // Return null so we can try the next strategy instead of crashing
-    }
-}
 
-function normalizeLyricsMetadata(artist, track) {
-    // 1. Normalize Artist: Take only the first artist if it's a list
-    let cleanArtist = artist
-        .split(/[\\\/,;&]/)[0] // Split by /, \, ,, ;, &, etc.
-        .replace(/\s+(feat|ft)\.?\s+.*/i, '') // Strip "feat."
-        .trim();
-
-    // 2. Normalize Track: Strip common suffixes
-    let cleanTrack = track
-        .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version|Radio Edit|Edit|Duet With.*)\)\s*$/i, '')
-        .replace(/\s*\[(Live|Remastered|Deluxe|Special Edition)\]\s*$/i, '')
-        .replace(/\s*-\s*(Live|Remastered|Deluxe|Single Version|Radio Edit).*/i, '')
-        .trim();
-
-    return { artist: cleanArtist, track: cleanTrack };
-}
-
-async function getLyricsFromLrcLib(track, artist) {
-    const cacheKey = `${artist}-${track}`.toLowerCase();
-
-    // Check cache
-    if (lyricsCache.has(cacheKey)) {
-        const cached = lyricsCache.get(cacheKey);
-        if (Date.now() - cached.timestamp < 1000 * 60 * 60 * 24) {
-            return cached.data;
-        }
-    }
-
-    const { artist: cleanArtist, track: cleanTrack } = normalizeLyricsMetadata(artist, track);
-
-    // Strategy A: Direct Get with Normalized Data
-    console.log(`Lyrics: Trying Get (Normalized) for "${cleanArtist}" - "${cleanTrack}"`);
-    let data = await fetchLyrics('https://lrclib.net/api/get', {
-        artist_name: cleanArtist,
-        track_name: cleanTrack
-    });
-
-    if (data && (data.plainLyrics || data.syncedLyrics)) {
-        const result = { plain: data.plainLyrics, synced: data.syncedLyrics, instrumental: data.instrumental };
-        lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
-        return result;
-    }
-
-    // Strategy B: Search with Normalized Concatenation
-    const searchQuery = `${cleanArtist} ${cleanTrack}`.replace(/\//g, ' ');
-    console.log(`Lyrics: Trying Search (Normalized) for "${searchQuery}"`);
-    let searchData = await fetchLyrics('https://lrclib.net/api/search', {
-        q: searchQuery
-    });
-
-    if (Array.isArray(searchData) && searchData.length > 0) {
-        const bestMatch = searchData[0];
-        const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
-        lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
-        return result;
-    }
-
-    // Strategy C: Last Resort - Original Raw Strings in Search
-    if (artist !== cleanArtist || track !== cleanTrack) {
-        const rawSearchQuery = `${artist} ${track}`.replace(/\//g, ' ');
-        console.log(`Lyrics: Strategy C - Searching for "${rawSearchQuery}"`);
-        let rawSearchData = await fetchLyrics('https://lrclib.net/api/search', {
-            q: rawSearchQuery
-        });
-        if (Array.isArray(rawSearchData) && rawSearchData.length > 0) {
-            const bestMatch = rawSearchData[0];
-            const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
-            lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
-            return result;
-        }
-    }
-
-    // Strategy D: Medley handling (split by /)
-    if (cleanTrack.includes('/')) {
-        const parts = cleanTrack.split('/').map(p => p.trim()).filter(p => p.length >= 3);
-        console.log(`Lyrics: Strategy D - Detected medley. Trying components: ${parts.join(', ')}`);
-        for (const part of parts) {
-            console.log(`Lyrics: Strategy D - Trying Search for medley component: "${cleanArtist} ${part}"`);
-            let medleySearchData = await fetchLyrics('https://lrclib.net/api/search', {
-                q: `${cleanArtist} ${part}`.replace(/\//g, ' ')
-            });
-
-            if (Array.isArray(medleySearchData) && medleySearchData.length > 0) {
-                const bestMatch = medleySearchData[0];
-                const result = { plain: bestMatch.plainLyrics, synced: bestMatch.syncedLyrics, instrumental: bestMatch.instrumental };
-                lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
-                console.log(`Lyrics: Strategy D - SUCCEEDED for medley component "${part}"`);
-                return result;
-            }
-        }
-    }
-
-    console.log(`Lyrics: All strategies FAILED for "${artist}" - "${track}"`);
-    return null;
-}
 
 app.post('/api/media/playpause', async (req, res) => {
     const source = req.query.source || req.body.source;
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('playpause');
-        // } else if (source === 'lms') {  // DISABLED
-        //     await lmsController.control('playpause');
+            // } else if (source === 'lms') {  // DISABLED
+            //     await lmsController.control('playpause');
         } else {
             await runMediaCommand('play');
         }
@@ -1361,8 +1248,8 @@ app.post('/api/media/next', async (req, res) => {
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('next');
-        // } else if (source === 'lms') {  // DISABLED
-        //     await lmsController.control('next');
+            // } else if (source === 'lms') {  // DISABLED
+            //     await lmsController.control('next');
         } else {
             await runMediaCommand('next');
         }
@@ -1377,8 +1264,8 @@ app.post('/api/media/stop', async (req, res) => {
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('playpause');
-        // } else if (source === 'lms') {  // DISABLED
-        //     await lmsController.control('stop');
+            // } else if (source === 'lms') {  // DISABLED
+            //     await lmsController.control('stop');
         } else {
             await runMediaCommand('stop');
         }
@@ -1393,8 +1280,8 @@ app.post('/api/media/prev', async (req, res) => {
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('prev');
-        // } else if (source === 'lms') {  // DISABLED
-        //     await lmsController.control('previous');
+            // } else if (source === 'lms') {  // DISABLED
+            //     await lmsController.control('previous');
         } else {
             await runMediaCommand('prev');
         }
@@ -1409,8 +1296,8 @@ app.post('/api/media/seek', async (req, res) => {
     try {
         if (source === 'roon' && roonController.activeZoneId) {
             await roonController.control('seek', position);
-        // } else if (source === 'lms') {  // DISABLED
-        //     await lmsController.seek(position);
+            // } else if (source === 'lms') {  // DISABLED
+            //     await lmsController.seek(position);
         } else {
             await runMediaCommand(`seek ${position}`);
         }
@@ -1456,7 +1343,7 @@ app.get('/api/media/queue', async (req, res) => {
 app.get('/api/media/info', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     let source = req.query.source;
-    
+
     // AUTO-DETECT ACTIVE SOURCE: If no source specified, detect which one is actively playing
     if (!source) {
         try {
@@ -1488,7 +1375,7 @@ app.get('/api/media/info', async (req, res) => {
             source = 'apple';
         }
     }
-    
+
     try {
         if (source === 'roon') {
             const raw = roonController.getNowPlaying() || { state: 'unknown' };
@@ -1551,7 +1438,7 @@ app.get('/api/media/info', async (req, res) => {
                     (async () => {
                         try {
                             console.log(`Enhanced Enrichment: Fetching metadata for "${cacheKey}" with Qobuz priority...`);
-                            
+
                             // Use enhanced MusicInfoManager for better data
                             const [enhancedArtistData, enhancedAlbumData] = await Promise.all([
                                 musicInfoManager.getArtistInfo(info.artist).catch(() => null),
@@ -1568,7 +1455,7 @@ app.get('/api/media/info', async (req, res) => {
                                 year = enhancedAlbumData.release_date ? new Date(enhancedAlbumData.release_date).getFullYear().toString() : '';
                                 artwork = enhancedAlbumData.artwork_url || '';
                                 realArtist = enhancedAlbumData.artist_name || null;
-                                
+
                                 // Get genres from enhanced album data
                                 if (enhancedAlbumData.genres && enhancedAlbumData.genres.length > 0) {
                                     const genre = enhancedAlbumData.genres[0];
@@ -1636,20 +1523,20 @@ app.get('/api/media/info', async (req, res) => {
 
             console.log(`API Info (Roon): Sending Metadata for "${info.track}" - Year: ${info.year || 'MISSING'}`);
             return res.json(info);
-        // } else if (source === 'lms') {  // DISABLED
-        //     const data = await lmsController.getStatus();
-        //     const info = { ...data };
-        //     info.device = 'Raspberry Pi (Streaming)';
-        //     info.signalPath = {
-        //         quality: 'lossless',
-        //         nodes: [
-        //             { type: 'source', description: 'Lyrion Music Server', details: 'PCM', status: 'lossless' },
-        //             { type: 'dsp', description: 'CamillaDSP', details: '64-bit Processing', status: 'enhanced' },
-        //             { type: 'output', description: 'Raspberry Pi DAC', details: 'Hardware Output', status: 'enhanced' }
-        //         ]
-        //     };
-        //     info.source = 'lms';
-        //     return res.json(info);
+            // } else if (source === 'lms') {  // DISABLED
+            //     const data = await lmsController.getStatus();
+            //     const info = { ...data };
+            //     info.device = 'Raspberry Pi (Streaming)';
+            //     info.signalPath = {
+            //         quality: 'lossless',
+            //         nodes: [
+            //             { type: 'source', description: 'Lyrion Music Server', details: 'PCM', status: 'lossless' },
+            //             { type: 'dsp', description: 'CamillaDSP', details: '64-bit Processing', status: 'enhanced' },
+            //             { type: 'output', description: 'Raspberry Pi DAC', details: 'Hardware Output', status: 'enhanced' }
+            //         ]
+            //     };
+            //     info.source = 'lms';
+            //     return res.json(info);
         }
 
         // Default: Apple Music / System
@@ -1703,7 +1590,7 @@ app.get('/api/media/info', async (req, res) => {
                     if (enhancedAlbumData) {
                         year = enhancedAlbumData.release_date ? new Date(enhancedAlbumData.release_date).getFullYear().toString() : '';
                         artwork = enhancedAlbumData.artwork_url || '';
-                        
+
                         if (enhancedAlbumData.genres && enhancedAlbumData.genres.length > 0) {
                             const genre = enhancedAlbumData.genres[0];
                             style = typeof genre === 'string' ? genre : (genre.name || genre);
@@ -1730,7 +1617,7 @@ app.get('/api/media/info', async (req, res) => {
                     if (!info.year && year) info.year = year;
                     if (!info.style && style) info.style = style;
                     if (!info.artworkUrl && artwork) info.artworkUrl = artwork;
-                    
+
                     // Cache the enhanced metadata
                     metadataCache.set(cacheKey, { artwork, year, style });
                 } catch (e) {
@@ -1765,17 +1652,17 @@ app.get('/api/media/artist-info', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const { artist, album } = req.query;
     console.log(`API: Request for artist-info: artist="${artist}", album="${album}"`);
-    
+
     try {
         // Get Qobuz connector directly
         const qobuzConnector = musicInfoManager.connectors.get('qobuz');
-        
+
         let qobuzArtistData = null;
         let qobuzAlbumData = null;
-        
+
         if (qobuzConnector) {
             console.log('API: Using Qobuz connector directly for fresh data');
-            
+
             // Get artist data from Qobuz
             if (artist) {
                 try {
@@ -1783,7 +1670,7 @@ app.get('/api/media/artist-info', async (req, res) => {
                     if (artistResults.length > 0) {
                         const firstArtist = artistResults[0];
                         console.log(`API: Found Qobuz artist: ${firstArtist.name} (ID: ${firstArtist.qobuz_id})`);
-                        
+
                         // Try to get full artist details (may fail without user auth)
                         let fullArtistData = null;
                         try {
@@ -1791,7 +1678,7 @@ app.get('/api/media/artist-info', async (req, res) => {
                         } catch (error) {
                             console.log('API: Full artist details not available (requires user auth)');
                         }
-                        
+
                         if (fullArtistData) {
                             qobuzArtistData = {
                                 name: fullArtistData.name,
@@ -1825,7 +1712,7 @@ app.get('/api/media/artist-info', async (req, res) => {
                     console.log('API: Qobuz artist search failed:', error.message);
                 }
             }
-            
+
             // Get album data from Qobuz with full details including TiVo description
             if (album && artist) {
                 try {
@@ -1833,7 +1720,7 @@ app.get('/api/media/artist-info', async (req, res) => {
                     if (albumResults.length > 0) {
                         const firstAlbum = albumResults[0];
                         console.log(`API: Found Qobuz album: ${firstAlbum.title} (ID: ${firstAlbum.qobuz_id})`);
-                        
+
                         // Get full album details including description
                         const fullAlbumData = await qobuzConnector.getAlbum(firstAlbum.qobuz_id);
                         if (fullAlbumData) {
@@ -1859,18 +1746,18 @@ app.get('/api/media/artist-info', async (req, res) => {
                 }
             }
         }
-        
+
         // Enhanced logic: Combine Qobuz data with fallback sources for complete info
         if (qobuzArtistData || qobuzAlbumData) {
             console.log('API: Got Qobuz data, checking if enhancement needed');
-            
+
             // If we have Qobuz artist data but missing biography, enhance with fallback
             if (qobuzArtistData && !qobuzArtistData.biography) {
                 console.log('API: Qobuz artist data missing biography, enhancing with fallback sources');
                 try {
                     // Try getArtistInfo function first (AudioDB + Wikipedia)
                     const fallbackArtistInfo = await getArtistInfo(artist, album);
-                    
+
                     if (fallbackArtistInfo && fallbackArtistInfo.bio) {
                         // Merge Qobuz data (image, ID, albums_count) with fallback biography
                         qobuzArtistData = {
@@ -1901,7 +1788,7 @@ app.get('/api/media/artist-info', async (req, res) => {
                     console.log('API: Failed to enhance Qobuz artist data:', error.message);
                 }
             }
-            
+
             const response = {
                 artist: qobuzArtistData,
                 album: qobuzAlbumData,
@@ -1909,7 +1796,7 @@ app.get('/api/media/artist-info', async (req, res) => {
             };
             return res.json(response);
         }
-        
+
         // Fallback to MusicInfoManager
         console.log('API: Falling back to MusicInfoManager');
         const [artistInfo, albumInfo] = await Promise.all([
@@ -1920,11 +1807,11 @@ app.get('/api/media/artist-info', async (req, res) => {
         // Final fallback to original methods
         let fallbackArtistInfo = null;
         let fallbackAlbumInfo = null;
-        
+
         if (!artistInfo && artist) {
             fallbackArtistInfo = await getArtistInfo(artist, album);
         }
-        
+
         if (!albumInfo && album && artist) {
             fallbackAlbumInfo = await getAlbumInfo(artist, album);
         }
@@ -1934,7 +1821,7 @@ app.get('/api/media/artist-info', async (req, res) => {
             album: albumInfo || fallbackAlbumInfo,
             source: 'MusicBrainz'
         };
-        
+
         res.json(finalResponse);
     } catch (e) {
         console.error('API Error in artist-info:', e.message);
@@ -1946,35 +1833,35 @@ app.get('/api/media/artist-info', async (req, res) => {
 app.get('/api/test-qobuz-direct', async (req, res) => {
     const { artist, album } = req.query;
     console.log(`TEST: Direct Qobuz test for "${artist}" - "${album}"`);
-    
+
     try {
         const qobuzConnector = musicInfoManager.connectors.get('qobuz');
         if (!qobuzConnector) {
             return res.json({ error: 'Qobuz connector not found' });
         }
-        
+
         // Test artist search
         const artistResults = await qobuzConnector.searchArtist(artist, 3);
         console.log(`TEST: Qobuz artist search returned ${artistResults.length} results`);
-        
+
         let artistDetails = null;
         if (artistResults.length > 0) {
             const firstArtist = artistResults[0];
             console.log(`TEST: Getting full artist details for ID ${firstArtist.qobuz_id}`);
             artistDetails = await qobuzConnector.getArtist(firstArtist.qobuz_id);
         }
-        
+
         // Test album search
         const albumResults = await qobuzConnector.searchAlbum(album, artist, 3);
         console.log(`TEST: Qobuz album search returned ${albumResults.length} results`);
-        
+
         let albumDetails = null;
         if (albumResults.length > 0) {
             const firstAlbum = albumResults[0];
             console.log(`TEST: Getting full album details for ID ${firstAlbum.qobuz_id}`);
             albumDetails = await qobuzConnector.getAlbum(firstAlbum.qobuz_id);
         }
-        
+
         res.json({
             qobuzConnectorFound: true,
             artistSearchResults: artistResults.length,
@@ -2000,7 +1887,7 @@ app.get('/api/music/artist/:id', async (req, res) => {
             includeSimilar: req.query.includeSimilar === 'true',
             forceRefresh: req.query.forceRefresh === 'true'
         };
-        
+
         console.log('Enhanced API: Calling musicInfoManager.getArtistInfo with options:', options);
         const artistInfo = await musicInfoManager.getArtistInfo(artistId, options);
         console.log('Enhanced API: Artist info result:', artistInfo ? 'Data found' : 'No data');
@@ -2016,17 +1903,17 @@ app.get('/api/music/artist/:id/image', async (req, res) => {
     try {
         const artistId = req.params.id;
         console.log('Enhanced API: Artist image request for ID:', artistId);
-        
+
         // First try to get artist from database to get MBID
         const artists = await musicInfoManager.artistRepo.search(artistId, 1);
         const artist = artists[0];
-        
+
         if (!artist || !artist.mbid) {
             return res.status(404).json({ error: 'Artist not found or no MBID available' });
         }
-        
+
         const imageData = await musicInfoManager.connectors.musicbrainz.getArtistImage(artist.mbid);
-        
+
         if (imageData) {
             // Update database with image URL
             await musicInfoManager.artistRepo.update(artist.id, { image_url: imageData.url });
@@ -2046,12 +1933,12 @@ app.get('/api/music/artist/search', async (req, res) => {
         if (!query) {
             return res.status(400).json({ error: 'Query parameter "q" is required' });
         }
-        
+
         const options = {
             limit: parseInt(req.query.limit) || 10,
             sources: req.query.sources ? req.query.sources.split(',') : undefined
         };
-        
+
         const results = await musicInfoManager.searchArtists(query, options);
         res.json({ artists: results });
     } catch (error) {
@@ -2068,7 +1955,7 @@ app.get('/api/music/album/:id', async (req, res) => {
             includeCredits: req.query.includeCredits === 'true',
             forceRefresh: req.query.forceRefresh === 'true'
         };
-        
+
         const albumInfo = await musicInfoManager.getAlbumInfo(albumId, options);
         res.json(albumInfo);
     } catch (error) {
@@ -2081,17 +1968,17 @@ app.get('/api/music/album/search', async (req, res) => {
     try {
         const query = req.query.q;
         const artist = req.query.artist;
-        
+
         if (!query) {
             return res.status(400).json({ error: 'Query parameter "q" is required' });
         }
-        
+
         const options = {
             artist: artist,
             limit: parseInt(req.query.limit) || 10,
             sources: req.query.sources ? req.query.sources.split(',') : undefined
         };
-        
+
         const results = await musicInfoManager.searchAlbums(query, options);
         res.json(results);
     } catch (error) {
@@ -2108,7 +1995,7 @@ app.get('/api/music/album/:id/credits', async (req, res) => {
 
         // Get album credits from multiple sources
         const creditsData = await musicInfoManager.getAlbumCredits(albumId);
-        
+
         res.json(creditsData);
     } catch (error) {
         console.error('Enhanced API Error in album credits:', error.message);
@@ -2120,21 +2007,21 @@ app.get('/api/music/search', async (req, res) => {
     try {
         const query = req.query.q;
         const type = req.query.type || 'all'; // 'artist', 'album', 'all'
-        
+
         if (!query) {
             return res.status(400).json({ error: 'Query parameter "q" is required' });
         }
-        
+
         console.log(`Enhanced API: Search request for "${query}" (type: ${type})`);
-        
+
         const options = {
             limit: parseInt(req.query.limit) || 10,
             sources: req.query.sources ? req.query.sources.split(',') : undefined,
             artist: req.query.artist // Pass artist parameter for album searches
         };
-        
+
         let results = {};
-        
+
         if (type === 'all' || type === 'artist') {
             const artists = await musicInfoManager.searchArtists(query, options);
             // Enhance with images for search results
@@ -2152,7 +2039,7 @@ app.get('/api/music/search', async (req, res) => {
             }
             results.artists = artists;
         }
-        
+
         if (type === 'all' || type === 'album') {
             const albums = await musicInfoManager.searchAlbums(query, options);
             // Enhance with artwork for search results
@@ -2170,7 +2057,7 @@ app.get('/api/music/search', async (req, res) => {
             }
             results.albums = albums;
         }
-        
+
         res.json(results);
     } catch (error) {
         console.error('Enhanced API Error in universal search:', error.message);
@@ -2207,7 +2094,7 @@ app.get('/api/music/genre/:id', async (req, res) => {
             includeAlbums: req.query.includeAlbums === 'true',
             forceRefresh: req.query.forceRefresh === 'true'
         };
-        
+
         // Mock genre data for now - would be implemented with actual genre search
         const genreInfo = {
             id: genreId,
@@ -2221,7 +2108,7 @@ app.get('/api/music/genre/:id', async (req, res) => {
             sources: [{ name: 'mock', weight: 0.5 }],
             quality_score: 0.7
         };
-        
+
         res.json(genreInfo);
     } catch (error) {
         console.error('Enhanced API Error in genre info:', error.message);
@@ -2237,7 +2124,7 @@ app.get('/api/music/label/:id', async (req, res) => {
             includeArtists: req.query.includeArtists === 'true',
             forceRefresh: req.query.forceRefresh === 'true'
         };
-        
+
         // Mock label data for now - would be implemented with actual label search
         const labelInfo = {
             id: labelId,
@@ -2251,7 +2138,7 @@ app.get('/api/music/label/:id', async (req, res) => {
             sources: [{ name: 'mock', weight: 0.5 }],
             quality_score: 0.7
         };
-        
+
         res.json(labelInfo);
     } catch (error) {
         console.error('Enhanced API Error in label info:', error.message);
@@ -2263,18 +2150,18 @@ app.get('/api/music/autocomplete', async (req, res) => {
     try {
         const query = req.query.q;
         const type = req.query.type || 'all';
-        
+
         if (!query) {
             return res.status(400).json({ error: 'Query parameter "q" is required' });
         }
-        
+
         const options = {
             limit: 5, // Fewer results for autocomplete
             sources: req.query.sources ? req.query.sources.split(',') : undefined
         };
-        
+
         let suggestions = [];
-        
+
         if (type === 'all' || type === 'artist') {
             const artists = await musicInfoManager.searchArtists(query, options);
             suggestions.push(...artists.map(a => ({
@@ -2285,7 +2172,7 @@ app.get('/api/music/autocomplete', async (req, res) => {
                 source: a.source
             })));
         }
-        
+
         if (type === 'all' || type === 'album') {
             const albums = await musicInfoManager.searchAlbums(query, options);
             suggestions.push(...albums.map(a => ({
@@ -2296,14 +2183,14 @@ app.get('/api/music/autocomplete', async (req, res) => {
                 source: a.source
             })));
         }
-        
+
         // Sort by relevance and limit
         suggestions.sort((a, b) => {
             const aRelevance = a.name.toLowerCase().startsWith(query.toLowerCase()) ? 1 : 0;
             const bRelevance = b.name.toLowerCase().startsWith(query.toLowerCase()) ? 1 : 0;
             return bRelevance - aRelevance;
         });
-        
+
         res.json({ suggestions: suggestions.slice(0, 8) });
     } catch (error) {
         console.error('Enhanced API Error in autocomplete:', error.message);
@@ -2327,7 +2214,7 @@ app.get('/api/music/genres', async (req, res) => {
             { id: 'country', name: 'Country', count: 340 },
             { id: 'reggae', name: 'Reggae', count: 280 }
         ];
-        
+
         res.json({ genres });
     } catch (error) {
         console.error('Enhanced API Error in genres list:', error.message);
@@ -2351,7 +2238,7 @@ app.get('/api/music/labels', async (req, res) => {
             { id: 'virgin', name: 'Virgin Records', count: 540 },
             { id: 'island', name: 'Island Records', count: 480 }
         ];
-        
+
         res.json({ labels });
     } catch (error) {
         console.error('Enhanced API Error in labels list:', error.message);
@@ -2371,7 +2258,7 @@ app.get('/api/music/artist/discography', async (req, res) => {
 
         // Get artist discography from multiple sources
         const discographyData = await musicInfoManager.getArtistDiscography(artistName);
-        
+
         // Transform the data for the frontend
         const albums = discographyData.albums?.map(album => ({
             id: album.id || album.mbid || `${artistName}-${album.title}`.replace(/\s+/g, '-').toLowerCase(),
@@ -2384,7 +2271,7 @@ app.get('/api/music/artist/discography', async (req, res) => {
             genres: (album.genres || []).map(g => typeof g === 'string' ? g : (g.name || g))
         })) || [];
 
-        res.json({ 
+        res.json({
             albums,
             total: albums.length,
             source: discographyData.source || 'multiple'
@@ -2407,7 +2294,7 @@ app.get('/api/music/artist/similar', async (req, res) => {
 
         // Get similar artists from multiple sources
         const similarData = await musicInfoManager.getSimilarArtists(artistName);
-        
+
         // Transform the data for the frontend
         const artists = similarData.artists?.map(artist => ({
             id: artist.id || artist.mbid || artist.name.replace(/\s+/g, '-').toLowerCase(),
@@ -2420,7 +2307,7 @@ app.get('/api/music/artist/similar', async (req, res) => {
             playcount: artist.playcount
         })) || [];
 
-        res.json({ 
+        res.json({
             artists,
             total: artists.length,
             source: similarData.source || 'multiple'
@@ -2446,7 +2333,7 @@ app.get('/api/music/performance', async (req, res) => {
 app.post('/api/music/corrections', async (req, res) => {
     try {
         const { entityType, entityId, field, currentValue, suggestedValue, reason, userEmail } = req.body;
-        
+
         if (!entityType || !entityId || !field || !suggestedValue) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
@@ -2467,7 +2354,7 @@ app.post('/api/music/corrections', async (req, res) => {
 
         // Store correction in database (simplified - would use proper table)
         await musicInfoManager.submitCorrection(correction);
-        
+
         res.json({ success: true, correctionId: correction.id });
     } catch (error) {
         console.error('Enhanced API Error in corrections submission:', error.message);
@@ -2585,21 +2472,19 @@ app.get('/api/media/lyrics', async (req, res) => {
     try {
         // Use enhanced MusicInfoManager for lyrics with Qobuz priority
         const lyricsResult = await musicInfoManager.getLyrics(track, artist, album);
-        
+
         if (lyricsResult && lyricsResult.lyrics) {
             // Convert to expected format
             const result = {
                 plain: lyricsResult.lyrics,
                 synced: lyricsResult.synchronized ? lyricsResult.lyrics : null,
-                instrumental: false,
+                instrumental: lyricsResult.instrumental || false,
                 source: lyricsResult.source,
                 weight: lyricsResult.weight
             };
             res.json(result);
         } else {
-            // Fallback to LrcLib if no Qobuz lyrics
-            const lyrics = await getLyricsFromLrcLib(track, artist);
-            res.json(lyrics || { error: 'Lyrics not found' });
+            res.json({ error: 'Lyrics not found' });
         }
     } catch (e) {
         console.error('Enhanced API Error in lyrics:', e.message);
@@ -2705,6 +2590,34 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
 // Specialized WebSocket for real-time levels
 const levelWss = new WebSocket.Server({ noServer: true });
+
+// --- WebSocket Heartbeat (Keep-Alive) ---
+function heartbeat() {
+    this.isAlive = true;
+}
+
+function setupHeartbeat(wssInstance) {
+    wssInstance.on('connection', (ws) => {
+        ws.isAlive = true;
+        ws.on('pong', heartbeat);
+    });
+}
+
+setupHeartbeat(wss);
+setupHeartbeat(levelWss);
+
+// Check for broken connections every 30s
+const heartbeatInterval = setInterval(() => {
+    [wss, levelWss].forEach(server => {
+        server.clients.forEach((ws) => {
+            if (ws.isAlive === false) return ws.terminate();
+            ws.isAlive = false;
+            ws.ping();
+        });
+    });
+}, 30000);
+
+wss.on('close', () => clearInterval(heartbeatInterval));
 
 server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
@@ -2913,10 +2826,64 @@ function checkHybridGroupMute() {
     // Kept to prevent double-audio if Roon groups Direct zone + BlackHole zone.
 }
 
-// Global broadcast for Roon changes - debounced
+// Global broadcast for Roon changes - ULTRA-FAST response for UX
+// Global broadcast for Roon changes - ULTRA-FAST response for UX
 let roonUpdateTimeout = null;
+let lastBroadcastTime = 0;
+const MIN_BROADCAST_INTERVAL = 50;
+
+// --- STATE TRANSITION BUFFER (Fix for flashing "Not Playing") ---
+let roonStateBufferTimer = null;
+let lastRoonStateWasPlaying = false;
+
 roonController.init((info) => {
+    const isPlaying = info.state === 'playing';
+    const isPaused = info.state === 'paused'; // Allow rapid pause updates
+
+    if (isPlaying) {
+        // Cancel pending stop if we resumed or changed track
+        if (roonStateBufferTimer) {
+            console.log('Server: Roon Stop Buffer CANCELLED (New track started)');
+            clearTimeout(roonStateBufferTimer);
+            roonStateBufferTimer = null;
+        }
+        lastRoonStateWasPlaying = true;
+        processBroadcast(info);
+    } else if (isPaused) {
+        // User paused manually - show immediately
+        // Cancel any existing buffer to ensure state executes
+        if (roonStateBufferTimer) {
+            clearTimeout(roonStateBufferTimer);
+            roonStateBufferTimer = null;
+        }
+        lastRoonStateWasPlaying = false; // Reset so next transition is clean
+        processBroadcast(info);
+    } else {
+        // Stopped/Loading (Transition states)
+        // Only buffer if we were playing (to bridge the gap)
+        if (lastRoonStateWasPlaying && !roonStateBufferTimer) {
+            console.log(`Server: Buffering Roon transition state (${info.state}) for 1.5s...`);
+            roonStateBufferTimer = setTimeout(() => {
+                console.log('Server: Roon Stop Buffer EXPIRED. Broadcasting stop.');
+                roonStateBufferTimer = null;
+                lastRoonStateWasPlaying = false;
+                processBroadcast(info);
+            }, 1500); // Reduced to 1.5s to prevent perceived lag
+        } else if (!lastRoonStateWasPlaying) {
+            // Already stopped/stable, update normally
+            processBroadcast(info);
+        }
+    }
+});
+
+function processBroadcast(info) {
     if (roonUpdateTimeout) clearTimeout(roonUpdateTimeout);
+
+    const now = Date.now();
+    const timeSinceLastBroadcast = now - lastBroadcastTime;
+
+    let waitTime = Math.max(10, MIN_BROADCAST_INTERVAL - timeSinceLastBroadcast);
+
     roonUpdateTimeout = setTimeout(() => {
         checkHybridGroupMute();
 
@@ -2929,12 +2896,22 @@ roonController.init((info) => {
                 if (!info.style) info.style = cached.style;
                 if (!info.artworkUrl && cached.artwork) info.artworkUrl = cached.artwork;
             }
+
+            // LYRICS AUTOMATION: Trigger background fetch if track changed
+            if (info.track && info.artist) {
+                setTimeout(() => {
+                    musicInfoManager.getLyrics(info.track, info.artist, info.album).catch(err => {
+                        console.warn(`Server: Background lyrics fetch failed for "${info.track}":`, err.message);
+                    });
+                }, 200);
+            }
         }
 
         broadcast('metadata_update', { source: 'roon', info });
+        lastBroadcastTime = Date.now();
         roonUpdateTimeout = null;
-    }, 100);
-});
+    }, waitTime);
+}
 
 // Proactive Sample Rate Handling
 roonController.onSampleRateChange = async (newRate, zone) => {

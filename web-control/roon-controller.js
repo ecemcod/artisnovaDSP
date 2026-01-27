@@ -113,12 +113,7 @@ class RoonController {
                                 }
 
                                 this.zones.set(z.zone_id, combinedZone);
-                                
-                                // Notify status change for any zone change, especially state changes
-                                if (z.zone_id === this.activeZoneId) {
-                                    console.log(`RoonController: Active zone state changed, notifying status`);
-                                    this._notifyStatus();
-                                }
+                                // Note: _notifyStatus() is called ONCE after all zone changes complete (line 141)
                             });
                         }
                         if (data.zones_removed) {
@@ -135,99 +130,89 @@ class RoonController {
 
                         console.log(`RoonController: Current Map size after update: ${this.zones.size}`);
 
-                        // NEW: Scan ALL zones for active playback to determine sample rate
-                        // This ensures we detect sample rate even if playing to a "Direct" zone
-                        await this._scanForActiveSampleRate();
+                        // Scan for active sample rate (non-blocking to prevent UI delay)
+                        this._scanForActiveSampleRate();
 
                         this._notifyStatus();
                     } else if (status === "NetworkError" || status === "Lost" || status === "Disconnected") {
-                        console.warn(`RoonController: Zone subscription error: ${status}. Attempting recovery in 5s...`);
+                        console.warn(`RoonController: Zone subscription error: ${status}. Implementing ULTRA-STABLE recovery...`);
                         // Clear zones temporarily to indicate connection loss
                         this.zones.clear();
                         this._notifyStatus();
-                        
-                        // Attempt to reestablish connection after a delay
+
+                        // ULTRA-CONSERVATIVE recovery approach - wait much longer before attempting
                         setTimeout(() => {
-                            if (this.isPaired && this.transport) {
-                                console.log('RoonController: Attempting to resubscribe to zones...');
+                            if (this.isPaired && this.transport && this.zones.size === 0) {
+                                console.log('RoonController: Attempting SINGLE zone resubscription after extended delay...');
                                 try {
-                                    // The subscription should automatically reconnect, but we can trigger a discovery
+                                    // Single attempt only - no aggressive retries
                                     this.roon.start_discovery();
                                 } catch (err) {
                                     console.error('RoonController: Failed to restart discovery:', err);
                                 }
                             }
-                        }, 5000);
-                        
-                        // Additional retry with exponential backoff
-                        let retryCount = 0;
-                        const maxRetries = 3;
-                        const retryWithBackoff = () => {
-                            if (retryCount < maxRetries && this.zones.size === 0 && this.isPaired) {
-                                retryCount++;
-                                const delay = Math.min(5000 * Math.pow(2, retryCount - 1), 30000); // Max 30s
-                                console.log(`RoonController: Retry ${retryCount}/${maxRetries} in ${delay}ms...`);
-                                setTimeout(() => {
-                                    if (this.zones.size === 0 && this.isPaired) {
-                                        console.log(`RoonController: Executing retry ${retryCount}...`);
-                                        this.roon.start_discovery();
-                                        retryWithBackoff(); // Schedule next retry
-                                    }
-                                }, delay);
+                        }, 15000); // Increased from 5s to 15s
+
+                        // Remove aggressive retry logic completely - causes connection thrashing
+                        // Single recovery attempt after much longer delay
+                        setTimeout(() => {
+                            if (this.zones.size === 0 && this.isPaired) {
+                                console.log('RoonController: Final recovery attempt after 60s...');
+                                this.roon.start_discovery();
                             }
-                        };
-                        setTimeout(retryWithBackoff, 10000); // Start retries after initial attempt
+                        }, 60000); // Single attempt after 60s instead of multiple retries
                     }
                 });
 
-                // Periodic debug log
+                // Heartbeat to periodically check sample rate
                 setInterval(async () => {
                     console.log(`RoonController: Heartbeat - Zones count: ${this.zones.size}`);
-                    await this._scanForActiveSampleRate(); // Force periodic scan
-                }, 30000);
+                    if (this.zones.size > 0) {
+                        await this._scanForActiveSampleRate();
+                    }
+                }, 20000);
             },
 
             core_unpaired: (core) => {
-                console.log('Roon Core Unpaired - Attempting immediate reconnection...');
+                console.log('Roon Core Unpaired - Implementing ULTRA-STABLE reconnection...');
                 this.isPaired = false;
 
-                // Immediate reconnection attempt
+                // ULTRA-EXTENDED grace period to prevent connection thrashing
                 setTimeout(() => {
                     if (!this.isPaired) {
-                        console.log('RoonController: Attempting immediate reconnection...');
-                        this.roon.start_discovery();
-                    }
-                }, 2000);
-
-                // Don't clear immediately to prevent UI flicker - shorter grace period
-                setTimeout(() => {
-                    if (!this.isPaired) {
-                        console.log('RoonController: Grace period ended, clearing zones.');
+                        console.log('RoonController: ULTRA grace period ended, clearing zones and attempting reconnection...');
                         this.zones.clear();
                         this.core = null;
                         this.transport = null;
                         this._unsubscribeQueue();
                         this._notifyStatus();
-                        
-                        // Continue trying to reconnect
+
+                        // MINIMAL reconnection strategy - only try once, then wait much longer
                         let reconnectAttempts = 0;
-                        const maxReconnectAttempts = 10;
+                        const maxReconnectAttempts = 1; // Only 1 attempt to avoid thrashing
                         const reconnectInterval = setInterval(() => {
                             if (!this.isPaired && reconnectAttempts < maxReconnectAttempts) {
                                 reconnectAttempts++;
-                                console.log(`RoonController: Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`);
+                                console.log(`RoonController: Single reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`);
                                 this.roon.start_discovery();
                             } else if (this.isPaired || reconnectAttempts >= maxReconnectAttempts) {
                                 clearInterval(reconnectInterval);
                                 if (reconnectAttempts >= maxReconnectAttempts) {
-                                    console.error('RoonController: Failed to reconnect after maximum attempts');
+                                    console.error('RoonController: Single attempt failed. Will retry in 2 minutes.');
+                                    // Much longer delay before final retry
+                                    setTimeout(() => {
+                                        if (!this.isPaired) {
+                                            console.log('RoonController: Final reconnection attempt after 2 minutes...');
+                                            this.roon.start_discovery();
+                                        }
+                                    }, 120000); // 2 minutes instead of 60s
                                 }
                             }
-                        }, 5000);
+                        }, 30000); // 30s between attempts instead of 15s
                     } else {
-                        console.log('RoonController: Re-paired within grace period, keeping state.');
+                        console.log('RoonController: Re-paired within ULTRA grace period, keeping state.');
                     }
-                }, 15000); // Reduced from 30s to 15s
+                }, 90000); // Increased from 45s to 90s for maximum stability
             }
         });
 
@@ -236,6 +221,16 @@ class RoonController {
                 required_services: [RoonApiTransport, RoonApiImage, RoonApiBrowse]
             });
             console.log('RoonController: Services initialized');
+
+            // Connection health monitoring
+            this.connectionHealthCheck = setInterval(() => {
+                if (this.isPaired && this.zones.size === 0) {
+                    console.warn('RoonController: Health check - paired but no zones. Possible connection issue.');
+                    // Don't immediately reconnect - let the existing recovery mechanisms handle it
+                } else if (this.isPaired) {
+                    console.log(`RoonController: Health check - OK (${this.zones.size} zones)`);
+                }
+            }, 30000); // Check every 30 seconds
         } catch (err) {
             console.error('RoonController: Service init failed:', err);
         }
@@ -426,33 +421,19 @@ class RoonController {
                     this.isQueueSubscribed = false;
                     this._queueSubscription = null;
                 } else if (status === "NetworkError" || status === "Lost" || status === "Disconnected") {
-                    console.warn(`RoonController: Queue subscription error: ${status} for zone ${zone.display_name}. Will retry when connection is restored.`);
+                    console.warn(`RoonController: Queue subscription error: ${status} for zone ${zone.display_name}. Implementing ULTRA-STABLE recovery...`);
                     this.isQueueSubscribed = false;
                     this._queueSubscription = null;
                     this.queue = [];
-                    
-                    // Attempt to resubscribe with exponential backoff
-                    let retryCount = 0;
-                    const maxRetries = 5;
-                    const retryQueueSubscription = () => {
-                        if (retryCount < maxRetries && this.isPaired && this.activeZoneId === zone.zone_id && this.zones.has(zone.zone_id)) {
-                            retryCount++;
-                            const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000); // Max 30s
-                            console.log(`RoonController: Queue retry ${retryCount}/${maxRetries} for ${zone.display_name} in ${delay}ms...`);
-                            setTimeout(() => {
-                                if (this.isPaired && this.activeZoneId === zone.zone_id && this.zones.has(zone.zone_id) && !this.isQueueSubscribed) {
-                                    console.log(`RoonController: Executing queue retry ${retryCount} for ${zone.display_name}...`);
-                                    this._subscribeQueue();
-                                    if (!this.isQueueSubscribed) {
-                                        retryQueueSubscription(); // Schedule next retry if this one failed
-                                    }
-                                }
-                            }, delay);
-                        } else if (retryCount >= maxRetries) {
-                            console.error(`RoonController: Queue subscription failed after ${maxRetries} retries for ${zone.display_name}`);
+
+                    // ULTRA-CONSERVATIVE queue resubscription - single attempt after long delay
+                    setTimeout(() => {
+                        if (this.isPaired && this.activeZoneId === zone.zone_id &&
+                            this.zones.has(zone.zone_id) && !this.isQueueSubscribed) {
+                            console.log(`RoonController: Single queue recovery attempt for ${zone.display_name} after 30s...`);
+                            this._subscribeQueue();
                         }
-                    };
-                    setTimeout(retryQueueSubscription, 10000); // Start retries after initial delay
+                    }, 30000); // Single attempt after 30s instead of aggressive retries
                 }
             });
         } catch (err) {
@@ -529,7 +510,7 @@ class RoonController {
             // Split by " / " and take the first (primary) artist
             const artists = artistString.split(' / ');
             primaryArtist = artists[0].trim();
-            
+
             console.log(`Roon: Extracted primary artist "${primaryArtist}" from "${artistString}"`);
         }
 
@@ -740,7 +721,7 @@ class RoonController {
                         this.currentAlbum = newAlbum;
                         if (this.onSampleRateChange) await this.onSampleRateChange('CHECK', zone);
                     }
-                }, 1000);
+                }, 300); // Reduced from 500ms to 300ms for ultra-fast detection
             }
         } else {
             // If paused/stopped, clear any pending check

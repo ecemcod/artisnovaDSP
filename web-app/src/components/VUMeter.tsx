@@ -9,10 +9,11 @@ interface Props {
     onClick?: () => void;
     onLevelsChange?: (left: number, right: number) => void;
     className?: string;
-    skin?: 'modern' | 'classic' | 'dark' | 'minimal' | 'retro';
+    skin?: 'modern' | 'classic' | 'dark' | 'minimal' | 'retro' | 'waves';
+    customColor?: string | null;
 }
 
-const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', onLevelsChange, className = "", skin = 'modern' }) => {
+const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', onLevelsChange, className = "", skin = 'modern', customColor }) => {
     const isMobile = typeof window !== 'undefined' ? window.innerWidth < 768 : false;
     const [levels, setLevels] = useState({ left: -60, right: -60 });
     const [status, setStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
@@ -58,10 +59,14 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
         cleanup();
         setStatus('connecting');
 
+        // In development (port 3000), Vite's WS proxy doesn't work reliably
+        // Connect directly to the backend on port 3001
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const currentUrl = `${protocol}//${window.location.host}/ws/levels`;
+        const isDev = window.location.port === '3000';
+        const host = isDev ? `${window.location.hostname}:3001` : window.location.host;
+        const currentUrl = `${protocol}//${host}/ws/levels`;
 
-        console.log(`VUMeter: Connecting to unified proxy: ${currentUrl}`);
+        console.log(`VUMeter: Connecting to ${isDev ? 'backend' : 'proxy'}: ${currentUrl}`);
 
         try {
             const ws = new WebSocket(currentUrl);
@@ -115,7 +120,7 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                 wsRef.current = null;
                 setStatus('disconnected');
                 if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-                reconnectTimeoutRef.current = setTimeout(() => connect(isCleaningUp), 2000);
+                reconnectTimeoutRef.current = setTimeout(() => connect(isCleaningUp), 1000); // Reduced from 2000ms to 1000ms
             };
 
             ws.onerror = (err) => {
@@ -128,7 +133,7 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
             console.error('VUMeter: Connection error', e);
             setStatus('disconnected');
             if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-            reconnectTimeoutRef.current = setTimeout(() => connect(isCleaningUp), 3000);
+            reconnectTimeoutRef.current = setTimeout(() => connect(isCleaningUp), 1500); // Reduced from 3000ms to 1500ms
         }
     };
 
@@ -181,7 +186,7 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
     const statusBadge = getStatusBadge();
 
     return (
-        <div className={`w-full h-full flex flex-col relative overflow-hidden group vumeter-main-wrapper ${className}`}>
+        <div className={`w-full h-full flex flex-col relative overflow-visible group vumeter-main-wrapper ${className}`}>
             {/* Header / Brand Plate */}
             <div className={`flex justify-between items-center z-10 shrink-0 ${isMobile ? 'mb-1' : 'mb-1 md:mb-10'}`}>
                 <div className="flex flex-col">
@@ -209,13 +214,13 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
                 </div>
             </div>
 
-            {/* Meters Container */}
-            <div className="flex-1 flex flex-row items-center justify-center gap-2 md:gap-8 min-h-0 overflow-hidden">
-                <div className="flex-1 h-full min-h-0">
-                    <AnalogVUMeter level={levels.left} channel="L" skin={skin} />
+            {/* Meters Container - Added padding-bottom to prevent shadow clipping */}
+            <div className="flex-1 flex flex-row items-center justify-center gap-2 md:gap-8 min-h-0 overflow-visible pb-4">
+                <div className="flex-1 min-w-0">
+                    <AnalogVUMeter level={levels.left} channel="L" skin={skin} customColor={customColor} />
                 </div>
-                <div className="flex-1 h-full min-h-0">
-                    <AnalogVUMeter level={levels.right} channel="R" skin={skin} />
+                <div className="flex-1 min-w-0">
+                    <AnalogVUMeter level={levels.right} channel="R" skin={skin} customColor={customColor} />
                 </div>
             </div>
         </div>

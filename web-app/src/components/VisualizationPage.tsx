@@ -13,11 +13,12 @@ interface Props {
     wsUrl?: string;
     nowPlaying: any;
     resolvedArtworkUrl?: string | null;
+    dynamicColor?: string | null;
 }
 
 
 
-const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, resolvedArtworkUrl }) => {
+const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, resolvedArtworkUrl, dynamicColor }) => {
     const [mode, setMode] = React.useState<'vu' | 'rta'>(() => {
         return (AppStorage.getItem('artisNovaDSP_viz_mode') as 'vu' | 'rta') || 'vu';
     });
@@ -108,7 +109,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
 
     return (
         <div
-            className="relative h-screen w-full bg-black flex flex-col items-center overflow-hidden"
+            className="relative h-[100dvh] w-full bg-black flex flex-col items-center overflow-hidden"
             style={{ paddingTop: '60px', paddingBottom: 'env(safe-area-inset-bottom)' }}
         >
             {/* Background Artwork Blur */}
@@ -117,7 +118,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                     <img
                         src={resolvedArtworkUrl}
                         alt=""
-                        className="w-full h-full object-cover filter blur-[120px] scale-125 opacity-20 saturate-[1.2]"
+                        className="w-full h-full object-cover filter blur-[60px] scale-110 opacity-20 saturate-100 will-change-transform"
                     />
                 )}
                 <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black" />
@@ -157,6 +158,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                                 <option value="dark" className="bg-[#121212]">Neon Night</option>
                                 <option value="minimal" className="bg-[#121212]">Clean Minimal</option>
                                 <option value="retro" className="bg-[#121212]">Retro Paper</option>
+                                <option value="waves" className="bg-[#121212]">Vintage Waves</option>
                             </select>
                             <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none opacity-40">
                                 <Palette size={10} className="" />
@@ -174,6 +176,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                                 onChange={(e) => setRtaSkin(e.target.value as RTASkin)}
                                 className="w-full appearance-none bg-white/5 hover:bg-white/10 backdrop-blur-xl text-white font-bold border border-white/10 hover:border-accent-primary/30 rounded-lg px-6 py-2.5 text-[9px] uppercase tracking-[0.25em] outline-none cursor-pointer transition-all text-center shadow-lg"
                             >
+                                <option value="dynamic" className="bg-[#121212]">Dynamic (Album Art)</option>
                                 <option value="blue" className="bg-[#121212]">Indigo Blue</option>
                                 <option value="red" className="bg-[#121212]">Crimson Red</option>
                                 <option value="traffic" className="bg-[#121212]">Traffic Light</option>
@@ -211,12 +214,12 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
             </div>
 
             {/* Main Content Area - Visualizer */}
-            <div className="flex-1 w-full flex items-center justify-center p-4 md:p-6 relative z-20 min-h-0 bg-black/40 overflow-hidden">
-                <div className="w-full h-full max-w-7xl max-h-[55vh] flex items-center justify-center overflow-hidden">
+            <div className="flex-1 w-full flex items-center justify-center p-4 md:p-6 relative z-20 min-h-0 bg-black/40 overflow-visible">
+                <div className="w-full h-full max-w-7xl max-h-[55vh] flex items-center justify-center overflow-visible">
                     {mode === 'vu' ? (
-                        <VUMeter isRunning={isRunning} wsUrl={wsUrl} skin={skin} className="w-full h-full" />
+                        <VUMeter isRunning={isRunning} wsUrl={wsUrl} skin={skin} customColor={dynamicColor} className="w-full h-full" />
                     ) : (
-                        <RTA isRunning={isRunning} wsUrl={wsUrl} skin={rtaSkin} isAsymmetric={isAsymmetric} isFrozen={isFrozen} />
+                        <RTA isRunning={isRunning} wsUrl={wsUrl} skin={rtaSkin} isAsymmetric={isAsymmetric} isFrozen={isFrozen} customColor={dynamicColor} />
                     )}
                 </div>
             </div>

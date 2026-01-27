@@ -16,10 +16,10 @@ class MusicInfoManager {
         this.genreRepo = new GenreRepository(db);
         this.dataSourceRepo = new DataSourceRepository(db);
         this.cacheRepo = new CacheRepository(db);
-        
+
         // Data source connectors (to be implemented in Phase 2)
         this.connectors = new Map();
-        
+
         // Quality scoring weights - Qobuz as absolute priority for everything
         this.sourceWeights = {
             'qobuz': 1.0,       // Maximum priority for Qobuz (all data types)
@@ -43,7 +43,7 @@ class MusicInfoManager {
     // Get artist information with data aggregation
     async getArtistInfo(query, options = {}) {
         const cacheKey = `artist:${query}:${JSON.stringify(options)}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -53,11 +53,11 @@ class MusicInfoManager {
             }
 
             console.log(`MusicInfoManager: Fetching artist info for "${query}"`);
-            
+
             // Try local database first
             let localArtists = await this.artistRepo.search(query, 5);
             let bestMatch = this.findBestMatch(localArtists, query);
-            
+
             if (bestMatch && !options.forceRefresh) {
                 const result = await this.enhanceArtistData(bestMatch);
                 await this.cacheRepo.set(cacheKey, result, 3600); // Cache for 1 hour
@@ -66,12 +66,12 @@ class MusicInfoManager {
 
             // Fetch from external sources
             const aggregatedData = await this.aggregateArtistData(query);
-            
+
             if (aggregatedData) {
                 // Store in database
                 const artist = await this.storeArtistData(aggregatedData);
                 const result = await this.enhanceArtistData(artist);
-                
+
                 // Cache the result
                 await this.cacheRepo.set(cacheKey, result, 3600);
                 return result;
@@ -87,14 +87,14 @@ class MusicInfoManager {
             return null;
         } catch (error) {
             console.error(`MusicInfoManager: Error getting artist info for "${query}":`, error);
-            
+
             // Try to return cached data even if stale
             const staleCache = await this.cacheRepo.get(cacheKey);
             if (staleCache) {
                 console.log(`MusicInfoManager: Returning stale cache for "${query}"`);
                 return { ...staleCache.data, isStale: true };
             }
-            
+
             throw error;
         }
     }
@@ -109,7 +109,7 @@ class MusicInfoManager {
                 const imageData = await this.connectors.musicbrainz.getArtistImage(artist.mbid);
                 if (imageData) {
                     artist.image_url = imageData.thumbnails.small || imageData.url;
-                    
+
                     // Update the database with the image
                     await this.artistRepo.update(artist.id, { image_url: artist.image_url });
                 }
@@ -118,7 +118,7 @@ class MusicInfoManager {
             // Get related albums
             if (!artist.albums) {
                 artist.albums = await this.albumRepo.getByArtistId(artist.id);
-                
+
                 // Enhance album data with artwork
                 for (let album of artist.albums) {
                     if (album.mbid && !album.artwork_url) {
@@ -154,7 +154,7 @@ class MusicInfoManager {
     // Get album information from multiple sources
     async getAlbumInfo(query, artistName = null, options = {}) {
         const cacheKey = `album:${query}:${artistName || ''}:${JSON.stringify(options)}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -164,11 +164,11 @@ class MusicInfoManager {
             }
 
             console.log(`MusicInfoManager: Fetching album info for "${query}" by "${artistName || 'unknown'}"`);
-            
+
             // Try local database first
             let localAlbums = await this.albumRepo.search(query, 5);
             let bestMatch = this.findBestMatch(localAlbums, query);
-            
+
             if (bestMatch && !options.forceRefresh) {
                 const result = await this.enhanceAlbumData(bestMatch);
                 await this.cacheRepo.set(cacheKey, result, 3600);
@@ -177,12 +177,12 @@ class MusicInfoManager {
 
             // Fetch from external sources
             const aggregatedData = await this.aggregateAlbumData(query, artistName);
-            
+
             if (aggregatedData) {
                 // Store in database
                 const album = await this.storeAlbumData(aggregatedData);
                 const result = await this.enhanceAlbumData(album);
-                
+
                 // Cache the result
                 await this.cacheRepo.set(cacheKey, result, 3600);
                 return result;
@@ -198,14 +198,14 @@ class MusicInfoManager {
             return null;
         } catch (error) {
             console.error(`MusicInfoManager: Error getting album info for "${query}":`, error);
-            
+
             // Try to return cached data even if stale
             const staleCache = await this.cacheRepo.get(cacheKey);
             if (staleCache) {
                 console.log(`MusicInfoManager: Returning stale cache for "${query}"`);
                 return { ...staleCache.data, isStale: true };
             }
-            
+
             throw error;
         }
     }
@@ -217,7 +217,7 @@ class MusicInfoManager {
 
         // Define priority order with Qobuz first
         const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
-        
+
         // Get ordered connectors based on priority
         const orderedConnectors = [];
         for (const sourceName of priorityOrder) {
@@ -225,7 +225,7 @@ class MusicInfoManager {
                 orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
             }
         }
-        
+
         // Add any remaining connectors not in priority list
         for (const [sourceName, connector] of this.connectors) {
             if (!priorityOrder.includes(sourceName)) {
@@ -240,7 +240,7 @@ class MusicInfoManager {
                 const data = await connector.searchArtist(query);
                 if (data && data.length > 0) {
                     let artistData = data[0]; // Take best match
-                    
+
                     // If this is Qobuz, get full artist details including biography
                     if (sourceName === 'qobuz' && connector.getArtist && artistData.qobuz_id) {
                         console.log(`MusicInfoManager: Getting full Qobuz artist details for ID "${artistData.qobuz_id}"`);
@@ -254,13 +254,13 @@ class MusicInfoManager {
                             console.warn(`MusicInfoManager: Failed to get full Qobuz artist details:`, error.message);
                         }
                     }
-                    
+
                     results.push({
                         source: sourceName,
                         data: artistData,
                         weight: this.sourceWeights[sourceName] || 0.5
                     });
-                    
+
                     // If Qobuz returns data, prioritize it heavily
                     if (sourceName === 'qobuz' && data.length > 0) {
                         console.log(`MusicInfoManager: Qobuz data found for "${query}", prioritizing`);
@@ -287,7 +287,7 @@ class MusicInfoManager {
 
         // Define priority order with Qobuz first
         const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
-        
+
         // Get ordered connectors based on priority
         const orderedConnectors = [];
         for (const sourceName of priorityOrder) {
@@ -295,7 +295,7 @@ class MusicInfoManager {
                 orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
             }
         }
-        
+
         // Add any remaining connectors not in priority list
         for (const [sourceName, connector] of this.connectors) {
             if (!priorityOrder.includes(sourceName)) {
@@ -307,13 +307,13 @@ class MusicInfoManager {
         for (const [sourceName, connector] of orderedConnectors) {
             try {
                 console.log(`MusicInfoManager: Querying ${sourceName} for album "${query}" by "${artistName || 'unknown'}"`);
-                const data = await connector.searchAlbum ? 
+                const data = await connector.searchAlbum ?
                     await connector.searchAlbum(query, artistName) :
                     await connector.searchRelease(query, artistName);
-                
+
                 if (data && data.length > 0) {
                     let albumData = data[0]; // Take best match
-                    
+
                     // If this is Qobuz, get full album details including description and credits
                     if (sourceName === 'qobuz' && connector.getAlbum && albumData.qobuz_id) {
                         console.log(`MusicInfoManager: Getting full Qobuz album details for ID "${albumData.qobuz_id}"`);
@@ -327,13 +327,13 @@ class MusicInfoManager {
                             console.warn(`MusicInfoManager: Failed to get full Qobuz album details:`, error.message);
                         }
                     }
-                    
+
                     results.push({
                         source: sourceName,
                         data: albumData,
                         weight: this.sourceWeights[sourceName] || 0.5
                     });
-                    
+
                     // If Qobuz returns data, prioritize it heavily
                     if (sourceName === 'qobuz' && data.length > 0) {
                         console.log(`MusicInfoManager: Qobuz album data found for "${query}", prioritizing`);
@@ -376,7 +376,7 @@ class MusicInfoManager {
 
         for (const result of results) {
             const { source, data, weight } = result;
-            
+
             // Track sources
             merged.sources.push({
                 name: source,
@@ -393,7 +393,7 @@ class MusicInfoManager {
             if (data.end_date && !merged.end_date) merged.end_date = data.end_date;
             if (data.type && !merged.type) merged.type = data.type;
             if (data.image_url && !merged.image_url) merged.image_url = data.image_url;
-            
+
             // Merge genres
             if (data.genres && Array.isArray(data.genres)) {
                 merged.genres = [...merged.genres, ...data.genres];
@@ -404,7 +404,7 @@ class MusicInfoManager {
 
         // Calculate overall quality score
         merged.quality_score = results.length > 0 && !isNaN(totalWeight) ? totalWeight / results.length : 0;
-        
+
         // Remove duplicate genres
         merged.genres = [...new Set(merged.genres)];
 
@@ -437,7 +437,7 @@ class MusicInfoManager {
 
         for (const result of results) {
             const { source, data, weight } = result;
-            
+
             // Track sources
             merged.sources.push({
                 name: source,
@@ -455,7 +455,7 @@ class MusicInfoManager {
             if (data.catalog_number && !merged.catalog_number) merged.catalog_number = data.catalog_number;
             if (data.artwork_url && !merged.artwork_url) merged.artwork_url = data.artwork_url;
             if (data.track_count && !merged.track_count) merged.track_count = data.track_count;
-            
+
             // Merge tracks and credits
             if (data.tracks && Array.isArray(data.tracks)) {
                 merged.tracks = [...merged.tracks, ...data.tracks];
@@ -472,7 +472,7 @@ class MusicInfoManager {
 
         // Calculate overall quality score
         merged.quality_score = results.length > 0 && !isNaN(totalWeight) ? totalWeight / results.length : 0;
-        
+
         // Remove duplicates
         merged.genres = [...new Set(merged.genres)];
 
@@ -487,7 +487,7 @@ class MusicInfoManager {
             if (data.mbid) {
                 artist = await this.artistRepo.findByMbid(data.mbid);
             }
-            
+
             if (!artist && data.name) {
                 const existing = await this.artistRepo.findByName(data.name);
                 artist = existing.length > 0 ? existing[0] : null;
@@ -565,7 +565,7 @@ class MusicInfoManager {
             if (data.mbid) {
                 album = await this.albumRepo.findByMbid(data.mbid);
             }
-            
+
             if (!album && data.title) {
                 const existing = await this.albumRepo.findByTitle(data.title);
                 album = existing.length > 0 ? existing[0] : null;
@@ -622,26 +622,26 @@ class MusicInfoManager {
     async enhanceArtistData(artist) {
         try {
             // Handle case where artist might not be an Artist instance
-            const enhanced = artist && typeof artist.toJSON === 'function' ? 
-                { ...artist.toJSON() } : 
+            const enhanced = artist && typeof artist.toJSON === 'function' ?
+                { ...artist.toJSON() } :
                 { ...artist };
-            
+
             if (artist && artist.id) {
                 // Get genres
                 enhanced.genres = await this.artistRepo.getGenres(artist.id);
-                
+
                 // Get albums
                 enhanced.albums = await this.artistRepo.getAlbums(artist.id);
-                
+
                 // Get data sources
                 enhanced.sources = await this.dataSourceRepo.findByEntity('artist', artist.id);
             }
-            
+
             return enhanced;
         } catch (error) {
             console.error('MusicInfoManager: Error enhancing artist data:', error);
-            return artist && typeof artist.toJSON === 'function' ? 
-                artist.toJSON() : 
+            return artist && typeof artist.toJSON === 'function' ?
+                artist.toJSON() :
                 artist || {};
         }
     }
@@ -650,35 +650,35 @@ class MusicInfoManager {
     async enhanceAlbumData(album) {
         try {
             // Handle case where album might not be an Album instance
-            const enhanced = album && typeof album.toJSON === 'function' ? 
-                { ...album.toJSON() } : 
+            const enhanced = album && typeof album.toJSON === 'function' ?
+                { ...album.toJSON() } :
                 { ...album };
-            
+
             if (album && album.id) {
                 // Get artist
                 enhanced.artist = await this.albumRepo.getArtist(album.id);
-                
+
                 // Get label
                 enhanced.label = await this.albumRepo.getLabel(album.id);
-                
+
                 // Get tracks
                 enhanced.tracks = await this.albumRepo.getTracks(album.id);
-                
+
                 // Get credits
                 enhanced.credits = await this.albumRepo.getCredits(album.id);
-                
+
                 // Get genres
                 enhanced.genres = await this.albumRepo.getGenres(album.id);
-                
+
                 // Get data sources
                 enhanced.sources = await this.dataSourceRepo.findByEntity('album', album.id);
             }
-            
+
             return enhanced;
         } catch (error) {
             console.error('MusicInfoManager: Error enhancing album data:', error);
-            return album && typeof album.toJSON === 'function' ? 
-                album.toJSON() : 
+            return album && typeof album.toJSON === 'function' ?
+                album.toJSON() :
                 album || {};
         }
     }
@@ -686,9 +686,9 @@ class MusicInfoManager {
     // Find best match from search results
     findBestMatch(results, query) {
         if (!results || results.length === 0) return null;
-        
+
         const queryLower = query.toLowerCase();
-        
+
         // Exact match first
         for (const result of results) {
             const resultName = result.name || result.title || '';
@@ -696,7 +696,7 @@ class MusicInfoManager {
                 return result;
             }
         }
-        
+
         // Starts with match
         for (const result of results) {
             const resultName = result.name || result.title || '';
@@ -704,7 +704,7 @@ class MusicInfoManager {
                 return result;
             }
         }
-        
+
         // Return first result as fallback
         return results[0];
     }
@@ -738,7 +738,7 @@ class MusicInfoManager {
     // Search for artists across all data sources
     async searchArtists(query, options = {}) {
         const cacheKey = `search:artists:${query}:${JSON.stringify(options)}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -759,7 +759,7 @@ class MusicInfoManager {
                 try {
                     console.log(`MusicInfoManager: Searching ${sourceName} for artists matching "${query}"`);
                     const sourceResults = await connector.searchArtist(query, { limit });
-                    
+
                     if (sourceResults && sourceResults.length > 0) {
                         results.push(...sourceResults.map(result => ({
                             ...result,
@@ -795,7 +795,7 @@ class MusicInfoManager {
     // Search for albums across all data sources
     async searchAlbums(query, options = {}) {
         const cacheKey = `search:albums:${query}:${JSON.stringify(options)}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -815,10 +815,10 @@ class MusicInfoManager {
 
                 try {
                     console.log(`MusicInfoManager: Searching ${sourceName} for albums matching "${query}"`);
-                    const sourceResults = await (connector.searchAlbum ? 
+                    const sourceResults = await (connector.searchAlbum ?
                         connector.searchAlbum(query, options.artist, limit) :
                         connector.searchRelease(query, options.artist, limit));
-                    
+
                     if (sourceResults && sourceResults.length > 0) {
                         results.push(...sourceResults.map(result => ({
                             ...result,
@@ -854,7 +854,7 @@ class MusicInfoManager {
     // Get album credits from multiple sources
     async getAlbumCredits(albumId) {
         const cacheKey = `credits:${albumId}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -871,13 +871,13 @@ class MusicInfoManager {
                     if (connector.getAlbumCredits) {
                         console.log(`MusicInfoManager: Fetching credits from ${sourceName}`);
                         const data = await connector.getAlbumCredits(albumId);
-                        
+
                         if (data && data.credits && data.credits.length > 0) {
                             console.log(`MusicInfoManager: Got ${data.credits.length} credits from ${sourceName}`);
-                            
+
                             // Cache the result
                             await this.cacheRepo.set(cacheKey, data, 24 * 60 * 60); // 24 hours
-                            
+
                             return data;
                         }
                     }
@@ -900,7 +900,7 @@ class MusicInfoManager {
     // Get artist discography
     async getArtistDiscography(artistName) {
         const cacheKey = `discography:${artistName}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -910,17 +910,17 @@ class MusicInfoManager {
             }
 
             console.log(`MusicInfoManager: Fetching discography for "${artistName}"`);
-            
+
             // Try to get from local database first
             const localAlbums = await this.albumRepo.findByArtist(artistName);
-            
+
             // Fetch from external sources
             const externalData = await this.fetchDiscographyFromSources(artistName);
-            
+
             // Combine and deduplicate
             const allAlbums = [...localAlbums, ...(externalData.albums || [])];
             const uniqueAlbums = this.deduplicateAlbums(allAlbums);
-            
+
             const result = {
                 albums: uniqueAlbums,
                 source: externalData.source || 'local',
@@ -929,7 +929,7 @@ class MusicInfoManager {
 
             // Cache the result
             await this.cacheRepo.set(cacheKey, result, 7200); // Cache for 2 hours
-            
+
             return result;
         } catch (error) {
             console.error(`MusicInfoManager: Error getting discography for "${artistName}":`, error);
@@ -940,7 +940,7 @@ class MusicInfoManager {
     // Get similar artists
     async getSimilarArtists(artistName) {
         const cacheKey = `similar:${artistName}`;
-        
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -950,10 +950,10 @@ class MusicInfoManager {
             }
 
             console.log(`MusicInfoManager: Fetching similar artists for "${artistName}"`);
-            
+
             // Fetch from external sources
             const externalData = await this.fetchSimilarArtistsFromSources(artistName);
-            
+
             const result = {
                 artists: externalData.artists || [],
                 source: externalData.source || 'multiple',
@@ -962,7 +962,7 @@ class MusicInfoManager {
 
             // Cache the result
             await this.cacheRepo.set(cacheKey, result, 7200); // Cache for 2 hours
-            
+
             return result;
         } catch (error) {
             console.error(`MusicInfoManager: Error getting similar artists for "${artistName}":`, error);
@@ -980,14 +980,14 @@ class MusicInfoManager {
                 if (connector.getArtistDiscography) {
                     console.log(`MusicInfoManager: Fetching discography from ${sourceName}`);
                     const data = await connector.getArtistDiscography(artistName);
-                    
+
                     if (data && data.albums && data.albums.length > 0) {
                         results.push(...data.albums.map(album => ({
                             ...album,
                             source: sourceName,
                             weight: this.sourceWeights[sourceName] || 0.3
                         })));
-                        
+
                         if (!primarySource || this.sourceWeights[sourceName] > this.sourceWeights[primarySource]) {
                             primarySource = sourceName;
                         }
@@ -1014,14 +1014,14 @@ class MusicInfoManager {
                 if (connector.getSimilarArtists) {
                     console.log(`MusicInfoManager: Fetching similar artists from ${sourceName}`);
                     const data = await connector.getSimilarArtists(artistName);
-                    
+
                     if (data && data.artists && data.artists.length > 0) {
                         results.push(...data.artists.map(artist => ({
                             ...artist,
                             source: sourceName,
                             weight: this.sourceWeights[sourceName] || 0.3
                         })));
-                        
+
                         if (!primarySource || this.sourceWeights[sourceName] > this.sourceWeights[primarySource]) {
                             primarySource = sourceName;
                         }
@@ -1034,7 +1034,7 @@ class MusicInfoManager {
 
         // Deduplicate and sort by similarity
         const uniqueArtists = this.deduplicateSimilarArtists(results);
-        
+
         return {
             artists: uniqueArtists.slice(0, 20), // Limit to top 20
             source: primarySource
@@ -1048,7 +1048,7 @@ class MusicInfoManager {
 
         for (const album of albums) {
             const key = `${album.title?.toLowerCase()}-${album.release_date?.substring(0, 4) || 'unknown'}`;
-            
+
             if (!seen.has(key)) {
                 seen.set(key, album);
                 result.push(album);
@@ -1078,7 +1078,7 @@ class MusicInfoManager {
 
         for (const artist of artists) {
             const key = artist.name?.toLowerCase();
-            
+
             if (!seen.has(key)) {
                 seen.set(key, artist);
                 result.push(artist);
@@ -1098,8 +1098,19 @@ class MusicInfoManager {
 
     // Get lyrics with Qobuz priority
     async getLyrics(trackTitle, artistName, albumName = null) {
-        const cacheKey = `lyrics:${trackTitle}:${artistName}:${albumName || ''}`;
-        
+        // Normalize track title to remove suffixes like (Live), (Remastered), etc.
+        const cleanTitle = trackTitle
+            .replace(/\s*\(.*?(?:Live|Remaster|Version|Deluxe|Anniversary|Mix|Edit|Mono|Stereo).*?\)/gi, '')
+            .replace(/\s+-\s+(?:Live|Remaster|Version|Deluxe|Anniversary|Mix|Edit|Mono|Stereo).*/gi, '')
+            .trim();
+
+        if (cleanTitle !== trackTitle) {
+            console.log(`MusicInfoManager: Normalized lyrics search "${trackTitle}" -> "${cleanTitle}"`);
+        }
+
+        const queryTitle = cleanTitle;
+        const cacheKey = `lyrics:${queryTitle}:${artistName}:${albumName || ''}`;
+
         try {
             // Check cache first
             const cached = await this.cacheRepo.get(cacheKey);
@@ -1108,31 +1119,31 @@ class MusicInfoManager {
                 return cached.data;
             }
 
-            console.log(`MusicInfoManager: Fetching lyrics for "${trackTitle}" by "${artistName}"`);
-            
+            console.log(`MusicInfoManager: Fetching lyrics for "${queryTitle}" by "${artistName}"`);
+
             // Priority order: Qobuz first, then others
             const priorityOrder = ['qobuz', 'lrclib', 'lastfm', 'spotify'];
-            
+
             for (const sourceName of priorityOrder) {
                 const connector = this.connectors.get(sourceName);
                 if (!connector) continue;
 
                 try {
                     console.log(`MusicInfoManager: Trying ${sourceName} for lyrics`);
-                    
+
                     let lyrics = null;
-                    
+
                     if (sourceName === 'qobuz') {
                         // First try to find the track to get its ID
-                        const trackResults = await connector.searchTrack(trackTitle, artistName, albumName, 5);
+                        const trackResults = await connector.searchTrack(queryTitle, artistName, albumName, 5);
                         if (trackResults && trackResults.length > 0) {
                             const track = trackResults[0];
                             lyrics = await connector.getLyrics(track.qobuz_id);
                         }
                     } else if (connector.getLyrics) {
-                        lyrics = await connector.getLyrics(trackTitle, artistName);
+                        lyrics = await connector.getLyrics(queryTitle, artistName, albumName);
                     }
-                    
+
                     if (lyrics && lyrics.lyrics) {
                         const result = {
                             lyrics: lyrics.lyrics,
@@ -1140,10 +1151,10 @@ class MusicInfoManager {
                             synchronized: lyrics.synchronized || false,
                             weight: this.sourceWeights[sourceName] || 0.5
                         };
-                        
+
                         // Cache the result
                         await this.cacheRepo.set(cacheKey, result, 24 * 60 * 60); // 24 hours
-                        
+
                         console.log(`MusicInfoManager: Found lyrics from ${sourceName}`);
                         return result;
                     }
@@ -1154,7 +1165,7 @@ class MusicInfoManager {
 
             // No lyrics found
             const emptyResult = { lyrics: null, source: 'none' };
-            await this.cacheRepo.set(cacheKey, emptyResult, 60 * 60); // Cache for 1 hour
+            await this.cacheRepo.set(cacheKey, emptyResult, 10 * 60); // Reduced from 1 hour to 10 minutes for easier recovery
             return emptyResult;
 
         } catch (error) {
@@ -1178,7 +1189,7 @@ class MusicInfoManager {
     async getPerformanceStats() {
         try {
             const cacheStats = await this.getCacheStats();
-            
+
             // Calculate connector performance
             const connectorStats = {};
             for (const [name, connector] of this.connectors) {
@@ -1231,7 +1242,7 @@ class MusicInfoManager {
             // In a real implementation, this would store in a proper corrections table
             const cacheKey = `correction:${correction.id}`;
             await this.cacheRepo.set(cacheKey, correction, 30 * 24 * 60 * 60); // 30 days
-            
+
             console.log(`MusicInfoManager: Correction submitted for ${correction.entityType}:${correction.entityId}`);
             return correction;
         } catch (error) {

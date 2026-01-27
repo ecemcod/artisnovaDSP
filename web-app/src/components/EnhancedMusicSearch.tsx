@@ -89,7 +89,7 @@ export const EnhancedMusicSearch: React.FC<EnhancedMusicSearchProps> = ({
 
     debounceRef.current = setTimeout(() => {
       performSearch(value);
-    }, 300);
+    }, 200); // Reduced from 300ms to 200ms for faster search response
   };
 
   const handleSearch = (searchQuery: string) => {

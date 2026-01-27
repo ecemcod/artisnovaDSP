@@ -21,69 +21,82 @@ export async function extractDominantColor(imageUrl: string): Promise<string | n
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    
+
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        
+
         if (!ctx) {
           resolve(null);
           return;
         }
-        
+
         // Resize image for faster processing
         const size = 100;
         canvas.width = size;
         canvas.height = size;
-        
+
         ctx.drawImage(img, 0, 0, size, size);
         const imageData = ctx.getImageData(0, 0, size, size);
-        
-        const dominantColor = getDominantColor(imageData.data);
-        const adjustedColor = adjustColorForBackground(dominantColor);
-        
+
+        const { color: dominantColor, avgSaturation } = getDominantColor(imageData.data);
+        const adjustedColor = adjustColorForBackground(dominantColor, avgSaturation);
+
         resolve(`rgb(${adjustedColor.r}, ${adjustedColor.g}, ${adjustedColor.b})`);
       } catch (error) {
         console.error('Error extracting color:', error);
         resolve(null);
       }
     };
-    
+
     img.onerror = () => resolve(null);
     img.src = imageUrl;
   });
 }
 
+interface DominantColorResult {
+  color: RGB;
+  avgSaturation: number;
+}
+
 /**
  * Get dominant color from image data using color quantization
+ * Also returns average saturation to detect B&W images
  */
-function getDominantColor(data: Uint8ClampedArray): RGB {
+function getDominantColor(data: Uint8ClampedArray): DominantColorResult {
   const colorMap = new Map<string, number>();
-  
+  let totalSaturation = 0;
+  let sampleCount = 0;
+
   // Sample every 4th pixel for performance
   for (let i = 0; i < data.length; i += 16) {
     const r = data[i];
     const g = data[i + 1];
     const b = data[i + 2];
     const alpha = data[i + 3];
-    
+
     // Skip transparent pixels
     if (alpha < 128) continue;
-    
+
+    // Calculate saturation for this pixel to detect B&W images
+    const pixelHsl = rgbToHsl({ r, g, b });
+    totalSaturation += pixelHsl.s;
+    sampleCount++;
+
     // Quantize colors to reduce noise
     const qr = Math.round(r / 32) * 32;
     const qg = Math.round(g / 32) * 32;
     const qb = Math.round(b / 32) * 32;
-    
+
     const key = `${qr},${qg},${qb}`;
     colorMap.set(key, (colorMap.get(key) || 0) + 1);
   }
-  
+
   // Find most frequent color
   let maxCount = 0;
   let dominantColor = { r: 64, g: 64, b: 64 }; // Default dark color
-  
+
   for (const [colorKey, count] of colorMap.entries()) {
     if (count > maxCount) {
       maxCount = count;
@@ -91,29 +104,40 @@ function getDominantColor(data: Uint8ClampedArray): RGB {
       dominantColor = { r, g, b };
     }
   }
-  
-  return dominantColor;
+
+  const avgSaturation = sampleCount > 0 ? totalSaturation / sampleCount : 0;
+
+  return { color: dominantColor, avgSaturation };
 }
 
 /**
  * Adjust color for background use - ensure it's dark enough for good contrast
+ * @param avgSaturation - Average saturation of the source image (0-1). Used to detect B&W images.
  */
-function adjustColorForBackground(color: RGB): RGB {
+function adjustColorForBackground(color: RGB, avgSaturation: number): RGB {
   const hsl = rgbToHsl(color);
-  
+
   // Maximum lightness threshold (30% to ensure dark backgrounds)
   const maxLightness = 0.3;
-  
+
   // If color is too light, reduce lightness while preserving hue and saturation
   if (hsl.l > maxLightness) {
     hsl.l = maxLightness;
   }
-  
-  // Ensure minimum saturation for visual interest
-  if (hsl.s < 0.2) {
+
+  // For B&W or very low saturation images (avg saturation < 15%),
+  // keep the color grayscale instead of forcing artificial saturation
+  const isGrayscaleImage = avgSaturation < 0.15;
+
+  if (isGrayscaleImage) {
+    // Use a dark neutral gray for B&W artwork
+    hsl.s = 0;
+    hsl.l = 0.12; // Very dark gray
+  } else if (hsl.s < 0.2) {
+    // For color images with low saturation, boost slightly
     hsl.s = 0.2;
   }
-  
+
   return hslToRgb(hsl);
 }
 
@@ -124,18 +148,18 @@ function rgbToHsl(rgb: RGB): HSL {
   const r = rgb.r / 255;
   const g = rgb.g / 255;
   const b = rgb.b / 255;
-  
+
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
   const diff = max - min;
-  
+
   let h = 0;
   let s = 0;
   const l = (max + min) / 2;
-  
+
   if (diff !== 0) {
     s = l > 0.5 ? diff / (2 - max - min) : diff / (max + min);
-    
+
     switch (max) {
       case r:
         h = ((g - b) / diff + (g < b ? 6 : 0)) / 6;
@@ -148,7 +172,7 @@ function rgbToHsl(rgb: RGB): HSL {
         break;
     }
   }
-  
+
   return { h, s, l };
 }
 
@@ -157,27 +181,27 @@ function rgbToHsl(rgb: RGB): HSL {
  */
 function hslToRgb(hsl: HSL): RGB {
   const { h, s, l } = hsl;
-  
+
   const c = (1 - Math.abs(2 * l - 1)) * s;
   const x = c * (1 - Math.abs(((h * 6) % 2) - 1));
   const m = l - c / 2;
-  
+
   let r = 0, g = 0, b = 0;
-  
-  if (h >= 0 && h < 1/6) {
+
+  if (h >= 0 && h < 1 / 6) {
     r = c; g = x; b = 0;
-  } else if (h >= 1/6 && h < 2/6) {
+  } else if (h >= 1 / 6 && h < 2 / 6) {
     r = x; g = c; b = 0;
-  } else if (h >= 2/6 && h < 3/6) {
+  } else if (h >= 2 / 6 && h < 3 / 6) {
     r = 0; g = c; b = x;
-  } else if (h >= 3/6 && h < 4/6) {
+  } else if (h >= 3 / 6 && h < 4 / 6) {
     r = 0; g = x; b = c;
-  } else if (h >= 4/6 && h < 5/6) {
+  } else if (h >= 4 / 6 && h < 5 / 6) {
     r = x; g = 0; b = c;
-  } else if (h >= 5/6 && h < 1) {
+  } else if (h >= 5 / 6 && h < 1) {
     r = c; g = 0; b = x;
   }
-  
+
   return {
     r: Math.round((r + m) * 255),
     g: Math.round((g + m) * 255),
@@ -201,19 +225,19 @@ export function generateDynamicBackgroundCSS(dominantColor: string): string {
 /**
  * Lighten a color by a percentage
  */
-function lightenColor(color: string, amount: number): string {
+export function lightenColor(color: string, amount: number): string {
   // Parse RGB color
   const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
   if (!match) return color;
-  
+
   const r = parseInt(match[1]);
   const g = parseInt(match[2]);
   const b = parseInt(match[3]);
-  
+
   // Convert to HSL, increase lightness, convert back
   const hsl = rgbToHsl({ r, g, b });
   hsl.l = Math.min(1, hsl.l + amount);
-  
+
   const rgb = hslToRgb(hsl);
   return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
 }

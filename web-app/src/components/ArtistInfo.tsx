@@ -15,9 +15,9 @@ interface ArtistData {
     artistUrl: string | null;
     country?: string;
     activeYears?: string;
-    tags?: string;
+    tags?: string | (string | { name: string })[];
     image_url?: string;
-    genres?: string[];
+    genres?: (string | { name: string; id?: number; parent_id?: number; description?: string; weight?: number })[];
     albums_count?: number;
     qobuz_id?: number;
     source?: string;
@@ -67,6 +67,13 @@ interface InfoData {
     source: string;
 }
 
+const STATUS_DOTS = (
+    <div className="flex gap-1">
+        <div className="w-1.5 h-1.5 rounded-full bg-accent-primary shadow-[0_0_8px_var(--glow-cyan)]" />
+        <div className="w-1.5 h-1.5 rounded-full bg-accent-primary opacity-20" />
+    </div>
+);
+
 const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
     const [info, setInfo] = useState<InfoData | null>(null);
     const [loading, setLoading] = useState(false);
@@ -112,8 +119,10 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
             setInfo(res.data);
 
             // Auto-switch to album tab if album data is available and we're currently on artist tab
-            if (res.data.album && activeTab === 'artist' && album) {
-                setActiveTab('album');
+            // We use the functional update form or a ref if we wanted to avoid 'activeTab' dependency,
+            // but for now we keep it simple. Optimization step 3 will address dependencies.
+            if (res.data.album && album) {
+                setActiveTab(prev => (prev === 'artist' ? 'album' : prev));
             }
 
             if (scrollRef.current) scrollRef.current.scrollTop = 0;
@@ -128,12 +137,26 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
         } finally {
             setLoading(false);
         }
-    }, [artist, album, activeTab]);
+    }, [artist, album]); // Removed activeTab dependency
+
+    const lastFetchKey = useRef<string>('');
 
     useEffect(() => {
+        // Note: activeTab is no longer part of the fetch key to prevent refetching on tab switch
+        const currentKey = `${artist}-${album}`;
+
+        // Only fetch if the key has actually changed
+        if (currentKey === lastFetchKey.current) {
+            console.log('ArtistInfo: Skipping fetch - same key:', currentKey);
+            return;
+        }
+
+        console.log('ArtistInfo: Fetching for new key:', currentKey);
+        lastFetchKey.current = currentKey;
+
         const timeoutId = setTimeout(fetchInfo, 300); // Debounce fetch
         return () => clearTimeout(timeoutId);
-    }, [fetchInfo]);
+    }, [artist, album, fetchInfo]);
 
     const getSourceBadge = (source: string = '') => {
         if (source === 'qobuz' || source === 'Qobuz Enhanced') {
@@ -167,7 +190,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                             />
                         </div>
                     )}
-                    
+
                     <div className="flex-1">
                         <div className="flex flex-wrap items-end justify-between gap-4 mb-4">
                             <h1 className="text-4xl md:text-6xl font-black text-themed-primary leading-none tracking-tighter">
@@ -175,7 +198,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                             </h1>
                             {artistData?.country && (
                                 <span className="px-2 py-0.5 bg-accent-primary/10 text-accent-primary text-[10px] font-black uppercase tracking-widest rounded border border-accent-primary/20">
-                                    {artistData.country}
+                                    {typeof artistData.country === 'string' ? artistData.country : (artistData.country as any).name || ''}
                                 </span>
                             )}
                         </div>
@@ -189,12 +212,12 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                         {artistData?.genres && artistData.genres.length > 0 && (
                             <div className="mb-4">
                                 <div className="flex flex-wrap gap-2">
-                                    {artistData.genres.map((genre: string, index: number) => (
+                                    {artistData.genres.map((genre: string | { name: string; id?: number }, index: number) => (
                                         <span
                                             key={index}
                                             className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded-full"
                                         >
-                                            {genre}
+                                            {typeof genre === 'string' ? genre : genre.name}
                                         </span>
                                     ))}
                                 </div>
@@ -221,7 +244,13 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                     {artistData?.tags && (
                         <div className="flex items-center gap-4 py-2 border-b border-themed-subtle/50">
                             <span className="text-[10px] font-black uppercase tracking-widest text-themed-muted w-24 flex-shrink-0">Genre Tags</span>
-                            <span className="text-sm font-bold text-themed-primary">{artistData.tags}</span>
+                            <span className="text-sm font-bold text-themed-primary">
+                                {typeof artistData.tags === 'string'
+                                    ? artistData.tags
+                                    : Array.isArray(artistData.tags)
+                                        ? artistData.tags.map((t: any) => typeof t === 'string' ? t : t.name).join(', ')
+                                        : (artistData.tags as any).name || ''}
+                            </span>
                         </div>
                     )}
                 </div>
@@ -281,7 +310,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                             />
                         </div>
                     )}
-                    
+
                     <div className="flex-1">
                         <span className="text-[9px] text-accent-primary font-black uppercase tracking-[0.3em] block mb-2">
                             {albumData?.release_type || 'Album'}
@@ -364,14 +393,14 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                             {(albumData.tracks || albumData.tracklist)!.map((track: Track, idx: number) => (
                                 <div key={idx} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-white/5 transition-colors">
                                     <span className="text-[10px] text-themed-muted font-mono w-8 text-right">
-                                        {(track.disc_number || track.disc || 1) > 1 ? 
-                                            `${track.disc_number || track.disc}.${track.track_number || track.number}` : 
+                                        {(track.disc_number || track.disc || 1) > 1 ?
+                                            `${track.disc_number || track.disc}.${track.track_number || track.number}` :
                                             (track.track_number || track.number)}
                                     </span>
                                     <span className="flex-1 text-sm font-medium text-themed-primary truncate">{track.title}</span>
                                     <span className="text-[10px] text-themed-muted font-mono">
-                                        {typeof track.duration === 'number' ? 
-                                            `${Math.floor(track.duration / 60)}:${(track.duration % 60).toString().padStart(2, '0')}` : 
+                                        {typeof track.duration === 'number' ?
+                                            `${Math.floor(track.duration / 60)}:${(track.duration % 60).toString().padStart(2, '0')}` :
                                             track.duration}
                                     </span>
                                 </div>
@@ -407,10 +436,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                             {info?.source === 'Qobuz Enhanced' ? 'Enhanced with Qobuz' : 'MusicBrainz Database'}
                         </span>
                     </div>
-                    <div className="flex gap-1">
-                        <div className="w-1.5 h-1.5 rounded-full bg-accent-primary shadow-[0_0_8px_var(--glow-cyan)]" />
-                        <div className="w-1.5 h-1.5 rounded-full bg-accent-primary opacity-20" />
-                    </div>
+                    {STATUS_DOTS}
                 </div>
 
                 {/* Tabs */}
@@ -455,8 +481,8 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                             <Music size={48} className="mb-6 stroke-1 text-red-400" />
                             <h2 className="text-xl font-black uppercase tracking-wider mb-2 text-red-400">Error Loading Info</h2>
                             <p className="text-[10px] font-bold text-themed-muted uppercase tracking-widest max-w-[300px]">{error}</p>
-                            <button 
-                                onClick={() => fetchInfo()} 
+                            <button
+                                onClick={() => fetchInfo()}
                                 className="mt-4 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/50 rounded-lg text-red-400 text-xs font-bold transition-colors"
                             >
                                 Retry
@@ -477,8 +503,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
                         </div>
                     ) : (
                         <>
-                            {activeTab === 'artist' && renderArtistTab()}
-                            {activeTab === 'album' && renderAlbumTab()}
+                            {activeTab === 'artist' ? renderArtistTab() : renderAlbumTab()}
                             <div className="h-24" />
                         </>
                     )}
