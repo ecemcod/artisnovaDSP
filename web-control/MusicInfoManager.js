@@ -210,146 +210,172 @@ class MusicInfoManager {
         }
     }
 
-    // Aggregate artist data from multiple sources
+    // Aggregate artist data with Multi-Strategy Search
     async aggregateArtistData(query) {
-        const sources = [];
         const results = [];
 
-        // Define priority order with Qobuz first
+        // Define Cleaning Strategies
+        const simplifyArtist = (name) => name.split(/,|&| feat\.| ft\.| with /i)[0].trim();
+        const removeParens = (name) => name.replace(/\s*\(.*?\)/g, '').trim();
+
+        const strategies = [
+            { name: 'Exact', query: query },
+            { name: 'Simplified', query: simplifyArtist(query) },
+            { name: 'Clean', query: removeParens(query) }
+        ];
+
+        // Filter unique queries
+        const uniqueStrategies = strategies.filter((v, i, a) => a.findIndex(t => t.query === v.query) === i);
+
+        // Sources priority
         const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
 
-        // Get ordered connectors based on priority
+        // Get ordered connectors
         const orderedConnectors = [];
         for (const sourceName of priorityOrder) {
-            if (this.connectors.has(sourceName)) {
-                orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
-            }
+            if (this.connectors.has(sourceName)) orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
         }
-
-        // Add any remaining connectors not in priority list
+        // Add others
         for (const [sourceName, connector] of this.connectors) {
-            if (!priorityOrder.includes(sourceName)) {
-                orderedConnectors.push([sourceName, connector]);
-            }
+            if (!priorityOrder.includes(sourceName)) orderedConnectors.push([sourceName, connector]);
         }
 
-        // Collect data from connectors in priority order
-        for (const [sourceName, connector] of orderedConnectors) {
-            try {
-                console.log(`MusicInfoManager: Querying ${sourceName} for artist "${query}"`);
-                const data = await connector.searchArtist(query);
-                if (data && data.length > 0) {
-                    let artistData = data[0]; // Take best match
+        // Execute Multi-Strategy Search
+        for (const strategy of uniqueStrategies) {
+            const currentQuery = strategy.query;
+            if (!currentQuery || currentQuery.length < 2) continue;
 
-                    // If this is Qobuz, get full artist details including biography
-                    if (sourceName === 'qobuz' && connector.getArtist && artistData.qobuz_id) {
-                        console.log(`MusicInfoManager: Getting full Qobuz artist details for ID "${artistData.qobuz_id}"`);
-                        try {
-                            const fullArtistData = await connector.getArtist(artistData.qobuz_id);
-                            if (fullArtistData) {
-                                artistData = fullArtistData; // Use full data instead of search result
-                                console.log(`MusicInfoManager: Enhanced artist data obtained from Qobuz`);
+            if (currentQuery !== query) {
+                console.log(`MusicInfoManager: Artist Strategy [${strategy.name}]: Searching for "${currentQuery}"`);
+            }
+
+            for (const [sourceName, connector] of orderedConnectors) {
+                try {
+                    // console.log(`MusicInfoManager: Querying ${sourceName} for artist "${currentQuery}"`);
+                    const data = await connector.searchArtist(currentQuery);
+
+                    if (data && data.length > 0) {
+                        let artistData = data[0]; // Take best match
+
+                        // Validating match quality (simple lev check or substring)
+                        // If strategy is "Simplified", we accept partial matches, otherwise be strict?
+                        // For now accept logic as is, relying on connector ranking.
+
+                        // If Qobuz, get full details
+                        if (sourceName === 'qobuz' && connector.getArtist && artistData.qobuz_id) {
+                            if (!artistData.biography) { // Only fetch deep if bio missing
+                                try {
+                                    const fullArtistData = await connector.getArtist(artistData.qobuz_id);
+                                    if (fullArtistData) artistData = fullArtistData;
+                                } catch (e) { /* ignore */ }
                             }
-                        } catch (error) {
-                            console.warn(`MusicInfoManager: Failed to get full Qobuz artist details:`, error.message);
                         }
-                    }
 
-                    results.push({
-                        source: sourceName,
-                        data: artistData,
-                        weight: this.sourceWeights[sourceName] || 0.5
-                    });
+                        results.push({
+                            source: sourceName,
+                            data: artistData,
+                            weight: this.sourceWeights[sourceName] || 0.5,
+                            strategy: strategy.name
+                        });
 
-                    // If Qobuz returns data, prioritize it heavily
-                    if (sourceName === 'qobuz' && data.length > 0) {
-                        console.log(`MusicInfoManager: Qobuz data found for "${query}", prioritizing`);
-                        break; // Stop searching other sources if Qobuz has data
+                        // If Qobuz found, we are good
+                        if (sourceName === 'qobuz') break;
                     }
+                } catch (error) {
+                    // console.warn(`MusicInfoManager: ${sourceName} failed for artist "${currentQuery}":`, error.message);
                 }
-            } catch (error) {
-                console.warn(`MusicInfoManager: ${sourceName} failed for artist "${query}":`, error.message);
             }
+
+            // If we found Qobuz data with this strategy, stop trying other strategies
+            if (results.some(r => r.source === 'qobuz')) break;
         }
 
-        if (results.length === 0) {
-            return null;
-        }
-
-        // Merge data with quality scoring
+        if (results.length === 0) return null;
         return this.mergeArtistData(results);
     }
 
-    // Aggregate album data from multiple sources
+    // Aggregate album data with Multi-Strategy Search
     async aggregateAlbumData(query, artistName) {
-        const sources = [];
         const results = [];
 
-        // Define priority order with Qobuz first
-        const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
+        // Define Cleaning Strategies
+        const removeDigitalJunk = (str) => str.replace(/\s*-\s*\d{4}\s*Remaster.*/i, '').replace(/\s*-\s*Remastered.*/i, '').replace(/\s*\(Remastered.*\)/i, '').trim();
+        const removeLive = (str) => str.replace(/\s*\(Live.*\)/i, '').replace(/\s*-\s*Live.*/i, '').trim();
+        const removeBrackets = (str) => str.replace(/[\(\[].*?[\)\]]/g, '').trim();
+        const simplifyArtist = (name) => name ? name.split(/,|&| feat\.| ft\.| with /i)[0].trim() : name;
 
-        // Get ordered connectors based on priority
+        const strategies = [
+            { name: 'Exact', title: query, artist: artistName },
+            { name: 'Clean Metadata', title: removeDigitalJunk(query), artist: artistName },
+            { name: 'No Live/Version', title: removeLive(removeDigitalJunk(query)), artist: artistName },
+            { name: 'Clean Title & Simple Artist', title: removeBrackets(removeDigitalJunk(query)), artist: simplifyArtist(artistName) }
+        ];
+
+        // Filter unique strategies
+        const uniqueStrategies = strategies.filter((v, i, a) => a.findIndex(t => t.title === v.title && t.artist === v.artist) === i);
+
+        // Sources priority
+        const priorityOrder = ['qobuz', 'musicbrainz', 'discogs', 'lastfm', 'itunes', 'spotify', 'wikipedia', 'theaudiodb'];
+        // Get ordered connectors
         const orderedConnectors = [];
         for (const sourceName of priorityOrder) {
-            if (this.connectors.has(sourceName)) {
-                orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
-            }
+            if (this.connectors.has(sourceName)) orderedConnectors.push([sourceName, this.connectors.get(sourceName)]);
         }
-
-        // Add any remaining connectors not in priority list
+        // Add others
         for (const [sourceName, connector] of this.connectors) {
-            if (!priorityOrder.includes(sourceName)) {
-                orderedConnectors.push([sourceName, connector]);
-            }
+            if (!priorityOrder.includes(sourceName)) orderedConnectors.push([sourceName, connector]);
         }
 
-        // Collect data from connectors in priority order
-        for (const [sourceName, connector] of orderedConnectors) {
-            try {
-                console.log(`MusicInfoManager: Querying ${sourceName} for album "${query}" by "${artistName || 'unknown'}"`);
-                const data = await connector.searchAlbum ?
-                    await connector.searchAlbum(query, artistName) :
-                    await connector.searchRelease(query, artistName);
+        // Execute Multi-Strategy Search
+        for (const strategy of uniqueStrategies) {
+            const currentTitle = strategy.title;
+            const currentArtist = strategy.artist;
 
-                if (data && data.length > 0) {
-                    let albumData = data[0]; // Take best match
+            if (!currentTitle || currentTitle.length < 2) continue;
 
-                    // If this is Qobuz, get full album details including description and credits
-                    if (sourceName === 'qobuz' && connector.getAlbum && albumData.qobuz_id) {
-                        console.log(`MusicInfoManager: Getting full Qobuz album details for ID "${albumData.qobuz_id}"`);
-                        try {
-                            const fullAlbumData = await connector.getAlbum(albumData.qobuz_id);
-                            if (fullAlbumData) {
-                                albumData = fullAlbumData; // Use full data instead of search result
-                                console.log(`MusicInfoManager: Enhanced album data obtained from Qobuz`);
+            if (currentTitle !== query || currentArtist !== artistName) {
+                console.log(`MusicInfoManager: Album Strategy [${strategy.name}]: Searching for "${currentTitle}" by "${currentArtist}"`);
+            }
+
+            for (const [sourceName, connector] of orderedConnectors) {
+                try {
+                    // console.log(`MusicInfoManager: Querying ${sourceName} for album...`);
+                    const data = await (connector.searchAlbum ?
+                        connector.searchAlbum(currentTitle, currentArtist) :
+                        connector.searchRelease(currentTitle, currentArtist));
+
+                    if (data && data.length > 0) {
+                        let albumData = data[0]; // Take best match
+
+                        // If Qobuz, get full details
+                        if (sourceName === 'qobuz' && connector.getAlbum && albumData.qobuz_id) {
+                            if (!albumData.description || !albumData.credits) {
+                                try {
+                                    const fullAlbumData = await connector.getAlbum(albumData.qobuz_id);
+                                    if (fullAlbumData) albumData = fullAlbumData;
+                                } catch (e) { /* ignore */ }
                             }
-                        } catch (error) {
-                            console.warn(`MusicInfoManager: Failed to get full Qobuz album details:`, error.message);
                         }
-                    }
 
-                    results.push({
-                        source: sourceName,
-                        data: albumData,
-                        weight: this.sourceWeights[sourceName] || 0.5
-                    });
+                        results.push({
+                            source: sourceName,
+                            data: albumData,
+                            weight: this.sourceWeights[sourceName] || 0.5,
+                            strategy: strategy.name
+                        });
 
-                    // If Qobuz returns data, prioritize it heavily
-                    if (sourceName === 'qobuz' && data.length > 0) {
-                        console.log(`MusicInfoManager: Qobuz album data found for "${query}", prioritizing`);
-                        break; // Stop searching other sources if Qobuz has data
+                        if (sourceName === 'qobuz') break;
                     }
+                } catch (error) {
+                    // console.warn(`MusicInfoManager: ${sourceName} failed for album "${currentTitle}":`, error.message);
                 }
-            } catch (error) {
-                console.warn(`MusicInfoManager: ${sourceName} failed for album "${query}":`, error.message);
             }
+
+            // If Qobuz found, stop
+            if (results.some(r => r.source === 'qobuz')) break;
         }
 
-        if (results.length === 0) {
-            return null;
-        }
-
-        // Merge data with quality scoring
+        if (results.length === 0) return null;
         return this.mergeAlbumData(results);
     }
 
@@ -1096,80 +1122,111 @@ class MusicInfoManager {
         return result.sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
     }
 
-    // Get lyrics with Qobuz priority
+    // Get lyrics with Qobuz priority and Multi-Strategy Search
     async getLyrics(trackTitle, artistName, albumName = null) {
-        // Normalize track title to remove suffixes like (Live), (Remastered), etc.
-        const cleanTitle = trackTitle
-            .replace(/\s*\(.*?(?:Live|Remaster|Version|Deluxe|Anniversary|Mix|Edit|Mono|Stereo).*?\)/gi, '')
-            .replace(/\s+-\s+(?:Live|Remaster|Version|Deluxe|Anniversary|Mix|Edit|Mono|Stereo).*/gi, '')
-            .trim();
-
-        if (cleanTitle !== trackTitle) {
-            console.log(`MusicInfoManager: Normalized lyrics search "${trackTitle}" -> "${cleanTitle}"`);
-        }
-
-        const queryTitle = cleanTitle;
-        const cacheKey = `lyrics:${queryTitle}:${artistName}:${albumName || ''}`;
+        const cacheKeyPrefix = `lyrics:${trackTitle}:${artistName}:${albumName || ''}`;
 
         try {
-            // Check cache first
-            const cached = await this.cacheRepo.get(cacheKey);
+            // Check cache first (Standard lookup)
+            const cached = await this.cacheRepo.get(cacheKeyPrefix);
             if (cached) {
                 console.log(`MusicInfoManager: Cache hit for lyrics "${trackTitle}"`);
                 return cached.data;
             }
 
-            console.log(`MusicInfoManager: Fetching lyrics for "${queryTitle}" by "${artistName}"`);
+            // Normalization Helpers
+            const removeBrackets = (str) => str.replace(/[\(\[].*?[\)\]]/g, '').trim();
+            const removeFeat = (str) => str.replace(/\b(feat\.?|ft\.?|with)\b.*/i, '').trim();
+            const removeDigitalJunk = (str) => str.replace(/\s*-\s*\d{4}\s*Remaster.*/i, '').replace(/\s*-\s*Remastered.*/i, '').trim();
 
-            // Priority order: Qobuz first, then others
+            // Define Search Strategies
+            const strategies = [
+                { name: 'Exact', title: trackTitle, artist: artistName },
+                { name: 'Clean Metadata', title: removeDigitalJunk(trackTitle), artist: artistName },
+                { name: 'No Feat', title: removeFeat(trackTitle), artist: artistName },
+                { name: 'Strip Brackets', title: removeBrackets(trackTitle), artist: artistName }
+            ];
+
+            // Filter unique strategies to avoid duplicate work
+            const uniqueStrategies = strategies.filter((v, i, a) => a.findIndex(t => t.title === v.title) === i);
+
+            // SPECIAL: Add Broad Search Fallback (Title Only) for covers
+            // This is only added AFTER artist-specific strategies to avoid false positives for common titles
+            const coverMarkers = [/\(.*?cover.*?\)/i, /-.*?cover/i, /cover\s+of\s+/i];
+            const isPotentialCover = coverMarkers.some(m => m.test(trackTitle) || m.test(albumName || ''));
+
+            if (isPotentialCover || true) { // Enabled for all as a final tier
+                const cleanTitle = removeBrackets(removeDigitalJunk(trackTitle));
+                uniqueStrategies.push({ name: 'Broad Fallback (Title Only)', title: cleanTitle, artist: null });
+            }
+
+            // Sources priority
             const priorityOrder = ['qobuz', 'lrclib', 'lastfm', 'spotify'];
 
-            for (const sourceName of priorityOrder) {
-                const connector = this.connectors.get(sourceName);
-                if (!connector) continue;
+            // Execute Multi-Strategy Search
+            for (const strategy of uniqueStrategies) {
+                const queryTitle = strategy.title;
+                if (!queryTitle || queryTitle.length < 2) continue; // Skip empty/too short
 
-                try {
-                    console.log(`MusicInfoManager: Trying ${sourceName} for lyrics`);
+                if (queryTitle !== trackTitle) {
+                    console.log(`MusicInfoManager: Lyrics Strategy [${strategy.name}]: Searching for "${queryTitle}"`);
+                } else {
+                    console.log(`MusicInfoManager: Lyrics Strategy [${strategy.name}]: Searching for original title`);
+                }
 
-                    let lyrics = null;
+                for (const sourceName of priorityOrder) {
+                    const connector = this.connectors.get(sourceName);
+                    if (!connector) continue;
 
-                    if (sourceName === 'qobuz') {
-                        // First try to find the track to get its ID
-                        const trackResults = await connector.searchTrack(queryTitle, artistName, albumName, 5);
-                        if (trackResults && trackResults.length > 0) {
-                            const track = trackResults[0];
-                            lyrics = await connector.getLyrics(track.qobuz_id);
+                    try {
+                        let lyrics = null;
+                        const currentArtist = strategy.artist; // might be null
+
+                        if (sourceName === 'qobuz') {
+                            // First try to find the track to get its ID
+                            const trackResults = await connector.searchTrack(queryTitle, currentArtist, albumName, 3);
+                            if (trackResults && trackResults.length > 0) {
+                                // Try first 3 matches
+                                for (const track of trackResults.slice(0, 3)) {
+                                    lyrics = await connector.getLyrics(track.qobuz_id);
+                                    if (lyrics && lyrics.lyrics) break; // Found it
+                                }
+                            }
+                        } else if (connector.getLyrics) {
+                            lyrics = await connector.getLyrics(queryTitle, currentArtist, albumName);
                         }
-                    } else if (connector.getLyrics) {
-                        lyrics = await connector.getLyrics(queryTitle, artistName, albumName);
+
+                        if (lyrics && lyrics.lyrics) {
+                            const result = {
+                                lyrics: lyrics.lyrics,
+                                source: sourceName,
+                                synchronized: lyrics.synchronized || false,
+                                weight: this.sourceWeights[sourceName] || 0.5,
+                                foundUsingStrategy: strategy.name,
+                                foundUsingTitle: queryTitle
+                            };
+
+                            // Cache the result
+                            await this.cacheRepo.set(cacheKeyPrefix, result, 24 * 60 * 60); // 24 hours
+
+                            console.log(`MusicInfoManager: Found lyrics via [${sourceName}] using strategy [${strategy.name}]`);
+                            return result;
+                        }
+                    } catch (error) {
+                        // Silent fail per source/strategy to keep log clean, uncomment for deep debug
+                        // console.warn(`MusicInfoManager: ${sourceName} failed for "${queryTitle}":`, error.message);
                     }
-
-                    if (lyrics && lyrics.lyrics) {
-                        const result = {
-                            lyrics: lyrics.lyrics,
-                            source: sourceName,
-                            synchronized: lyrics.synchronized || false,
-                            weight: this.sourceWeights[sourceName] || 0.5
-                        };
-
-                        // Cache the result
-                        await this.cacheRepo.set(cacheKey, result, 24 * 60 * 60); // 24 hours
-
-                        console.log(`MusicInfoManager: Found lyrics from ${sourceName}`);
-                        return result;
-                    }
-                } catch (error) {
-                    console.warn(`MusicInfoManager: ${sourceName} lyrics failed:`, error.message);
                 }
             }
 
-            // No lyrics found
+            // No lyrics found after all strategies
             const emptyResult = { lyrics: null, source: 'none' };
-            await this.cacheRepo.set(cacheKey, emptyResult, 10 * 60); // Reduced from 1 hour to 10 minutes for easier recovery
+            await this.cacheRepo.set(cacheKeyPrefix, emptyResult, 10 * 60); // 10 minutes cache for aggressive not-found
+            console.log(`MusicInfoManager: No lyrics found for "${trackTitle}" after trying all strategies.`);
             return emptyResult;
 
         } catch (error) {
-            console.error(`MusicInfoManager: Error getting lyrics for "${trackTitle}":`, error);
+            console.error(`MusicInfoManager: Critical error in getLyrics for "${trackTitle}":`, error);
             return { lyrics: null, source: 'error', error: error.message };
         }
     }

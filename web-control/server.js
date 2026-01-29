@@ -185,6 +185,13 @@ async function updatePlaybackHistory() {
                     genre: activeInfo.style || (metadataCache.get(`${activeInfo.artist}-${activeInfo.album}`)?.style) || null,
                     artworkUrl: activeInfo.artworkUrl || null
                 };
+
+                // Trigger background lyrics pre-fetching
+                if (historyState.currentTrack && historyState.currentArtist) {
+                    console.log(`History: Triggering background lyrics pre-fetch for "${historyState.currentTrack}" by "${historyState.currentArtist}"`);
+                    musicInfoManager.getLyrics(historyState.currentTrack, historyState.currentArtist, historyState.currentAlbum)
+                        .catch(err => console.warn('History: Background lyrics pre-fetch failed:', err.message));
+                }
             }
         } else {
             // STOPPED: If it was playing, we might want to save it now or wait for next start.
@@ -1635,7 +1642,7 @@ app.get('/api/media/info', async (req, res) => {
             ]
         };
 
-        console.log(`API Info (System/Apple): Sending Metadata for "${info.track}" - Year: ${info.year || 'MISSING'}`);
+        console.log(`API Info (System/Apple): Sending Metadata for "${info.track}" - Year: ${info.year || 'MISSING'} - State: ${info.state}`);
         return res.json(info);
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1652,6 +1659,11 @@ app.get('/api/media/artist-info', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const { artist, album } = req.query;
     console.log(`API: Request for artist-info: artist="${artist}", album="${album}"`);
+
+    if (!artist) {
+        console.warn('API: Missing artist parameter for artist-info');
+        return res.json({ artist: null, album: null, source: 'error' });
+    }
 
     try {
         // Get Qobuz connector directly
@@ -2433,6 +2445,33 @@ app.post('/api/media/roon/select', (req, res) => {
     res.json({ success: true, activeZoneId: zoneId });
 });
 
+// UNIFIED SOURCE SELECTION
+app.post('/api/media/select', async (req, res) => {
+    const { source, zoneId } = req.body;
+    console.log(`API: Selecting source ${source}${zoneId ? ` (zone: ${zoneId})` : ''}`);
+
+    try {
+        if (source === 'apple') {
+            // Update internal state
+            historyState.currentSource = 'apple';
+
+            // Trigger immediate metadata update to clear any Roon data from UI
+            const output = await runMediaCommand('info');
+            const info = JSON.parse(output);
+            info.source = 'apple';
+            broadcast('metadata_update', { source: 'apple', info });
+        } else if (source === 'roon' && zoneId) {
+            roonController.setActiveZone(zoneId, true);
+            historyState.currentSource = 'roon';
+        }
+
+        res.json({ success: true, source });
+    } catch (error) {
+        console.error('API Select Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/api/media/roon/image/:imageKey', (req, res) => {
     roonController.getImage(req.params.imageKey, res);
 });
@@ -2442,16 +2481,7 @@ app.get('/api/image/:imageKey', (req, res) => {
     roonController.getImage(req.params.imageKey, res);
 });
 
-app.get('/api/media/lms/artwork/:trackId', async (req, res) => {
-    try {
-        const { trackId } = req.params;
-        const lmsUrl = `http://${lmsController.host}:${lmsController.port}/music/${trackId}/cover.jpg`;
-        const response = await axios.get(lmsUrl, { responseType: 'stream' });
-        response.data.pipe(res);
-    } catch (e) {
-        res.status(404).end();
-    }
-});
+
 
 app.get('/api/media/artwork', async (req, res) => {
     const artworkPath = '/tmp/artisnova_artwork.jpg';
@@ -2467,10 +2497,29 @@ app.get('/api/hostname', (req, res) => {
     res.json({ hostname: os.hostname() });
 });
 
+// Persistent cache for lyrics to prevent them from disappearing
+const persistentLyricsCache = new Map();
+
 app.get('/api/media/lyrics', async (req, res) => {
     const { track, artist, album } = req.query;
+
+    // Create a robust cache key
+    const cacheKey = `${track?.toLowerCase().trim()}|${artist?.toLowerCase().trim()}`;
+
     try {
-        // Use enhanced MusicInfoManager for lyrics with Qobuz priority
+        console.log(`API: Lyrics request for "${track}" by "${artist}"`);
+
+        // 1. Check persistent cache first - STICKY BEHAVIOR
+        if (persistentLyricsCache.has(cacheKey)) {
+            const cachedResult = persistentLyricsCache.get(cacheKey);
+            // Only use cache if it actually has lyrics content
+            if (cachedResult && cachedResult.plain) {
+                console.log(`API: Serving PERSISTENT cached lyrics for "${track}"`);
+                return res.json(cachedResult);
+            }
+        }
+
+        // 2. Use enhanced MusicInfoManager for lyrics with Qobuz priority
         const lyricsResult = await musicInfoManager.getLyrics(track, artist, album);
 
         if (lyricsResult && lyricsResult.lyrics) {
@@ -2482,12 +2531,32 @@ app.get('/api/media/lyrics', async (req, res) => {
                 source: lyricsResult.source,
                 weight: lyricsResult.weight
             };
+
+            // 3. Update persistent cache on success
+            console.log(`API: Storing NEW lyrics in persistent cache for "${track}"`);
+            persistentLyricsCache.set(cacheKey, result);
+
             res.json(result);
         } else {
+            // 4. If fetch fails, check cache ONE MORE TIME (safety net)
+            // This handles race conditions where another request might have succeeded in the meantime
+            if (persistentLyricsCache.has(cacheKey)) {
+                console.log(`API: Fetch failed, but found PERSISTENT backup for "${track}"`);
+                return res.json(persistentLyricsCache.get(cacheKey));
+            }
+
+            console.log(`API: No lyrics found for "${track}"`);
             res.json({ error: 'Lyrics not found' });
         }
     } catch (e) {
         console.error('Enhanced API Error in lyrics:', e.message);
+
+        // 5. On error, also try to fallback to cache
+        if (persistentLyricsCache.has(cacheKey)) {
+            console.log(`API: Error occurred, serving PERSISTENT backup for "${track}"`);
+            return res.json(persistentLyricsCache.get(cacheKey));
+        }
+
         res.status(500).json({ error: 'Failed to fetch lyrics' });
     }
 });
@@ -2837,6 +2906,10 @@ let roonStateBufferTimer = null;
 let lastRoonStateWasPlaying = false;
 
 roonController.init((info) => {
+    if (!info) {
+        console.log('Server: Roon update received NULL info, skipping...');
+        return;
+    }
     const isPlaying = info.state === 'playing';
     const isPaused = info.state === 'paused'; // Allow rapid pause updates
 
@@ -2913,13 +2986,25 @@ function processBroadcast(info) {
     }, waitTime);
 }
 
+// Global zone change listener
+roonController.onZonesChanged = (zones) => {
+    console.log(`Server: Roon zones changed, broadcasting ${zones.length} zones.`);
+    broadcast('zones_update', zones);
+};
+
 // Proactive Sample Rate Handling
 roonController.onSampleRateChange = async (newRate, zone) => {
     console.log(`Server: Sample rate change detected -> ${newRate}Hz for zone "${zone.display_name}"`);
     const activeDsp = getDspForZone(zone.display_name);
 
     if (newRate === 'CHECK') {
-        // Simplified: Do nothing on periodic checks. Trust the persistent Keep-Alive of DSP Manager.
+        // If it's playing but DSP is not running, start it with default 96k
+        if (!activeDsp.isRunning()) {
+            console.log(`Server: CHECK rate detected and DSP not running. Starting with default 96kHz.`);
+            const filters = activeDsp.lastFilterData || { filters: [], preamp: 0 };
+            const options = { ...activeDsp.lastOptions, sampleRate: 96000 };
+            await activeDsp.start(filters, options);
+        }
         return;
     }
 

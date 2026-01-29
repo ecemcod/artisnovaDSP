@@ -9,6 +9,8 @@ export default defineConfig({
     include: ['lucide-react'],
   },
   server: {
+    host: true,
+    port: 3000,
     allowedHosts: true,
     proxy: {
       '/api': {

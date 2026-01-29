@@ -117,25 +117,26 @@ function getDominantColor(data: Uint8ClampedArray): DominantColorResult {
 function adjustColorForBackground(color: RGB, avgSaturation: number): RGB {
   const hsl = rgbToHsl(color);
 
-  // Maximum lightness threshold (30% to ensure dark backgrounds)
-  const maxLightness = 0.3;
+  // Maximum lightness threshold (Increased from 0.3 to 0.5 to allow more vibrant colors)
+  const maxLightness = 0.5;
 
   // If color is too light, reduce lightness while preserving hue and saturation
   if (hsl.l > maxLightness) {
     hsl.l = maxLightness;
   }
 
-  // For B&W or very low saturation images (avg saturation < 15%),
+  // For B&W or very low saturation images (avg saturation < 10%),
   // keep the color grayscale instead of forcing artificial saturation
-  const isGrayscaleImage = avgSaturation < 0.15;
+  // Reduced threshold from 0.15 to 0.10 to avoid false positives on desaturated covers
+  const isGrayscaleImage = avgSaturation < 0.10;
 
   if (isGrayscaleImage) {
     // Use a dark neutral gray for B&W artwork
     hsl.s = 0;
-    hsl.l = 0.12; // Very dark gray
+    hsl.l = 0.15; // Slightly lighter gray than before for visibility
   } else if (hsl.s < 0.2) {
-    // For color images with low saturation, boost slightly
-    hsl.s = 0.2;
+    // For color images with low saturation, boost slightly but preserve original vibe
+    hsl.s = Math.max(hsl.s, 0.2);
   }
 
   return hslToRgb(hsl);

@@ -7,14 +7,11 @@ import { SimpleNavigationProvider } from './components/SimpleNavigationProvider'
 import { SimpleMusicNavigationView } from './components/SimpleMusicNavigationView';
 import ArtistInfo from './components/ArtistInfo';
 import { createPortal } from 'react-dom';
-import {
-  Panel,
-  Group,
-  Separator,
-} from "react-resizable-panels";
+
 import PlayQueue from './components/PlayQueue';
 import Lyrics from './components/Lyrics';
 import History from './components/History';
+import StandaloneLayout from './components/StandaloneLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 // import { DebugComponent } from './components/DebugComponent';
 import SignalPathPopover from './components/SignalPathPopover';
@@ -26,6 +23,8 @@ import {
 import './index.css';
 import './App.css';
 import { parseRewFile } from './utils/rewParser';
+
+import { formatTime } from './utils/time';
 import { AppStorage } from './utils/storage';
 import { extractDominantColor, generateDynamicBackgroundCSS } from './utils/colorExtractor';
 
@@ -38,15 +37,8 @@ const API_URL = `${API_BASE}/api`;
 // Device detection
 const isMobile = () => window.innerWidth < 768;
 
-const formatTime = (seconds: number) => {
-  if (isNaN(seconds) || seconds < 0) return '0:00';
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
-};
-
 const STORAGE_KEY = `artisNovaDSP_config`;
-const PANEL_STORAGE_KEY = `artisNovaDSP_layout_v2`;
+
 const BG_COLOR_STORAGE_KEY = `artisNovaDSP_bgColor`;
 
 const resolveArtworkUrl = (url?: string | null, retryKey?: number) => {
@@ -193,7 +185,14 @@ function AppContentInner() {
   const [queue, setQueue] = useState<{ track: string; artist: string; album?: string; artworkUrl?: string }[]>([]);
   const [backend, setBackend] = useState<'local' | 'raspi'>('local');
   const [raspiOnline, setRaspiOnline] = useState(false);
-  const [activeMode, setActiveMode] = useState<LayoutMode>(() => {
+  const [activeMode, _setActiveMode] = useState<LayoutMode>(() => {
+    // Check URL parameters for initial mode (deep linking for quad-window view)
+    const params = new URLSearchParams(window.location.search);
+    const urlMode = params.get('mode') as LayoutMode;
+    if (urlMode && ['playback', 'processing', 'lyrics', 'info', 'queue', 'history', 'visualization', 'navigation'].includes(urlMode)) {
+      return urlMode;
+    }
+
     const saved = AppStorage.getItem('artisNovaDSP_activeMode');
     const savedMode = saved as LayoutMode;
     // Temporarily redirect 'navigation' mode to 'processing' until Music Explorer is ready
@@ -202,8 +201,12 @@ function AppContentInner() {
     }
     return savedMode || 'processing';
   });
-  const [panelSizes, setPanelSizes] = useState<number[]>([55, 45]);
-  const [isLayoutLoaded, setIsLayoutLoaded] = useState(false);
+
+  const setActiveMode = (mode: LayoutMode) => {
+    console.log(`UI: Transitioning to mode: ${mode}`);
+    _setActiveMode(mode);
+  };
+
   const [volume, setVolume] = useState(50);
   const [bgColor, setBgColor] = useState<BgColorId>(() => {
     const saved = AppStorage.getItem(BG_COLOR_STORAGE_KEY);
@@ -211,10 +214,10 @@ function AppContentInner() {
   });
   const [dynamicBgColor, setDynamicBgColor] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
-  const [mediaZones, setMediaZones] = useState<{ id: string, name: string, active: boolean, state: string, source: 'apple' | 'roon' | 'lms' }[]>([]);
-  const [mediaSource, setMediaSource] = useState<'apple' | 'roon' | 'lms'>(() => {
+  const [mediaZones, setMediaZones] = useState<{ id: string, name: string, active: boolean, state: string, source: 'apple' | 'roon' }[]>([]);
+  const [mediaSource, setMediaSource] = useState<'apple' | 'roon'>(() => {
     const saved = AppStorage.getItem('artisNovaDSP_mediaSource');
-    return (saved === 'roon' || saved === 'apple' || saved === 'lms') ? saved : 'apple';
+    return (saved === 'roon' || saved === 'apple') ? saved : 'apple';
   });
   const [hostname, setHostname] = useState<string>('Local');
   const [sourcePopoverOpen, setSourcePopoverOpen] = useState(false);
@@ -280,9 +283,11 @@ function AppContentInner() {
   }, [mediaSource]);
 
   const nowPlayingTrackRef = useRef(nowPlaying.track);
+  const nowPlayingArtistRef = useRef(nowPlaying.artist);
   useEffect(() => {
     nowPlayingTrackRef.current = nowPlaying.track;
-  }, [nowPlaying.track]);
+    nowPlayingArtistRef.current = nowPlaying.artist;
+  }, [nowPlaying.track, nowPlaying.artist]);
 
   const wsConnectedRef = useRef(false);
   const hasRestoredZoneRef = useRef(false);
@@ -447,16 +452,8 @@ function AppContentInner() {
 
   useEffect(() => {
     console.log("Artis Nova DSP v1.2.2 - Loading Layout...");
-    const savedLayout = AppStorage.getItem(PANEL_STORAGE_KEY);
-    if (savedLayout) {
-      try {
-        const parsed = JSON.parse(savedLayout);
-        console.log('Loaded layout:', parsed);
-        setPanelSizes(parsed);
-      } catch (e) { console.error('Failed to parse layout:', e); }
-    }
-    // Small delay to ensure Group component is ready for the correct sizes
-    setTimeout(() => setIsLayoutLoaded(true), 50);
+
+    console.log("Artis Nova DSP v1.2.2 - Loading...");
 
     // Fetch hostname
     axios.get(`${API_URL}/hostname`)
@@ -477,16 +474,7 @@ function AppContentInner() {
     AppStorage.setItem(STORAGE_KEY, JSON.stringify({ ...config, mediaSource }));
   }, [mediaSource]);
 
-  const onLayoutChange = (sizes: any) => {
-    if (!isLayoutLoaded) return; // Guard against initial mount overwrite
 
-    // Only save if different from current
-    if (JSON.stringify(sizes) !== JSON.stringify(panelSizes)) {
-      console.log('Saving layout:', sizes);
-      setPanelSizes(sizes);
-      AppStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(sizes));
-    }
-  };
 
   useEffect(() => {
     // Poll volume
@@ -515,6 +503,29 @@ function AppContentInner() {
     } catch { }
   };
 
+  // UI Visibility State (Auto-Hide)
+  const [uiVisible, setUiVisible] = useState(false);
+  const uiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleUserInteraction = useCallback(() => {
+    setUiVisible(true);
+    if (uiTimeoutRef.current) clearTimeout(uiTimeoutRef.current);
+    uiTimeoutRef.current = setTimeout(() => setUiVisible(false), 10000);
+  }, []);
+
+  const handleBackgroundInteraction = useCallback((e?: any) => {
+    // If we have an event, check if it originated inside an interactive element
+    if (e && e.target) {
+      const target = e.target as HTMLElement;
+      if (target.closest('.popover-container') || target.closest('.menu-container')) {
+        return;
+      }
+    }
+    handleUserInteraction();
+    setMenuOpen(false);
+    setSourcePopoverOpen(false);
+  }, [handleUserInteraction]);
+
   // Menu state
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuView, setMenuView] = useState<'main' | 'settings' | 'colors'>('main');
@@ -526,7 +537,7 @@ function AppContentInner() {
   const [sourceActivity, setSourceActivity] = useState(0);
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: any) => {
       // Handle Side Menu
       if (menuOpen &&
         sideMenuRef.current &&
@@ -547,7 +558,11 @@ function AppContentInner() {
     };
 
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+    };
   }, [menuOpen, sourcePopoverOpen]);
 
   useEffect(() => {
@@ -588,7 +603,7 @@ function AppContentInner() {
     } catch { }
   };
 
-  const selectZone = async (zoneId: string, source: 'apple' | 'roon' | 'lms') => {
+  const selectZone = async (zoneId: string, source: 'apple' | 'roon') => {
     console.log('selectZone called:', { zoneId, source });
 
     try {
@@ -601,8 +616,10 @@ function AppContentInner() {
         active: z.id === zoneId && z.source === source
       })));
 
+      console.log(`Making API call to select source: ${source}`);
+      await axios.post(`${API_URL}/media/select`, { source, zoneId });
+
       if (source === 'apple') {
-        console.log('Setting media source to apple');
         setMediaSource('apple');
         setBackend('local');
       } else if (source === 'roon') {
@@ -616,14 +633,6 @@ function AppContentInner() {
           console.log('Setting backend to:', mappedBackend);
           setBackend(mappedBackend as 'local' | 'raspi');
         }
-
-        console.log('Making API call to select Roon zone');
-        await axios.post(`${API_URL}/media/roon/select`, { zoneId });
-      } else if (source === 'lms') {
-        console.log('Setting media source to lms');
-        setMediaSource('lms');
-        setBackend('raspi'); // LMS is always on the Pi
-        await axios.post(`${API_URL}/media/lms/select`, { playerId: zoneId });
       }
 
       console.log('Clearing lyrics and fetching media zones');
@@ -644,9 +653,9 @@ function AppContentInner() {
   // WebSocket for instantaneous updates - ULTRA-STABLE connection
   useEffect(() => {
     let ws: WebSocket | null = null;
-    let reconnectTimeout: any = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempts = 0;
-    const maxReconnectAttempts = 3; // Limit reconnection attempts
+    const maxReconnectAttempts = 50; // Increased for iPad/Mobile stability
 
     const connect = () => {
       // Don't attempt if we've exceeded max attempts
@@ -660,7 +669,7 @@ function AppContentInner() {
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.hostname}:3000`;
+      const wsUrl = `${protocol}//${window.location.hostname}:3001`;
       console.log(`App: Connecting to metadata WebSocket (attempt ${reconnectAttempts + 1}):`, wsUrl);
 
       ws = new WebSocket(wsUrl);
@@ -719,11 +728,9 @@ function AppContentInner() {
               // Reduced aggression since we have data
               fetchNowPlayingRef.current();
 
-              if (message.data?.source === 'roon') {
-                fetchMediaZones(); // Refresh zones when Roon update happens
-              }
-            } else {
-              console.log(`App: Ignoring background metadata update from ${message.data?.source}`);
+            } else if (message.type === 'zones_update') {
+              console.log('App: Instant Zones Update received via WS');
+              setMediaZones(message.data);
             }
           }
         } catch (e) {
@@ -768,7 +775,7 @@ function AppContentInner() {
       const res = await axios.get(`${API_URL}/media/info?source=${currentSource}`, { timeout: 3000 });
       if (res.data && !res.data.error) {
         // STRICT SOURCE FILTER: Discard if source doesn't match current selection
-        // This prevents "metadata flickering" when Roon background changes affect Apple/LMS view.
+        // This prevents "metadata flickering" when Roon background changes affect Apple view.
         if (res.data.source && res.data.source !== mediaSourceRef.current) {
           console.log(`App: Data source mismatch. Expected ${mediaSourceRef.current}, got ${res.data.source}. Ignoring.`);
           return;
@@ -788,6 +795,15 @@ function AppContentInner() {
             lyrics: null
           };
 
+          // If Roon reports "stopped" or empty track (transition gap), try to hold last valid state
+          if ((!res.data.state || res.data.state === 'stopped') && !res.data.track && nowPlaying.track) {
+            console.log('App: Roon gap detected (stopped/empty). Holding last known state for grace period.');
+            // Just update status to stopped but keep metadata
+            setNowPlaying(prev => ({ ...prev, state: 'stopped' }));
+            setIsRunning(false);
+            return;
+          }
+
           setNowPlaying(prev => ({
             ...prev,
             ...res.data,
@@ -795,44 +811,60 @@ function AppContentInner() {
             track: res.data.track || '',
             artist: res.data.artist || '',
             album: res.data.album || '',
-            position: res.data.position || 0,
-            duration: res.data.duration || 0
+            artworkUrl: res.data.artworkUrl || '', // Update artwork for new track (don't keep old one)
+            position: typeof res.data.position === 'number' ? res.data.position : prev.position
           }));
-          nowPlayingTrackRef.current = res.data.track; // Update Ref immediately for fetchLyrics
-          setArtworkRetryKey(0); // Reset retry on track change
 
-          // Fetch lyrics with a small delay to ensure track info is stable
-          setTimeout(() => {
-            fetchLyrics(res.data.track, res.data.artist, res.data.device);
-          }, 100);
+          // Only update isRunning if explicitly changed
+          if (res.data.state === 'playing') setIsRunning(true);
+          else if (res.data.state === 'paused' || res.data.state === 'stopped') setIsRunning(false);
+
+          // Update refs
+          nowPlayingTrackRef.current = res.data.track || '';
+          nowPlayingArtistRef.current = res.data.artist || '';
+
+          // Fetch lyrics if we have a valid track and it's different (or we have none)
+          if (res.data.track && res.data.artist) {
+            if (res.data.track !== nowPlaying.track || !lyrics) {
+              // Debounce slightly to allow stability
+              setTimeout(() => fetchLyrics(res.data.track, res.data.artist, res.data.device), 500);
+            }
+          }
         } else {
-          // SAME TRACK: Only update dynamic fields (position, state, signalPath)
-          setNowPlaying(prev => {
-            // Stability checks - only update if actually different to minimize renders
-            const stateChanged = res.data.state !== prev.state;
-            const posChanged = Math.abs((res.data.position || 0) - prev.position) > 1;
-            const pathChanged = JSON.stringify(res.data.signalPath) !== JSON.stringify(prev.signalPath);
-            const artworkChanged = res.data.artworkUrl !== prev.artworkUrl;
-            const yearChanged = res.data.year !== prev.year;
-            const styleChanged = res.data.style !== prev.style;
+          // SAME TRACK UPDATE (e.g. time, dynamic color)
+          // Only update necessary fields to minimize re-renders
 
-            if (!stateChanged && !posChanged && !pathChanged && !artworkChanged && !yearChanged && !styleChanged) return prev;
+          let hasUpdates = false;
+          let newUpdates: any = {};
 
-            console.log(`App: Same track, updating dynamic fields - state: ${stateChanged}, pos: ${posChanged}, path: ${pathChanged}`);
-            return {
-              ...prev,
-              state: res.data.state,
-              position: res.data.position || 0,
-              duration: res.data.duration || 0,
-              signalPath: res.data.signalPath,
-              artist: res.data.artist || prev.artist,
-              album: res.data.album || prev.album,
-              year: res.data.year ? res.data.year : prev.year,
-              artworkUrl: res.data.artworkUrl ? res.data.artworkUrl : prev.artworkUrl,
-              style: res.data.style ? res.data.style : prev.style,
-              device: res.data.device || prev.device
-            };
-          });
+          // Check Seek Position
+          if (res.data.position !== undefined && Math.abs(res.data.position - nowPlaying.position) > 1) {
+            newUpdates.position = res.data.position;
+            hasUpdates = true;
+          }
+
+          // Check State
+          if (res.data.state && res.data.state !== nowPlaying.state) {
+            newUpdates.state = res.data.state;
+            hasUpdates = true;
+            setIsRunning(res.data.state === 'playing');
+          }
+
+          // Check Artwork (sometimes it loads late)
+          if (res.data.artworkUrl && res.data.artworkUrl !== nowPlaying.artworkUrl) {
+            newUpdates.artworkUrl = res.data.artworkUrl;
+            hasUpdates = true;
+          }
+
+          // Check Year
+          if (res.data.year && res.data.year !== nowPlaying.year) {
+            newUpdates.year = res.data.year;
+            hasUpdates = true;
+          }
+
+          if (hasUpdates) {
+            setNowPlaying(prev => ({ ...prev, ...newUpdates }));
+          }
         }
       }
     } catch (err: any) {
@@ -849,7 +881,10 @@ function AppContentInner() {
 
   useEffect(() => {
     console.log('App: Starting STABLE now playing polling loop');
+
+    // Initial fetch to ensure data is loaded immediately
     fetchNowPlayingRef.current();
+
     const interval = setInterval(() => {
       // Only poll if WebSocket is disconnected to minimize traffic and conflicts
       if (!wsConnectedRef.current) {
@@ -865,7 +900,7 @@ function AppContentInner() {
 
   const fetchLyrics = async (track: string, artist: string, device?: string) => {
     if (!track || !artist) {
-      setLyrics(null);
+      // Don't clear immediately, wait for a valid track change
       return;
     }
 
@@ -880,28 +915,33 @@ function AppContentInner() {
 
     // Only skip if: same track AND we have lyrics AND lyrics are currently displayed
     if (currentTrackKey === lastTrackKey && lastLyricsData.lyrics !== null && lyrics === lastLyricsData.lyrics) {
-      console.log(`App: SKIPPING lyrics fetch - already have and displaying lyrics for "${track}" by "${artist}"`);
+      // Console log removed to reduce noise
       return;
     }
 
     // Safety: If track matches device name, it's a Roon metadata artifact (e.g. AirPlay stream)
     if (device && track === device) {
-      console.log('Skipping lyrics: Track equals Device name (Metadata artifact)');
       setLyrics(null);
       return;
     }
 
     try {
-      console.log(`App: Fetching lyrics for "${track}" by "${artist}"...`);
       const res = await axios.get(`${API_URL}/media/lyrics`, { params: { track, artist } });
 
       // Only update if we are still on the same track AND artist
-      if (requestedTrack !== nowPlayingTrackRef.current || requestedArtist !== nowPlaying.artist) {
-        console.log(`App: Lyrics received for "${requestedTrack}" by "${requestedArtist}" but current track migrated to "${nowPlayingTrackRef.current}" by "${nowPlaying.artist}". Ignoring.`);
+      if (requestedTrack !== nowPlayingTrackRef.current || requestedArtist !== nowPlayingArtistRef.current) {
         return;
       }
 
       const lyricsResult = res.data.instrumental ? "[INSTRUMENTAL]" : (res.data.plain || null);
+
+      // If result is null (not found), but we currently HAVE lyrics for this track, KEEP THEM.
+      // This protects against transient backend failures or "not found" glitches.
+      if (lyricsResult === null && lyrics && currentTrackKey === lastTrackKey) {
+        console.log('App: Lyrics fetch returned null, but keeping existing lyrics for current track (Sticky)');
+        return;
+      }
+
       setLyrics(lyricsResult);
 
       // Update cache
@@ -911,18 +951,10 @@ function AppContentInner() {
         lyrics: lyricsResult
       };
 
-      console.log(`App: Lyrics ${lyricsResult ? 'found' : 'not found'} for "${track}" by "${artist}"`);
     } catch (error) {
       console.error(`App: Error fetching lyrics for "${track}" by "${artist}":`, error);
-      // Only clear if we failed for the actual current track
-      if (requestedTrack === nowPlaying.track && requestedArtist === nowPlaying.artist) {
-        setLyrics(null);
-        lastPanelData.current.lyrics = {
-          track: requestedTrack,
-          artist: requestedArtist,
-          lyrics: null
-        };
-      }
+      // DO NOT clear lyrics on error if they match the current track.
+      // We assume the backend might recover or we have a cached version.
     }
   };
 
@@ -940,7 +972,13 @@ function AppContentInner() {
         if (config.sampleRate) setSampleRate(config.sampleRate);
         if (config.bitDepth) setBitDepth(config.bitDepth);
         if (config.selectedPreset) setSelectedPreset(config.selectedPreset);
-        if (config.activeMode) setActiveMode(config.activeMode);
+
+        // Only restore activeMode from storage if it wasn't specified in the URL
+        const params = new URLSearchParams(window.location.search);
+        if (!params.get('mode') && config.activeMode) {
+          setActiveMode(config.activeMode);
+        }
+
         if (config.backend) setBackend(config.backend);
         if (config.bypass) savedBypassRef.current = true; // Remember for auto-start
       } catch (e) {
@@ -960,9 +998,28 @@ function AppContentInner() {
   // Save config whenever it changes (including bypass)
   useEffect(() => {
     if (!isLoaded) return;
-    const config: SavedConfig = { filters, preamp, sampleRate, bitDepth, selectedPreset, activeMode, backend, bypass: isBypass };
+
+    const params = new URLSearchParams(window.location.search);
+    const isScriptLaunched = !!params.get('mode');
+
+    const config: SavedConfig = {
+      filters,
+      preamp,
+      sampleRate,
+      bitDepth,
+      selectedPreset,
+      // CRITICAL: Don't persist activeMode into the main config if it was script-launched
+      activeMode: isScriptLaunched ? undefined : activeMode,
+      backend,
+      bypass: isBypass
+    };
+
     AppStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-    AppStorage.setItem('artisNovaDSP_activeMode', activeMode);
+
+    // Only persist standalone activeMode if it's a "natural" navigation
+    if (!isScriptLaunched) {
+      AppStorage.setItem('artisNovaDSP_activeMode', activeMode);
+    }
   }, [filters, preamp, sampleRate, bitDepth, selectedPreset, isLoaded, activeMode, backend, isBypass]);
 
   // Check Raspberry Pi connectivity
@@ -1133,8 +1190,13 @@ function AppContentInner() {
   };
 
   const handleArtworkError = () => {
-    if (artworkRetryKey < 10) {
-      console.log(`App: Artwork load failed (attempt ${artworkRetryKey + 1}). Retrying in 1s...`);
+    // Extract retry count from the key (last 2 digits)
+    // We use a timestamp-based key like (Timestamp * 100) + RetryCount
+    // If key is small (old logic), it's just RetryCount
+    const currentRetries = artworkRetryKey % 100;
+
+    if (currentRetries < 10) {
+      console.log(`App: Artwork load failed (attempt ${currentRetries + 1}). Retrying in 1s...`);
       setTimeout(() => setArtworkRetryKey((prev: number) => prev + 1), 1000);
     } else {
       console.warn('App: Artwork load failed after 10 retries.');
@@ -1142,8 +1204,11 @@ function AppContentInner() {
   };
 
   useEffect(() => {
-    setArtworkRetryKey(0);
-  }, [nowPlaying.artworkUrl]);
+    // Force a fresh request when track/artist changes to bypass browser cache
+    // Use Date.now() * 100 to leave room for retry counts (0-99)
+    // This solves key sticking to 0 when URL string doesn't change
+    setArtworkRetryKey(Date.now() * 100);
+  }, [nowPlaying.artworkUrl, nowPlaying.track, nowPlaying.artist]);
 
   // MediaSession API for OS-level media key integration
   // This enables keyboard media keys (⏯️ ⏭️ ⏮️) to control playback on all platforms
@@ -1311,7 +1376,7 @@ function AppContentInner() {
           {/* Subtle radial gradient for depth */}
           <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_center,_var(--accent-primary)_0%,_transparent_70%)]" />
           {/* Dynamic Background */}
-          {nowPlaying.artworkUrl && artworkRetryKey < 10 && (
+          {nowPlaying.artworkUrl && (
             <img
               src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
               alt=""
@@ -1337,16 +1402,15 @@ function AppContentInner() {
               onClick={() => setIsArtworkModalOpen(true)}
             >
               <div className="absolute inset-0 bg-black/40 rounded-2xl transform translate-y-2 blur-xl opacity-50" />
-              <div className="relative w-full h-full bg-white/5 rounded-2xl overflow-hidden shadow-2xl">
-                {nowPlaying.artworkUrl && artworkRetryKey < 10 ? (
+              <div className="relative w-full h-full rounded-2xl overflow-hidden shadow-2xl bg-black">
+                {nowPlaying.artworkUrl && (
                   <img
                     src={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey) || ''}
                     alt="Album Art"
-                    className="w-full h-full object-cover"
+                    className="absolute inset-0 w-full h-full object-cover"
+                    loading="eager"
                     onError={handleArtworkError}
                   />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center text-white/20"><Music size={64} strokeWidth={1} /></div>
                 )}
               </div>
             </div>
@@ -1382,108 +1446,100 @@ function AppContentInner() {
                   )}
                 </div>
               </div>
+
+              {/* Controls Section */}
+              <div className="w-full max-w-[280px] mx-auto">
+                {/* Progress Bar */}
+                <div className="w-full mx-auto mb-4 md:mb-6 now-playing-progress">
+                  <div className="relative h-4 w-full bg-gray-800/80 rounded-full cursor-pointer border-2 border-white/30">
+                    <div
+                      className="absolute left-0 top-0 h-full bg-cyan-400 rounded-full"
+                      style={{ width: `${nowPlaying.duration > 0 ? (Math.min(currentTime, nowPlaying.duration) / nowPlaying.duration) * 100 : 0}%` }}
+                    />
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 bg-white rounded-full shadow-xl border-4 border-cyan-400"
+                      style={{ left: `${nowPlaying.duration > 0 ? (Math.min(currentTime, nowPlaying.duration) / nowPlaying.duration) * 100 : 0}%` }}
+                    />
+                    <input
+                      type="range"
+                      min={0}
+                      max={nowPlaying.duration || 100}
+                      step={1}
+                      value={currentTime}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                      onMouseDown={() => { isSeeking.current = true; }}
+                      onMouseUp={() => { isSeeking.current = false; }}
+                      onInput={(e) => setCurrentTime(Number(e.currentTarget.value))}
+                      onChange={(e) => handleSeek(Number(e.currentTarget.value))}
+                    />
+                  </div>
+                  <div className="flex justify-between mt-2 text-[10px] md:text-xs font-medium text-white/40 tabular-nums">
+                    <span>{formatTime(currentTime)}</span>
+                    <span>{formatTime(nowPlaying.duration)}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-center gap-6 mb-4 md:mb-8 now-playing-controls">
+                  <button
+                    onClick={() => handleMediaControl('prev')}
+                    className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
+                    style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
+                  >
+                    <SkipBack size={20} fill="currentColor" />
+                  </button>
+                  <button
+                    onClick={() => handleMediaControl('playpause')}
+                    className="rounded-full p-3 hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl"
+                    style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
+                  >
+                    {nowPlaying.state === 'playing' ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
+                  </button>
+                  <button
+                    onClick={() => handleMediaControl('next')}
+                    className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
+                    style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
+                  >
+                    <SkipForward size={20} fill="currentColor" />
+                  </button>
+                </div>
+
+                {/* Resolution Badge */}
+                {isDspManaged && (
+                  <div
+                    className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-4 text-center uppercase now-playing-badge"
+                    style={{ color: '#9b59b6' }}
+                  >
+                    {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
+                  </div>
+                )}
+
+                {/* Volume */}
+                <div className="w-full max-w-[240px] mx-auto flex items-center gap-3 px-4 py-2">
+                  <Volume2 size={14} style={{ color: '#ffffff' }} />
+                  <div className="flex-1 h-4 bg-gray-800/80 rounded-full relative border-2 border-white/30">
+                    <div className="absolute left-0 top-0 h-full bg-gray-400 rounded-full" style={{ width: `${volume}%` }} />
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 bg-gray-300 rounded-full shadow-xl border-4 border-gray-800"
+                      style={{ left: `${volume}%` }}
+                    />
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={volume}
+                      onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </div>
+                  <Volume2 size={14} style={{ color: '#ffffff' }} />
+                </div>
+                {nowPlaying.device && (
+                  <div className="mt-4 text-center animate-in fade-in duration-700 delay-150">
+                    <span className="text-[10px] text-white/30 font-black uppercase tracking-[0.25em]">{nowPlaying.device}</span>
+                  </div>
+                )}
+              </div>
             </div>
-
-
-            {/* Controls Section - Floating, narrower width */}
-            <div className="w-full max-w-[280px] mx-auto">
-              {/* Progress Bar */}
-              <div className="w-full mx-auto mb-4 md:mb-6 now-playing-progress">
-                <div className="relative h-4 w-full bg-gray-800/80 rounded-full cursor-pointer border-2 border-white/30">
-                  {/* Progress fill */}
-                  <div
-                    className="absolute left-0 top-0 h-full bg-cyan-400 rounded-full"
-                    style={{ width: `${nowPlaying.duration > 0 ? (Math.min(currentTime, nowPlaying.duration) / nowPlaying.duration) * 100 : 0}%` }}
-                  />
-                  {/* Handle - positioned absolutely based on progress */}
-                  <div
-                    className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 bg-white rounded-full shadow-xl border-4 border-cyan-400"
-                    style={{ left: `${nowPlaying.duration > 0 ? (Math.min(currentTime, nowPlaying.duration) / nowPlaying.duration) * 100 : 0}%` }}
-                  />
-                  {/* Invisible Input Overlay for Interaction */}
-                  <input
-                    type="range"
-                    min={0}
-                    max={nowPlaying.duration || 100}
-                    step={1}
-                    value={currentTime}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                    onMouseDown={() => { isSeeking.current = true; }}
-                    onMouseUp={() => { isSeeking.current = false; }}
-                    onInput={(e) => setCurrentTime(Number(e.currentTarget.value))}
-                    onChange={(e) => handleSeek(Number(e.currentTarget.value))}
-                  />
-                </div>
-                <div className="flex justify-between mt-2 text-[10px] md:text-xs font-medium text-white/40 tabular-nums">
-                  <span>{formatTime(currentTime)}</span>
-                  <span>{formatTime(nowPlaying.duration)}</span>
-                </div>
-              </div>
-
-
-              <div className="flex items-center justify-center gap-6 mb-4 md:mb-8 now-playing-controls">
-                <button
-                  onClick={() => handleMediaControl('prev')}
-                  className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                  style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
-                >
-                  <SkipBack size={20} fill="currentColor" />
-                </button>
-                <button
-                  onClick={() => handleMediaControl('playpause')}
-                  className="rounded-full p-3 hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl"
-                  style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
-                >
-                  {nowPlaying.state === 'playing' ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
-                </button>
-                <button
-                  onClick={() => handleMediaControl('next')}
-                  className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                  style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
-                >
-                  <SkipForward size={20} fill="currentColor" />
-                </button>
-              </div>
-
-              {/* Resolution Badge / Separator */}
-              {isDspManaged && (
-                <div
-                  className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-4 text-center uppercase now-playing-badge"
-                  style={{ color: '#9b59b6' }}
-                >
-                  {isDspActive ? (sampleRate ? `${(sampleRate / 1000).toFixed(1)} kHz — ${bitDepth} bits` : 'Unknown') : 'Direct Mode'}
-                </div>
-              )}
-
-              {/* Volume */}
-              <div className="w-full max-w-[240px] mx-auto flex items-center gap-3 px-4 py-2">
-                <Volume2 size={14} style={{ color: '#ffffff' }} />
-                <div className="flex-1 h-4 bg-gray-800/80 rounded-full relative border-2 border-white/30">
-                  {/* Volume fill */}
-                  <div className="absolute left-0 top-0 h-full bg-gray-400 rounded-full" style={{ width: `${volume}%` }} />
-                  {/* Handle - positioned absolutely based on volume */}
-                  <div
-                    className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 bg-gray-300 rounded-full shadow-xl border-4 border-gray-800"
-                    style={{ left: `${volume}%` }}
-                  />
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={volume}
-                    onChange={(e) => handleVolumeChange(Number(e.target.value))}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                  />
-                </div>
-                <Volume2 size={14} style={{ color: '#ffffff' }} />
-              </div>
-              {nowPlaying.device && (
-                <div className="mt-4 text-center animate-in fade-in duration-700 delay-150">
-                  <span className="text-[10px] text-white/30 font-black uppercase tracking-[0.25em]">{nowPlaying.device}</span>
-                </div>
-              )}
-            </div>
-
           </div>
         </div>
       </div>
@@ -1495,7 +1551,7 @@ function AppContentInner() {
   const renderProcessingTools = () => {
 
     return (
-      <div className="flex-1 flex flex-col h-full min-h-0 bg-themed-deep overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 bg-themed-deep overflow-hidden">
         <div className="flex-1 flex flex-col h-full p-3 md:p-8 pt-14 md:pt-20 space-y-2 md:space-y-4 overflow-hidden">
 
           {/* 1. INTEGRATED PEQ EDITOR, ANALYZER & BANDS - Fills remaining space */}
@@ -1505,13 +1561,16 @@ function AppContentInner() {
                 <div className="w-2 h-2 rounded-full bg-accent-primary shadow-[0_0_10px_var(--glow-cyan)]" />
                 <span className="text-[10px] text-themed-muted font-black tracking-[0.3em] uppercase">PEQ Editor, Analyzer & Bands</span>
               </div>
-              <button
-                onClick={() => setActiveMode('playback')}
-                className="p-2 hover:bg-white/5 rounded-lg transition-colors text-themed-muted hover:text-white"
-                title="Close DSP Settings"
-              >
-                <X size={20} />
-              </button>
+              {/* Only show close button if NOT in a standalone layout (where activeMode is 'playback' or managed by StandaloneLayout) */}
+              {activeMode === 'playback' && (
+                <button
+                  onClick={() => setActiveMode('playback')}
+                  className="p-2 hover:bg-white/5 rounded-lg transition-colors text-themed-muted hover:text-white"
+                  title="Close DSP Settings"
+                >
+                  <X size={20} />
+                </button>
+              )}
             </div>
 
             <div className="flex-1 flex flex-col gap-6 md:gap-10 min-h-0 overflow-hidden">
@@ -1665,26 +1724,92 @@ function AppContentInner() {
             console.log('Rendering mobile playback');
             return renderNowPlaying();
           case 'processing':
-            console.log('Rendering mobile processing');
-            return renderProcessingTools();
+            return (
+              <StandaloneLayout
+                title="DSP Processing"
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={handleMediaControl}
+                onBackToPlayback={() => setActiveMode('playback')}
+                onArtworkClick={() => setActiveMode('playback')}
+                resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              >
+                {renderProcessingTools()}
+              </StandaloneLayout>
+            );
           case 'lyrics':
-            console.log('Rendering mobile lyrics');
-            return <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />;
+            return (
+              <StandaloneLayout
+                title="Lyrics"
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={handleMediaControl}
+                onBackToPlayback={() => setActiveMode('playback')}
+                onArtworkClick={() => setActiveMode('playback')}
+                resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              >
+                <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />
+              </StandaloneLayout>
+            );
           case 'info':
-            console.log('Rendering mobile info with ArtistInfo');
-            return <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />;
+            return (
+              <StandaloneLayout
+                title="Music Info"
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={handleMediaControl}
+                onBackToPlayback={() => setActiveMode('playback')}
+                onArtworkClick={() => setActiveMode('playback')}
+                resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              >
+                <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />
+              </StandaloneLayout>
+            );
           case 'navigation':
-            console.log('Rendering mobile navigation with SimpleMusicNavigationView');
-            return <SimpleMusicNavigationView />;
+            return (
+              <StandaloneLayout
+                title="Music Explorer"
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={handleMediaControl}
+                onBackToPlayback={() => setActiveMode('playback')}
+                onArtworkClick={() => setActiveMode('playback')}
+                resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              >
+                <SimpleMusicNavigationView />
+              </StandaloneLayout>
+            );
           case 'queue':
-            console.log('Rendering mobile queue');
-            return <PlayQueue queue={queue} mediaSource={mediaSource} />;
+            return (
+              <StandaloneLayout
+                title="Play Queue"
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={handleMediaControl}
+                onBackToPlayback={() => setActiveMode('playback')}
+                onArtworkClick={() => setActiveMode('playback')}
+                resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              >
+                <PlayQueue queue={queue} mediaSource={mediaSource} />
+              </StandaloneLayout>
+            );
           case 'history':
-            console.log('Rendering mobile history');
-            return <History />;
+            return (
+              <StandaloneLayout
+                title="History"
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={handleMediaControl}
+                onBackToPlayback={() => setActiveMode('playback')}
+                onArtworkClick={() => setActiveMode('playback')}
+                resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              >
+                <History />
+              </StandaloneLayout>
+            );
           case 'visualization':
             console.log('Rendering mobile visualization');
-            return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} dynamicColor={dynamicBgColor} />;
+            return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} dynamicColor={dynamicBgColor} onArtworkClick={() => setActiveMode('playback')} onBackToPlayback={() => setActiveMode('playback')} onTransport={handleMediaControl} />;
           default:
             console.log('Rendering mobile default (playback)');
             return renderNowPlaying();
@@ -1707,91 +1832,182 @@ function AppContentInner() {
         );
       }
 
-      // Visualization - Fullscreen mode (no split panel)
-      if (activeMode === 'visualization') {
-        console.log('Rendering desktop visualization mode');
-        return <VisualizationPage isRunning={isRunning} wsUrl={getActiveWsUrl(backend)} nowPlaying={nowPlaying} resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)} dynamicColor={dynamicBgColor} />;
-      }
-
-      // Navigation - Fullscreen mode (no split panel)
-      if (activeMode === 'navigation') {
-        console.log('Rendering desktop navigation mode with SimpleMusicNavigationView');
-        return <SimpleMusicNavigationView />;
-      }
-
-      console.log('Rendering desktop panel layout');
-      return (
-        <Group orientation="horizontal" className="h-full w-full" onLayoutChange={onLayoutChange}>
-          <Panel defaultSize={panelSizes[0]} minSize={30} id="now-playing">
-            <div
-              className="h-full w-full cursor-pointer"
-              onClick={(e) => {
-                // Don't navigate if clicking on buttons, inputs, or signal path elements
-                const target = e.target as HTMLElement;
-                const clickedInteractive = target.closest('button, input, a, [role="button"], .signal-path-popover');
-                if (!clickedInteractive) {
-                  setActiveMode('playback');
-                }
+      switch (activeMode) {
+        case 'processing':
+          return (
+            <StandaloneLayout
+              title="DSP Processing"
+              nowPlaying={nowPlaying}
+              isRunning={isRunning}
+              onTransport={handleMediaControl}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => {
+                console.log('App: Desktop Artwork Click -> playback');
+                setActiveMode('playback');
               }}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
             >
-              {renderNowPlaying()}
-            </div>
-          </Panel>
-          <Separator className="w-1 bg-themed-deep hover:bg-accent-primary/20 cursor-col-resize mx-0.5 rounded-full flex items-center justify-center transition-colors">
-            <div className="w-1 h-12 bg-themed-medium rounded-full" />
-          </Separator>
-          <Panel defaultSize={panelSizes[1]} minSize={25} id="secondary">
-            <div ref={secondaryContainerRef} className="h-full w-full flex flex-col pt-8 px-4 pb-4 lg:pt-10 lg:px-6 lg:pb-6">
-              {/* 3. LYRICS/QUEUE/HISTORY/PROCESSING - Based on activeMode */}
-              {activeMode === 'processing' && renderProcessingTools()}
-              {activeMode === 'lyrics' && <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />}
-              {activeMode === 'info' && <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />}
-              {activeMode === 'queue' && <PlayQueue queue={queue} mediaSource={mediaSource} />}
-              {activeMode === 'history' && <History />}
-            </div>
-          </Panel>
-        </Group>
-      );
-    } catch (error) {
-      console.error('Error in renderLayout:', error);
-      return (
-        <div className="p-8 bg-red-100 border border-red-300 rounded-lg">
-          <h2 className="text-xl font-bold text-red-800 mb-4">Layout Error</h2>
-          <p className="text-red-700">Error rendering layout: {error instanceof Error ? error.message : 'Unknown error'}</p>
-        </div>
-      );
+              {renderProcessingTools()}
+            </StandaloneLayout>
+          );
+        case 'lyrics':
+          return (
+            <StandaloneLayout
+              title="Lyrics"
+              nowPlaying={nowPlaying}
+              isRunning={isRunning}
+              onTransport={handleMediaControl}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => {
+                console.log('App: Desktop Artwork Click -> playback');
+                setActiveMode('playback');
+              }}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+            >
+              <Lyrics lyrics={lyrics} trackInfo={{ track: nowPlaying.track, artist: nowPlaying.artist }} />
+            </StandaloneLayout>
+          );
+        case 'info':
+          return (
+            <StandaloneLayout
+              title="Music Info"
+              nowPlaying={nowPlaying}
+              isRunning={isRunning}
+              onTransport={handleMediaControl}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => {
+                console.log('App: Desktop Artwork Click -> playback');
+                setActiveMode('playback');
+              }}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+            >
+              <ArtistInfo artist={nowPlaying.artist || ''} album={nowPlaying.album || ''} />
+            </StandaloneLayout>
+          );
+        case 'navigation':
+          return (
+            <StandaloneLayout
+              title="Music Explorer"
+              nowPlaying={nowPlaying}
+              isRunning={isRunning}
+              onTransport={handleMediaControl}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => {
+                console.log('App: Desktop Artwork Click -> playback');
+                setActiveMode('playback');
+              }}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+            >
+              <SimpleMusicNavigationView />
+            </StandaloneLayout>
+          );
+        case 'queue':
+          return (
+            <StandaloneLayout
+              title="Play Queue"
+              nowPlaying={nowPlaying}
+              isRunning={isRunning}
+              onTransport={handleMediaControl}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => {
+                console.log('App: Desktop Artwork Click -> playback');
+                setActiveMode('playback');
+              }}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+            >
+              <PlayQueue queue={queue} mediaSource={mediaSource} />
+            </StandaloneLayout>
+          );
+        case 'history':
+          return (
+            <StandaloneLayout
+              title="History"
+              nowPlaying={nowPlaying}
+              isRunning={isRunning}
+              onTransport={handleMediaControl}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => {
+                console.log('App: Desktop Artwork Click -> playback');
+                setActiveMode('playback');
+              }}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+            >
+              <History />
+            </StandaloneLayout>
+          );
+        case 'visualization':
+          return (
+            <VisualizationPage
+              isRunning={isRunning}
+              wsUrl={getActiveWsUrl(backend)}
+              nowPlaying={nowPlaying}
+              resolvedArtworkUrl={resolveArtworkUrl(nowPlaying.artworkUrl, artworkRetryKey)}
+              dynamicColor={dynamicBgColor}
+              onBackToPlayback={() => setActiveMode('playback')}
+              onArtworkClick={() => setActiveMode('playback')}
+              onTransport={handleMediaControl}
+            />
+          );
+        default:
+          return renderNowPlaying();
+      }
+    } catch (err) {
+      console.error('Render Layout Error:', err);
+      return <div className="p-4 text-red-500">Layout Error</div>;
     }
   };
 
+  // --------------------------------------------------------------------------------
+  // MAIN RENDER
+  // --------------------------------------------------------------------------------
   return (
     <div
-      className="flex flex-col h-screen w-full bg-themed-deep text-themed-primary overflow-hidden"
-      style={{ backgroundColor: 'var(--bg-app)' }}
+      className="h-[100dvh] w-full bg-black text-white font-sans overflow-hidden select-none relative flex flex-col"
+      onMouseDown={handleUserInteraction}
+      onTouchStart={handleBackgroundInteraction}
+      onClick={handleBackgroundInteraction}
     >
-      {/* FLOATING MENU BUTTON - Safe area padding for mobile */}
-      <button
-        ref={menuButtonRef}
-        onClick={() => setMenuOpen(!menuOpen)}
-        className="fixed top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] p-3 rounded-xl shadow-xl hover:opacity-80 transition-all active:scale-95"
-        style={{
-          backgroundColor: 'transparent',
-          color: 'white',
-          border: 'none',
-          outline: 'none',
-          zIndex: 2147483647, // Maximum z-index value
-          position: 'fixed',
-          isolation: 'isolate'
-        }}
-      >
-        <Menu size={20} />
-      </button>
+      {/* Dynamic Background */}
+      <div className="absolute inset-0 z-0">
+        <div className="absolute inset-0 bg-black/60 z-10" />
+        {/* Helper for background artwork would go here */}
+      </div>
+
+
+
+      {/* --------------------------------------------------------------------------------
+          HEADER ICONS (Menu & Zone) - AUTO-HIDE WRAPPER
+      -------------------------------------------------------------------------------- */}
+      <div className={`absolute top-0 left-0 right-0 z-[60] transition-opacity duration-700 ease-in-out ${uiVisible || menuOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
+
+        {/* Menu Toggle */}
+        <button
+          onClick={(e) => { e.stopPropagation(); setMenuOpen(!menuOpen); }}
+          onTouchStart={(e) => e.stopPropagation()}
+          className="absolute top-[max(1.5rem,env(safe-area-inset-top))] left-[max(1.5rem,env(safe-area-inset-left))] p-4 transition-opacity hover:opacity-80 active:opacity-60 cursor-pointer flex items-center justify-center border-none outline-none bg-transparent"
+          style={{
+            backgroundColor: 'transparent',
+            border: 'none',
+            outline: 'none',
+            boxShadow: 'none',
+            appearance: 'none',
+            WebkitAppearance: 'none'
+          }}
+        >
+          <Menu size={24} strokeWidth={2.5} style={{ color: 'white' }} />
+        </button>
+
+        {/* Zone Selector Placeholder - assumed handled or in menu */}
+      </div>
 
       {/* DROPDOWN MENU */}
       {menuOpen && (
         <div
           ref={sideMenuRef}
-          onMouseDown={() => setMenuActivity(Date.now())}
-          className="fixed top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-[max(1rem,env(safe-area-inset-left))] border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300 bg-black/80 backdrop-blur-md"
+          onMouseDown={(e) => { e.stopPropagation(); setMenuActivity(Date.now()); }}
+          onTouchStart={(e) => { e.stopPropagation(); }}
+          onClick={(e) => { e.stopPropagation(); }}
+          className="fixed top-[max(5rem,calc(env(safe-area-inset-top)+4rem))] left-[max(1.5rem,env(safe-area-inset-left))] border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] w-72 overflow-hidden animate-in fade-in slide-in-from-top-4 duration-300 bg-black/80 backdrop-blur-md menu-container"
           style={{
             zIndex: 2147483647, // Maximum z-index value
             position: 'fixed',
@@ -1845,52 +2061,48 @@ function AppContentInner() {
                 <div className="space-y-0.5">
                   <button
                     onClick={() => { setActiveMode('playback'); setMenuOpen(false); }}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'playback' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
-                    style={activeMode === 'playback' ? { backgroundColor: 'white', color: 'black' } : {}}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'playback' ? 'text-white' : 'text-themed-muted hover:text-white'}`}
                   >
                     <div className="flex items-center gap-3">
-                      <Play size={16} style={activeMode === 'playback' ? { color: 'black' } : { color: '#606080' }} />
+                      <Play size={16} className={activeMode === 'playback' ? 'text-white' : 'text-themed-muted'} />
                       <span className="text-sm font-black">Playback Only</span>
                     </div>
-                    {activeMode === 'playback' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                    {activeMode === 'playback' && <Check size={14} strokeWidth={4} className="text-white" />}
                   </button>
 
                   {isDspManaged && (
                     <button
                       onClick={() => { setActiveMode('processing'); setMenuOpen(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'processing' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
-                      style={activeMode === 'processing' ? { backgroundColor: 'white', color: 'black' } : {}}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'processing' ? 'text-white' : 'text-themed-muted hover:text-white'}`}
                     >
                       <div className="flex items-center gap-3">
-                        <Activity size={16} style={activeMode === 'processing' ? { color: 'black' } : { color: '#606080' }} />
+                        <Activity size={16} className={activeMode === 'processing' ? 'text-white' : 'text-themed-muted'} />
                         <span className="text-sm font-black">DSP Control</span>
                       </div>
-                      {activeMode === 'processing' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                      {activeMode === 'processing' && <Check size={14} strokeWidth={4} className="text-white" />}
                     </button>
                   )}
 
                   <button
                     onClick={() => { setActiveMode('lyrics'); setMenuOpen(false); }}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'lyrics' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
-                    style={activeMode === 'lyrics' ? { backgroundColor: 'white', color: 'black' } : {}}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'lyrics' ? 'text-white' : 'text-themed-muted hover:text-white'}`}
                   >
                     <div className="flex items-center gap-3">
-                      <MessageCircle size={16} style={activeMode === 'lyrics' ? { color: 'black' } : { color: '#606080' }} />
+                      <MessageCircle size={16} className={activeMode === 'lyrics' ? 'text-white' : 'text-themed-muted'} />
                       <span className="text-sm font-black">Lyrics</span>
                     </div>
-                    {activeMode === 'lyrics' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                    {activeMode === 'lyrics' && <Check size={14} strokeWidth={4} className="text-white" />}
                   </button>
 
                   <button
                     onClick={() => { setActiveMode('info'); setMenuOpen(false); }}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'info' ? 'shadow-xl scale-[1.02]' : 'text-themed-muted hover:text-white hover:bg-white/5'}`}
-                    style={activeMode === 'info' ? { backgroundColor: 'white', color: 'black' } : {}}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition-all ${activeMode === 'info' ? 'text-white' : 'text-themed-muted hover:text-white'}`}
                   >
                     <div className="flex items-center gap-3">
-                      <BookOpen size={16} style={activeMode === 'info' ? { color: 'black' } : { color: '#606080' }} />
+                      <BookOpen size={16} className={activeMode === 'info' ? 'text-white' : 'text-themed-muted'} />
                       <span className="text-sm font-black">Music Info</span>
                     </div>
-                    {activeMode === 'info' && <Check size={14} strokeWidth={4} style={{ color: 'black' }} />}
+                    {activeMode === 'info' && <Check size={14} strokeWidth={4} className="text-white" />}
                   </button>
 
                   {/* Music Explorer - Temporarily hidden until fully functional
@@ -2223,11 +2435,11 @@ function AppContentInner() {
         {renderLayout()}
       </div>
 
-      {/* Floating Media Source & Zone Selector (Bottom Left) */}
-      <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-[max(1.5rem,env(safe-area-inset-left))] z-50 flex flex-col-reverse items-start gap-4">
+      <div className={`fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-[max(1.5rem,env(safe-area-inset-left))] z-50 flex flex-col-reverse items-start gap-4 transition-opacity duration-700 ease-in-out ${uiVisible || sourcePopoverOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
         <button
           ref={sourceButtonRef}
-          onClick={() => setSourcePopoverOpen(!sourcePopoverOpen)}
+          onClick={(e) => { e.stopPropagation(); setSourcePopoverOpen(!sourcePopoverOpen); }}
+          onTouchStart={(e) => e.stopPropagation()}
           className="group p-4 rounded-full shadow-xl active:scale-95 transition-all"
           style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
           title="Direct Source"
@@ -2239,10 +2451,12 @@ function AppContentInner() {
           <div
             ref={sourceSelectorRef}
             onMouseDown={() => setSourceActivity(Date.now())}
-            className="flex items-end gap-3 animate-in fade-in zoom-in-95 slide-in-from-bottom-6 duration-300"
+            onTouchStart={(e) => e.stopPropagation()}
+            onMouseDownCapture={(e) => e.stopPropagation()}
+            className="flex items-end gap-3 animate-in fade-in zoom-in-95 slide-in-from-bottom-6 duration-300 popover-container"
           >
             {/* Unified Player Selection */}
-            <div className="bg-black border border-themed-medium rounded-xl shadow-2xl p-2.5 w-64 min-w-[260px]">
+            <div className="bg-black/80 backdrop-blur-md border border-themed-medium rounded-xl shadow-[0_20px_50px_rgba(0,0,0,1)] p-2.5 w-64 min-w-[260px]">
               <div className="px-3 pt-2 pb-2 text-[10px] text-themed-muted font-black uppercase tracking-[0.2em] border-b border-themed-subtle mb-1 flex items-center justify-between">
                 <span>Selección de Reproductor</span>
                 {mediaZones.length > 0 && <div className="w-1.5 h-1.5 rounded-full bg-accent-success shadow-[0_0_8px_var(--accent-success)]" />}
@@ -2273,28 +2487,7 @@ function AppContentInner() {
                   ))}
                 </div>
 
-                {/* 2. Streaming (ArtisNova Pi) */}
-                <div className="space-y-1">
-                  <div className="px-2 pb-1 text-[9px] text-accent-success/60 font-black uppercase tracking-widest">Streaming (Pi)</div>
-                  {mediaZones.filter(z => z.source === 'lms').map(zone => (
-                    <button
-                      key={zone.id}
-                      onClick={() => { selectZone(zone.id, zone.source); setSourcePopoverOpen(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-3 rounded-xl transition-all ${zone.active && mediaSource === 'lms' ? 'bg-accent-success/10 text-accent-success border border-accent-success/20' : 'hover:bg-white/5 text-themed-muted border border-transparent'}`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={`p-1.5 rounded-lg ${zone.active && mediaSource === 'lms' ? 'bg-accent-success/20' : 'bg-white/5'}`}>
-                          <Activity size={14} />
-                        </div>
-                        <div className="flex flex-col items-start text-left">
-                          <span className="text-xs font-bold leading-none mb-1">{zone.name}</span>
-                          <span className="text-[8px] font-black uppercase tracking-widest opacity-50">Spotify / Qobuz / AirPlay</span>
-                        </div>
-                      </div>
-                      {zone.active && mediaSource === 'lms' && <Check size={14} strokeWidth={4} />}
-                    </button>
-                  ))}
-                </div>
+
 
                 {/* 3. Roon Zones */}
                 <div className="space-y-1">
@@ -2397,8 +2590,8 @@ function AppContentInner() {
         </div>,
         document.body
       )}
-    </div >
+    </div>
   );
-}
+};
 
 export default App;

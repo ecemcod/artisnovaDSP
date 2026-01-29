@@ -29,12 +29,12 @@ class LrcLibConnector {
     }
 
     normalizeMetadata(artist, track) {
-        if (!artist || !track) return { artist: '', track: '' };
+        if (!track) return { artist: '', track: '' };
 
-        let cleanArtist = artist
+        let cleanArtist = artist ? artist
             .split(/[\\\/,;&]/)[0]
             .replace(/\s+(feat|ft)\.?\s+.*/i, '')
-            .trim();
+            .trim() : '';
 
         let cleanTrack = track
             .replace(/\s*\((Live|Remastered|Deluxe|Deluxe Edition|Special Edition|Expanded|Anniversary|Remaster|Bonus Track Version|Radio Edit|Edit|Duet With.*)\)\s*$/i, '')
@@ -49,35 +49,37 @@ class LrcLibConnector {
         const { artist: cleanArtist, track: cleanTrack } = this.normalizeMetadata(artistName, trackName);
         console.log(`LrcLibConnector: Checking lyrics for "${cleanArtist}" - "${cleanTrack}"`);
 
-        // Strategy A1: Direct Get with All Data
-        console.log(`LrcLibConnector: Strategy A1 (Get with Album)`);
-        let data = await this.makeRequest('get', {
-            artist_name: cleanArtist,
-            track_name: cleanTrack,
-            album_name: albumName
-        });
-
-        if (data && (data.plainLyrics || data.syncedLyrics)) {
-            return this.transformLyrics(data);
-        }
-
-        // Strategy A2: Direct Get without Album (More flexible)
-        if (albumName) {
-            console.log(`LrcLibConnector: Strategy A2 (Get without Album)`);
-            data = await this.makeRequest('get', {
+        // Strategy A1: Direct Get with All Data (Requires Artist)
+        if (cleanArtist) {
+            console.log(`LrcLibConnector: Strategy A1 (Get with Album)`);
+            let data = await this.makeRequest('get', {
                 artist_name: cleanArtist,
-                track_name: cleanTrack
+                track_name: cleanTrack,
+                album_name: albumName
             });
 
             if (data && (data.plainLyrics || data.syncedLyrics)) {
                 return this.transformLyrics(data);
+            }
+
+            // Strategy A2: Direct Get without Album (More flexible)
+            if (albumName) {
+                console.log(`LrcLibConnector: Strategy A2 (Get without Album)`);
+                data = await this.makeRequest('get', {
+                    artist_name: cleanArtist,
+                    track_name: cleanTrack
+                });
+
+                if (data && (data.plainLyrics || data.syncedLyrics)) {
+                    return this.transformLyrics(data);
+                }
             }
         }
 
         // Strategy B: Search with Normalized Concatenation
         console.log(`LrcLibConnector: Trying Strategy B (Search Normalized)`);
         let searchData = await this.makeRequest('search', {
-            q: `${cleanArtist} ${cleanTrack}`.replace(/\//g, ' ')
+            q: (cleanArtist ? `${cleanArtist} ${cleanTrack}` : cleanTrack).replace(/\//g, ' ')
         });
 
         if (Array.isArray(searchData) && searchData.length > 0) {

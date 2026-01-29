@@ -1,12 +1,12 @@
 import React from 'react';
-import axios from 'axios';
 import VUMeter from './VUMeter';
 import { type Skin } from './SkinSelector';
 import RTA, { type RTASkin } from './RTA';
 import { AppStorage } from '../utils/storage';
-import { Gauge, Activity, Play, Pause, SkipBack, SkipForward, Palette } from 'lucide-react';
+import { Gauge, Activity, Palette } from 'lucide-react';
 
-const API_Base = window.location.protocol + '//' + window.location.hostname + ':3000/api';
+import PlaybackFooter from './PlaybackFooter';
+
 
 interface Props {
     isRunning: boolean;
@@ -14,12 +14,18 @@ interface Props {
     nowPlaying: any;
     resolvedArtworkUrl?: string | null;
     dynamicColor?: string | null;
+    onTransport: (action: 'playpause' | 'next' | 'prev') => void;
+    onBackToPlayback?: () => void;
+    onArtworkClick?: () => void;
 }
 
-
-
-const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, resolvedArtworkUrl, dynamicColor }) => {
+const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, resolvedArtworkUrl, dynamicColor, onTransport, onBackToPlayback, onArtworkClick }) => {
     const [mode, setMode] = React.useState<'vu' | 'rta'>(() => {
+        const params = new URLSearchParams(window.location.search);
+        const urlVizMode = params.get('vizMode') as 'vu' | 'rta';
+        if (urlVizMode && ['vu', 'rta'].includes(urlVizMode)) {
+            return urlVizMode;
+        }
         return (AppStorage.getItem('artisNovaDSP_viz_mode') as 'vu' | 'rta') || 'vu';
     });
     const [skin, setSkin] = React.useState<Skin>(() => {
@@ -33,85 +39,18 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
     });
     const [isFrozen, setIsFrozen] = React.useState(false);
 
-    // Save settings on change
     React.useEffect(() => {
-        AppStorage.setItem('artisNovaDSP_viz_mode', mode);
+        const params = new URLSearchParams(window.location.search);
+        if (!params.get('vizMode')) {
+            AppStorage.setItem('artisNovaDSP_viz_mode', mode);
+        }
         AppStorage.setItem('artisNovaDSP_viz_skin', skin);
         AppStorage.setItem('artisNovaDSP_viz_rta_skin', rtaSkin);
         AppStorage.setItem('artisNovaDSP_viz_stereo', isAsymmetric.toString());
     }, [mode, skin, rtaSkin, isAsymmetric]);
 
-    // Restoration of detailed info display
-    const renderTrackInfo = () => {
-        if (!nowPlaying || !nowPlaying.track) return null;
-
-        return (
-            <div className="flex flex-col items-center text-center w-full max-w-4xl px-4 pointer-events-auto">
-                <div className="text-[10px] font-black text-accent-primary uppercase tracking-[0.4em] mb-4 opacity-70">Now Playing</div>
-
-                <h2 className="text-3xl md:text-5xl font-bold text-white leading-tight line-clamp-2 drop-shadow-lg mb-3">
-                    {nowPlaying.track}
-                </h2>
-
-                <p className="text-lg md:text-2xl text-white/60 font-medium line-clamp-1 mb-8 max-w-[90vw]">
-                    <span className="font-bold text-white/80">{nowPlaying.album || 'No Album Info'} {nowPlaying.year ? `(${nowPlaying.year})` : ''}</span> — {nowPlaying.artist || 'Not Connected'}
-                </p>
-
-                {/* Transport Controls - EXACT Match with App.tsx */}
-                <div className="flex items-center justify-center gap-6 mb-10">
-                    <button
-                        onClick={() => handleTransport('prev')}
-                        className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
-                    >
-                        <SkipBack size={20} fill="currentColor" />
-                    </button>
-                    <button
-                        onClick={() => handleTransport('playpause')}
-                        className="rounded-full p-3 hover:opacity-80 hover:scale-105 active:scale-95 transition-all shadow-xl"
-                        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
-                    >
-                        {nowPlaying.state === 'playing' ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
-                    </button>
-                    <button
-                        onClick={() => handleTransport('next')}
-                        className="rounded-full p-2 hover:opacity-80 transition-all active:scale-95"
-                        style={{ backgroundColor: 'transparent', color: 'white', border: 'none', outline: 'none' }}
-                    >
-                        <SkipForward size={20} fill="currentColor" />
-                    </button>
-                </div>
-
-                {/* Metadata badges - Matching Now Playing screen style */}
-                <div className="flex flex-col items-center justify-center gap-4">
-                    {nowPlaying.style && (
-                        <div className="animate-in fade-in slide-in-from-top-1 duration-500">
-                            <span className="inline-block px-10 py-1.5 rounded-full bg-white text-black text-[10px] font-black uppercase border border-white/20 shadow-xl backdrop-blur-md">
-                                {nowPlaying.style}
-                            </span>
-                        </div>
-                    )}
-                    <div className="text-[10px] font-black tracking-[0.3em] leading-none select-none py-2 text-center uppercase" style={{ color: '#9b59b6' }}>
-                        {isRunning ? (nowPlaying.sampleRate ? `${(nowPlaying.sampleRate / 1000).toFixed(1)} kHz — ${nowPlaying.bitDepth} bits` : '96.0 kHz — 24 bits') : 'Direct Mode'}
-                    </div>
-                </div>
-            </div>
-        );
-    };
-
-    const handleTransport = async (action: 'playpause' | 'next' | 'prev') => {
-        try {
-            await axios.post(`${API_Base}/media/${action}?source=roon`); // Default to Roon as per use case
-        } catch (e) {
-            console.error('Transport failed', e);
-        }
-    };
-
     return (
-        <div
-            className="relative h-[100dvh] w-full bg-black flex flex-col items-center overflow-hidden"
-            style={{ paddingTop: '60px', paddingBottom: 'env(safe-area-inset-bottom)' }}
-        >
+        <div className="relative h-[100dvh] w-full bg-black flex flex-col items-center overflow-hidden">
             {/* Background Artwork Blur */}
             <div className="absolute inset-0 z-0">
                 {resolvedArtworkUrl && (
@@ -125,7 +64,7 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
             </div>
 
             {/* Mode & Skin Controls Container */}
-            <div className="w-full px-4 flex flex-col items-center gap-4 z-50">
+            <div className="w-full px-4 pt-[60px] flex flex-col items-center gap-4 z-50">
                 {/* Mode Switcher */}
                 <div className="bg-black/80 backdrop-blur-2xl rounded-xl p-1 border border-white/5 flex gap-1 shadow-2xl scale-100 md:scale-90">
                     <button
@@ -193,7 +132,6 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                             </div>
                         </div>
 
-                        {/* Stereo Toggle Switch */}
                         <button
                             onClick={() => setIsAsymmetric(!isAsymmetric)}
                             className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border transition-all duration-300 font-bold text-[9px] uppercase tracking-[0.25em] ${isAsymmetric ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 shadow-[0_0_20px_rgba(34,211,238,0.2)]' : 'bg-white/5 text-white/40 border-white/10 hover:border-white/20'}`}
@@ -201,7 +139,6 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
                             Stereo
                         </button>
 
-                        {/* Freeze Toggle Switch */}
                         <button
                             onClick={() => setIsFrozen(!isFrozen)}
                             className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border transition-all duration-300 font-bold text-[9px] uppercase tracking-[0.25em] ${isFrozen ? 'bg-accent-primary/20 text-accent-primary border-accent-primary/30 shadow-[0_0_20px_rgba(34,211,238,0.2)]' : 'bg-white/5 text-white/40 border-white/10 hover:border-white/20'}`}
@@ -217,18 +154,22 @@ const VisualizationPage: React.FC<Props> = ({ isRunning, wsUrl, nowPlaying, reso
             <div className="flex-1 w-full flex items-center justify-center p-4 md:p-6 relative z-20 min-h-0 bg-black/40 overflow-visible">
                 <div className="w-full h-full max-w-7xl max-h-[55vh] flex items-center justify-center overflow-visible">
                     {mode === 'vu' ? (
-                        <VUMeter isRunning={isRunning} wsUrl={wsUrl} skin={skin} customColor={dynamicColor} className="w-full h-full" />
+                        <VUMeter isRunning={isRunning} wsUrl={wsUrl || ''} skin={skin} customColor={dynamicColor} className="w-full h-full" />
                     ) : (
-                        <RTA isRunning={isRunning} wsUrl={wsUrl} skin={rtaSkin} isAsymmetric={isAsymmetric} isFrozen={isFrozen} customColor={dynamicColor} />
+                        <RTA isRunning={isRunning} wsUrl={wsUrl || ''} skin={rtaSkin} isAsymmetric={isAsymmetric} isFrozen={isFrozen} customColor={dynamicColor} />
                     )}
                 </div>
             </div>
 
-            {/* Footer Section (Information & Transport) - Solid background to prevent overlap */}
-            <div className="w-full pb-10 pt-8 px-4 flex flex-col items-center justify-center bg-[#000000] border-t border-white/5 relative z-40 shadow-[0_-30px_60px_rgba(0,0,0,0.8)]">
-                {renderTrackInfo()}
-                <div className="h-1 w-20 bg-white/5 rounded-full mt-8 opacity-10" />
-            </div>
+            {/* Footer Section (Information & Transport) */}
+            <PlaybackFooter
+                nowPlaying={nowPlaying}
+                isRunning={isRunning}
+                onTransport={onTransport}
+                onBackToPlayback={onBackToPlayback}
+                onArtworkClick={onArtworkClick}
+                resolvedArtworkUrl={resolvedArtworkUrl}
+            />
         </div>
     );
 };

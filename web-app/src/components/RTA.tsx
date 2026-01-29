@@ -19,10 +19,11 @@ const PALETTES: Record<RTASkin, string[]> = {
     soft: ['#332244', '#6644aa', '#9988ff'],
     neon: ['#ff00ff', '#00ff00', '#ffff00'],
     sunset: ['#ff4e50', '#f9d423', '#8e44ad'],
-    forest: ['#004d00', '#2ecc71', '#a2d149'],
-    ocean: ['#014b7c', '#00a8cc', '#c1e3ed'],
-    gold: ['#784c01', '#d4af37', '#fcf6ba'],
-    cyber: ['#fff000', '#ed008c', '#00aeef']
+    forest: ['#2d6a4f', '#40916c', '#52b788', '#74c69d', '#95d5b2'],
+    ocean: ['#03045e', '#023e8a', '#0077b6', '#0096c7', '#48cae4'],
+    gold: ['#5c4d00', '#857000', '#ad9200', '#d6b600', '#ffdb0d'],
+    cyber: ['#2b0057', '#5603ad', '#8338ec', '#bc00dd', '#ff006e'],
+    dynamic: ['#ffffff', '#cccccc', '#999999', '#666666', '#333333'] // Placeholder for dynamic
 };
 
 const FREQUENCIES = [20, 25, 31, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, '1k', '1.2k', '1.6k', '2k', '2.5k', '3.1k', '4k', '5k', '6.3k', '8k', '10k', '12.5k', '16k', '20k'];
@@ -68,7 +69,7 @@ const RTA: React.FC<Props> = ({ isRunning, skin = 'blue', isAsymmetric = false, 
             const host = isDev ? `${window.location.hostname}:3001` : window.location.host;
             const url = `${protocol}//${host}/ws`;
 
-            console.log(`RTA: Connecting to ${isDev ? 'backend' : 'proxy'}: ${url}`);
+            console.log(`RTA: Connecting to: ${url}`);
             const ws = new WebSocket(url);
             wsRef.current = ws;
 

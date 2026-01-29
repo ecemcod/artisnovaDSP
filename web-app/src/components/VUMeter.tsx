@@ -66,7 +66,7 @@ const VUMeter: React.FC<Props> = ({ isRunning, wsUrl = 'ws://localhost:5005', on
         const host = isDev ? `${window.location.hostname}:3001` : window.location.host;
         const currentUrl = `${protocol}//${host}/ws/levels`;
 
-        console.log(`VUMeter: Connecting to ${isDev ? 'backend' : 'proxy'}: ${currentUrl}`);
+        console.log(`VUMeter: Connecting to: ${currentUrl}`);
 
         try {
             const ws = new WebSocket(currentUrl);

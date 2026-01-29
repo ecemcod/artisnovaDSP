@@ -1,16 +1,66 @@
 {
   "running": true,
   "autoRestart": false,
-  "bypass": true,
-  "presetName": "BYPASS",
+  "bypass": false,
+  "presetName": "Manual",
   "lastFilterData": {
-    "filters": [],
-    "preamp": 0
+    "filters": [
+      {
+        "id": "8m13fd0h0",
+        "type": "Peaking",
+        "freq": 95,
+        "gain": -5.5,
+        "q": 1,
+        "enabled": true
+      },
+      {
+        "id": "015bvx3id",
+        "type": "Highshelf",
+        "freq": 10000,
+        "gain": 2,
+        "q": 0.707,
+        "enabled": true
+      },
+      {
+        "id": "v3utp8a7z",
+        "type": "Lowshelf",
+        "freq": 60,
+        "gain": 2.5,
+        "q": 0.707,
+        "enabled": true
+      },
+      {
+        "id": "fuydilo76",
+        "type": "Peaking",
+        "freq": 160,
+        "gain": 1.5,
+        "q": 0.9,
+        "enabled": true
+      },
+      {
+        "id": "0w8b1ojxj",
+        "type": "Peaking",
+        "freq": 800,
+        "gain": 1,
+        "q": 1,
+        "enabled": true
+      },
+      {
+        "id": "4tj4bkv36",
+        "type": "Peaking",
+        "freq": 3200,
+        "gain": 1.2,
+        "q": 1,
+        "enabled": true
+      }
+    ],
+    "preamp": -3
   },
   "lastOptions": {
     "sampleRate": 96000,
-    "bypass": true,
-    "presetName": "BYPASS",
+    "bitDepth": 24,
+    "backend": "local",
+    "bypass": false,
     "format": "S32LE",
     "isFallback": true
   }

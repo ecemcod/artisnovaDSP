@@ -41,6 +41,7 @@ class RoonController {
         this.currentAlbum = null;
         this.checkTimeout = null;
         this.isCheckingRate = false;
+        this.lastKnownZones = []; // PERSISTENCE: Keep zones during brief disconnections
     }
 
     init(callback) {
@@ -133,11 +134,25 @@ class RoonController {
                         // Scan for active sample rate (non-blocking to prevent UI delay)
                         this._scanForActiveSampleRate();
 
+                        // PERSISTENCE: Update the backup list
+                        this.lastKnownZones = this.getZones();
                         this._notifyStatus();
                     } else if (status === "NetworkError" || status === "Lost" || status === "Disconnected") {
                         console.warn(`RoonController: Zone subscription error: ${status}. Implementing ULTRA-STABLE recovery...`);
-                        // Clear zones temporarily to indicate connection loss
-                        this.zones.clear();
+
+                        // GRACE PERIOD: Don't clear zones immediately. Wait 15s to see if it reconnects.
+                        if (!this._zoneLostGraceTimeout) {
+                            this._zoneLostGraceTimeout = setTimeout(() => {
+                                if (this.zones.size > 0 && (!this.transport || this.isPaired === false)) {
+                                    console.log('RoonController: Zone grace period ended without recovery, clearing zones...');
+                                    this.zones.clear();
+                                    this._notifyStatus();
+                                }
+                                this._zoneLostGraceTimeout = null;
+                            }, 15000);
+                        }
+
+                        // Remove this.zones.clear(); // Removed to prevent flickering
                         this._notifyStatus();
 
                         // ULTRA-CONSERVATIVE recovery approach - wait much longer before attempting
@@ -315,6 +330,14 @@ class RoonController {
             state: z.state,
             active: z.zone_id === this.activeZoneId
         }));
+
+        // FALLBACK: If live zones are empty but we have a core connection (or are reconnecting),
+        // use the last known list to prevent UI flickers.
+        if (zoneList.length === 0 && this.lastKnownZones.length > 0) {
+            console.log(`RoonController: getZones returning ${this.lastKnownZones.length} cached zones (connection gap)`);
+            return this.lastKnownZones;
+        }
+
         console.log(`RoonController: getZones called. count=${zoneList.length}, active=${this.activeZoneId}`);
         return zoneList;
     }
@@ -347,7 +370,13 @@ class RoonController {
         // Subscribe to new queue
         this._subscribeQueue();
 
+        // PERSISTENCE: Immediately notify all clients of the change
         this._notifyStatus();
+
+        // Broadcast a full zones update to ensure all UI instances synchronize
+        if (this.onZonesChanged) {
+            this.onZonesChanged(this.getZones());
+        }
     }
 
     _attemptZoneRecovery() {
@@ -482,19 +511,51 @@ class RoonController {
     }
 
     getNowPlaying() {
-        if (!this.activeZoneId || !this.zones.has(this.activeZoneId)) {
-            console.log('Roon: No active zone or zone not found. Active ID:', this.activeZoneId);
+        let z = null;
+
+        // 1. Try to get live zone from map
+        if (this.activeZoneId && this.zones.has(this.activeZoneId)) {
+            z = this.zones.get(this.activeZoneId);
+            // Update cache
+            this.lastKnownActiveZone = z;
+        }
+        // 2. Fallback to cached zone if live connection is lost
+        else if (this.lastKnownActiveZone && this.activeZoneId === this.lastKnownActiveZone.zone_id) {
+            z = this.lastKnownActiveZone;
+            console.log('Roon: Using cached zone for metadata (Live connection lost or empty)');
+        }
+
+        if (!z) {
+            console.log('Roon: No active zone or zone not found in cache. Active ID:', this.activeZoneId);
+            // Final fallback: sticky state if we have absolutely no zone object
+            if (this.lastValidState && this.lastValidState.track !== 'Unknown Track') {
+                return { ...this.lastValidState, state: 'stopped' };
+            }
             return null;
         }
-        const z = this.zones.get(this.activeZoneId);
+
         const track = z.now_playing;
 
         if (!track) {
-            console.log('Roon: No track playing in zone', z.display_name);
+            // console.log('Roon: No track playing in zone', z.display_name);
+
+            // STICKY STATE: Only use persistent state if we are STOPPED or PAUSED or DISCONNECTED
+            // If we are 'playing' or 'buffering' but have no track, it means a NEW track is loading, so we must NOT show the old one.
+            const safeStates = ['stopped', 'paused', 'disconnected'];
+            if (safeStates.includes(z.state) && this.lastValidState && this.lastValidState.track !== 'Unknown Track') {
+                console.log('Roon: Using persistent last state during gap/stop/disconnected.');
+                return {
+                    ...this.lastValidState,
+                    state: z.state || 'stopped',
+                    position: 0,
+                    duration: this.lastValidState.duration
+                };
+            }
+
             return { state: z.state };
         }
 
-        console.log(`Roon Metadata[${z.display_name}]: ${track.three_line?.line1} - SignalPath: ${track.signal_path ? 'YES' : 'NO'} `);
+        // console.log(`Roon Metadata[${z.display_name}]: ${track.three_line?.line1} - SignalPath: ${track.signal_path ? 'YES' : 'NO'} `);
 
         // Try to extract year from line3 if it looks like "(2023)"
         let extractedYear = null;
@@ -503,24 +564,20 @@ class RoonController {
             if (match) extractedYear = match[1];
         }
 
-        // Extract the primary artist from the artist string (handle multiple artists separated by " / ")
+        // Extract the primary artist
         let primaryArtist = 'Unknown Artist';
         if (track.three_line?.line2?.trim()) {
             const artistString = track.three_line.line2.trim();
-            // Split by " / " and take the first (primary) artist
             const artists = artistString.split(' / ');
             primaryArtist = artists[0].trim();
-
-            console.log(`Roon: Extracted primary artist "${primaryArtist}" from "${artistString}"`);
         }
 
-        const artist = primaryArtist;
-        return {
+        const currentState = {
             state: z.state,
             track: track.three_line?.line1 || 'Unknown Track',
-            artist: artist,
+            artist: primaryArtist,
             album: track.three_line?.line3 || '',
-            year: extractedYear, // First attempt at Roon year
+            year: extractedYear,
             artworkUrl: track.image_key ? `/api/image/${track.image_key}` : null,
             duration: track.length || 0,
             position: track.seek_position || 0,
@@ -528,6 +585,11 @@ class RoonController {
             signalPath: track.signal_path,
             bitDepth: this._extractBitDepth(track.signal_path)
         };
+
+        // Update persistent state
+        this.lastValidState = currentState;
+
+        return currentState;
     }
 
     playQueueItem(queueItemId) {
@@ -573,13 +635,14 @@ class RoonController {
                 return res.status(404).json({ error: 'No Image Service' });
             }
 
+            console.log(`RoonController: Requesting image from Roon API for key: ${imageKey}`);
             imageService.get_image(imageKey, { format: "image/jpeg", width: 600, height: 600, scale: "fit" }, (err, contentType, data) => {
                 if (res.headersSent) return;
                 if (err) {
-                    console.error(`RoonController: getImage ERROR for key ${imageKey}: `, err);
+                    console.error(`RoonController: getImage Roon API ERROR for key ${imageKey}:`, err);
                     return res.status(404).end();
                 }
-                // console.log(`RoonController: getImage SUCCESS for key ${imageKey}`);
+                console.log(`RoonController: getImage SUCCESS from Roon API for key ${imageKey}, size: ${data ? data.length : 0} bytes`);
                 res.set("Content-Type", contentType);
                 // Enable aggressive caching for immutable image keys to fix flickering
                 res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
@@ -593,7 +656,10 @@ class RoonController {
 
     _notifyStatus() {
         if (this.statusCallback) {
-            this.statusCallback(this.getNowPlaying());
+            const info = this.getNowPlaying();
+            if (info) {
+                this.statusCallback(info);
+            }
         }
     }
 

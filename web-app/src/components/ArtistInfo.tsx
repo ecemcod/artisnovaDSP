@@ -109,7 +109,7 @@ const ArtistInfo: React.FC<Props> = ({ artist, album }) => {
         setError(null);
 
         try {
-            // Fetch enhanced Qobuz data directly from our fixed endpoint
+            console.log(`ArtistInfo: Requesting /api/media/artist-info for artist="${artist}", album="${album}"`);
             const res = await axios.get(`/api/media/artist-info`, {
                 params: { artist, album },
                 timeout: 10000
